@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the target architecture. The arbitrary-dimensional simplicial core, constrained topology refinements, boundary matrices, simplex subsets, cochain spaces, generic forms, and complete general Euclidean geometry are implemented. Metric DEC, numerical solvers, boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
+This document defines the target architecture. The arbitrary-dimensional simplicial core, constrained topology refinements, boundary matrices, simplex subsets, cochain spaces, generic forms, complete general Euclidean geometry, typed linear maps, and topological exterior derivative are implemented. Metric DEC, numerical solvers, boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
 
 [`roadmap.md`](roadmap.md) contains the implementation tasks. Architecture decisions and implementation status must not be mixed.
 
@@ -306,10 +306,17 @@ class LinearMap[
     @property
     def target(self) -> CochainSpace[K, TargetDegree]: ...
 
+    def matrix(self) -> csr_array: ...
+
     def apply[Semantics: FieldSemantics](
         self,
         value: Form[K, SourceDegree, Semantics],
     ) -> Form[K, TargetDegree, Semantics]: ...
+
+    def compose[InputDegree: int](
+        self,
+        before: LinearMap[K, InputDegree, SourceDegree],
+    ) -> LinearMap[K, InputDegree, TargetDegree]: ...
 ```
 
 An exterior derivative is a map:
@@ -318,18 +325,26 @@ An exterior derivative is a map:
 CochainSpace[K, k] -> CochainSpace[K, k + 1]
 ```
 
-The `k + 1` relation is checked when constructing the map at runtime. Downstream static checking compares the map's source and target degree parameters and the retained source/target space identities rather than attempting integer arithmetic.
+The implemented constructor accepts explicit spaces:
 
-The same model applies to:
+```python
+source = complex_.cochain_space(source_degree)
+target = complex_.cochain_space(target_degree)
+derivative = exterior_derivative(source, target)
+```
 
-- boundary;
-- coboundary/exterior derivative;
+The `k + 1` relation is checked when constructing the derivative at runtime. A bounded integer generic is a type parameter, not a value-level integer variable, and Python typing has no successor arithmetic over `Literal` types. In contrast, composition only requires equality of the intermediate category, which static generic unification expresses by reusing `SourceDegree` as `before`'s target degree. Runtime `same_space` validation then distinguishes equal-typed spaces from different complex instances. An explicitly typed `Literal[k]` preserves arbitrary fixed degrees such as `Literal[7] -> Literal[8]`; a calculated degree remains honestly typed as `int -> int`. Ty 0.0.32 widens a bare higher integer expression passed through a generic parameter. Existing 0/1/2 overloads retain ergonomic inference for common bare literals, while the generic fallback—not an overload expansion to a chosen maximum dimension—carries explicit arbitrary literals.
+
+The chain boundary remains `Complex.boundary_matrix(k)`. `LinearMap` currently models cochain maps, so boundary is not mislabeled as a map between `CochainSpace` values. The exterior derivative has sparse representation `boundary_matrix(k + 1).T`.
+
+The same explicit-space model will apply to:
+
 - Hodge star;
 - codifferential;
 - Laplacian;
 - restriction and prolongation maps.
 
-Sparse matrices are representations of these maps, not the public mathematical identity of the operator.
+Sparse matrices are representations of these maps, not the public mathematical identity of the operator. A complete `LinearMap` admits structurally valid, real, finite CSR data aligned to exact source/target sizes and owns a canonicalized float64 copy. `matrix()` makes allocation explicit by returning a caller-owned representation; `apply()` and `compose()` compute directly from private representations without copying operand matrices.
 
 ## Geometry Model
 
@@ -374,7 +389,7 @@ Both ordinary construction and `from_positions` statically require an actual fou
 
 Construction rejects affine degeneracy and any required public measure that is not representable. There is no speculative `GeometryUnknown`/`Nondegenerate` state axis: every returned value is complete. A future position-changing operation must call the same complete admission boundary and either return a valid `Geometry[K]` or raise `GeometryError`.
 
-Triangle normals, corner angles, and corner cotangents are dimension-specific deductions and are not fields on the general geometry value. They require separate constrained methods or complete computation products after a consumer is approved. Primal/dual DEC measure products remain owned by the operator layer rather than duplicated on geometry.
+Triangle normals, corner angles, and corner cotangents are dimension-specific deductions and are not fields on the general geometry value. They require separate constrained methods or complete computation products after a consumer is approved. Signed circumcentric dual measures are a general position-dependent deduction grouped as the pure `Geometry.circumcentric_dual_measures(degree)` method; Hodge ratios and later metric maps remain operator-layer constructions rather than geometry fields.
 
 An independently supplied intrinsic metric becomes a separate public concept only after a real caller needs intrinsic geometry without positions or multiple embeddings sharing one metric.
 

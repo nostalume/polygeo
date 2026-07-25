@@ -261,9 +261,21 @@ def test_cochain_spaces_and_forms_own_coefficients() -> None:
         CochainSpace(left, 3)
 
 
-def test_form_requires_finite_coefficients() -> None:
+def test_form_requires_real_finite_coefficients() -> None:
     space = Complex.from_maximal_simplices(_disk()).cochain_space(0)
     values = np.zeros(space.size)
     values[0] = np.nan
     with pytest.raises(SimplicialError):
         space.form(values, ORDINARY_FORM)
+
+    complex_values = np.ones(space.size, dtype=np.complex128) * (1.0 + 2.0j)
+    with pytest.raises(SimplicialError, match="real"):
+        space.form(complex_values, ORDINARY_FORM)
+
+    for unsupported in (
+        np.full(space.size, "coefficient", dtype=object),
+        np.full(space.size, object(), dtype=object),
+        np.full(space.size, 1.0 + 2.0j, dtype=object),
+    ):
+        with pytest.raises(SimplicialError, match="numeric"):
+            space.form(unsupported, ORDINARY_FORM)

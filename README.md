@@ -4,7 +4,7 @@ PolyGeo is a Python 3.14 reading implementation of discrete differential geometr
 
 ## Current status
 
-The implemented core includes arbitrary-dimensional simplicial topology and complete Euclidean geometry: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, cochain spaces, generic forms, owned positions, and scale-safe simplex measures. Metric DEC operators, solvers, boundary-value problems, surface-specific deductions, and mesh loading remain planned.
+The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, and the topological exterior derivative: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, cochain spaces, generic forms, typed linear maps, owned positions, and scale-safe simplex measures. Metric DEC operators, solvers, boundary-value problems, surface-specific deductions, and mesh loading remain planned.
 
 Previous topology/surface/dual owner-chain code was rejected and removed. No compatibility with that API is promised; later slices still require explicit approval.
 
@@ -64,6 +64,29 @@ triangle_areas = geometry.simplex_measures(2)
 ```
 
 `Geometry[K]` preserves the exact complex identity and supports any intrinsic dimension representable in its runtime ambient dimension. Triangle normals, corner angles, and cotangents remain separate constrained computations.
+
+## Topological exterior derivative
+
+```python
+from polygeo import exterior_derivative
+
+zero_space = raw.cochain_space(0)
+one_space = raw.cochain_space(1)
+d0 = exterior_derivative(zero_space, one_space)
+
+zero_form = zero_space.form(
+    np.arange(zero_space.size, dtype=np.float64),
+    ORDINARY_FORM,
+)
+one_form = d0.apply(zero_form)
+
+two_space = raw.cochain_space(2)
+d1 = exterior_derivative(one_space, two_space)
+zero_map = d1.compose(d0)
+assert zero_map.matrix().nnz == 0
+```
+
+`LinearMap[K, SourceDegree, TargetDegree]` retains exact source and target spaces. Its mathematical methods are `apply`, `compose`, and `matrix`: application preserves field semantics, composition statically unifies the intermediate degree and checks the exact runtime space, and `matrix()` returns a caller-owned CSR representation. Explicit spaces keep the API arbitrary-dimensional without pretending Python can calculate `SourceDegree + 1` at the type level. The chain boundary remains `Complex.boundary_matrix(k)`; the cochain exterior derivative uses its transpose. Dual measures, Hodge maps, and the two-dimensional cotangent specialization remain later metric-operator work.
 
 ## Documentation
 

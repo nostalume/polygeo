@@ -345,7 +345,9 @@ class Complex[
     def cochain_space(self, degree: Literal[2]) -> CochainSpace[Self, Literal[2]]: ...
 
     @overload
-    def cochain_space(self, degree: int) -> CochainSpace[Self, int]: ...
+    def cochain_space[Degree: int](
+        self, degree: Degree
+    ) -> CochainSpace[Self, Degree]: ...
 
     def cochain_space[Degree: int](self, degree: Degree) -> CochainSpace[Self, Degree]:
         self._validate_degree(degree)
@@ -525,12 +527,21 @@ class Form[K: _SubsetDomain, Degree: int, Semantics: FieldSemantics]:
         candidate = np.asarray(coefficients)
         if candidate.ndim != 1 or candidate.shape != (space.size,):
             raise SimplicialError("coefficients do not align with the cochain space")
-        if not np.all(np.isfinite(candidate)):
+        if np.iscomplexobj(candidate):
+            raise SimplicialError("coefficients must be real")
+        if candidate.dtype.kind not in "bifu":
+            raise SimplicialError("coefficients must be real numeric values")
+        try:
+            with np.errstate(over="ignore", invalid="ignore"):
+                admitted = _owned_array(candidate, np.dtype(np.float64))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise SimplicialError(
+                "coefficients cannot be converted to float64"
+            ) from error
+        if not np.all(np.isfinite(admitted)):
             raise SimplicialError("coefficients must be finite")
         self._space = space
-        self._coefficients = _owned_array(
-            np.array(candidate, dtype=np.float64, copy=True), np.dtype(np.float64)
-        )
+        self._coefficients = admitted
         self._semantics = semantics
 
     @property

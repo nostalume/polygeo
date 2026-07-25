@@ -1,0 +1,62 @@
+from typing import Literal
+
+import numpy as np
+
+from polygeo import (
+    ORDINARY_FORM,
+    BoundaryUnknown,
+    Complex,
+    ConnectivityUnknown,
+    FieldSemantics,
+    Form,
+    LinearMap,
+    OrdinaryForm,
+    OrientationUnknown,
+    Simplicial,
+    exterior_derivative,
+)
+
+
+type Domain = Complex[
+    BoundaryUnknown,
+    OrientationUnknown,
+    ConnectivityUnknown,
+    Simplicial,
+]
+
+
+class AlternateSemantics(FieldSemantics):
+    pass
+
+
+complex_ = Complex.from_maximal_simplices(np.array([[0, 1, 2, 3, 4]], dtype=np.int64))
+degree_2: Literal[2] = 2
+degree_3: Literal[3] = 3
+degree_4: Literal[4] = 4
+space_2 = complex_.cochain_space(degree_2)
+space_3 = complex_.cochain_space(degree_3)
+space_4 = complex_.cochain_space(degree_4)
+derivative = exterior_derivative(space_3, space_4)
+wrong_form = space_2.form(np.zeros(space_2.size), ORDINARY_FORM)
+derivative.apply(wrong_form)
+
+
+def consume_two_to_three(
+    value: LinearMap[Domain, Literal[2], Literal[3]],
+) -> None:
+    pass
+
+
+consume_two_to_three(derivative)
+
+derivative.compose(derivative)
+
+
+def consume_ordinary(
+    value: Form[Domain, Literal[4], OrdinaryForm],
+) -> None:
+    pass
+
+
+alternate = space_3.form(np.zeros(space_3.size), AlternateSemantics())
+consume_ordinary(derivative.apply(alternate))

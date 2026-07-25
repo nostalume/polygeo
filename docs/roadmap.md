@@ -4,14 +4,13 @@
 
 This document is a proposed implementation sequence for [`architecture.md`](architecture.md). It is not authorization to implement it.
 
-Current repository facts at the time of this plan:
+Current implemented baseline:
 
-- local `HEAD` is the initial commit `918fafe`;
-- the branch is behind `origin/main` by four commits;
-- the index retains changes from the previous history after a soft reset;
-- the rejected production modules and tests have been deleted from the working tree;
-- the current working tree is intentionally not an executable baseline;
-- no old implementation or test should be restored automatically.
+- arbitrary-dimensional simplicial topology, typestate refinements, cochain spaces, and forms;
+- complete arbitrary-dimensional Euclidean geometry and primal simplex measures;
+- typed linear maps, composition, and arbitrary-dimensional topological exterior derivative;
+- executable runtime, positive Ty, and negative Ty contracts;
+- rejected owner-chain modules remain retired and must not be restored.
 
 Before any task starts, the user must explicitly approve the task or a bounded group of tasks. No commit, push, force-push, reset, restore, or index cleanup is implied by this plan.
 
@@ -178,6 +177,10 @@ The spike must determine whether Ty preserves `Literal[1]` from a literal space-
 LinearMap[K, SourceDegree, TargetDegree]
     .apply(Form[K, SourceDegree, S])
     -> Form[K, TargetDegree, S]
+
+LinearMap[K, MiddleDegree, TargetDegree]
+    .compose(LinearMap[K, SourceDegree, MiddleDegree])
+    -> LinearMap[K, SourceDegree, TargetDegree]
 ```
 
 Also prove runtime source-space identity is checked once when a value enters `apply`.
@@ -368,9 +371,9 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 
 ## T4 — Typed DEC Operators
 
-### OP-01 — Typed boundary and coboundary maps
+### OP-01 — Typed exterior derivative
 
-**Purpose:** Land `LinearMap[K, SourceDegree, TargetDegree]` for topology.
+**Purpose:** Land arbitrary-dimensional `LinearMap[K, SourceDegree, TargetDegree]` for topological cochain differentiation. The chain boundary remains `Complex.boundary_matrix`.
 
 **Prerequisite:** `CORE-03`, `CORE-05`, and `TYPE-03`.
 
@@ -378,21 +381,29 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 
 - source/target runtime spaces agree with static categories;
 - wrong runtime space is rejected at one admission boundary;
-- $d_{k+1}d_k=0$;
-- operator application preserves field semantics when mathematically valid.
+- $d_{k+1}d_k=0$ through runtime dimension eight, with durable dimension-four coverage;
+- explicitly typed literals above degree two remain exact while runtime degrees remain `int`;
+- operator application preserves field semantics when mathematically valid;
+- composition statically unifies the intermediate degree and checks the exact runtime space;
+- `matrix()` returns a complete, finite, canonicalized, caller-owned CSR representation without exposing a mutable view.
 
-### OP-02 — Primal/dual measures without a dual owner
+### OP-02 — Grouped primal/circumcentric-dual geometry measures
 
-**Purpose:** Supply Hodge data as complete computation products.
+**Purpose:** Let one complete `Geometry` extract primal and signed circumcentric-dual measures in its canonical simplex bases.
 
 **Prerequisite:** `GEOM-01` and `OP-01`.
 
 **RED laws:**
 
-- primal and signed dual measures align with exact cochain bases;
+- `Geometry.simplex_measures(degree)` supplies primal measures;
+- `Geometry.circumcentric_dual_measures(degree)` supplies signed dual measures in the same canonical basis;
+- degree-two primal area comes from `Geometry.simplex_measures(2)` rather than a duplicate face-area field;
+- no free measure function or redundant primal/dual result wrapper exists;
 - no `CircumcentricDual` object exists;
 - zero/non-finite inverse entries are rejected only by operations requiring inversion;
 - non-Delaunay signs are preserved rather than silently absolutized.
+
+Two-dimensional cotangent weights are a later specialization law of the generic Hodge/Laplacian construction, not stored base-geometry data.
 
 ### OP-03 — Hodge star and weighted pairing
 

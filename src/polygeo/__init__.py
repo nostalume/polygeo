@@ -1,6 +1,7 @@
 """Public API for the PolyGeo simplicial core."""
 
 from .geometry import Geometry, GeometryError
+from .operators import LinearMap, OperatorError, exterior_derivative
 from .simplicial import (
     ORDINARY_FORM,
     BoundaryState,
@@ -41,10 +42,12 @@ __all__ = [
     "Form",
     "Geometry",
     "GeometryError",
+    "LinearMap",
     "OneForm",
     "OrdinaryForm",
     "OrientationState",
     "OrientationUnknown",
+    "OperatorError",
     "Oriented",
     "SimplexSubset",
     "Simplicial",
@@ -53,4 +56,5 @@ __all__ = [
     "TriangleManifold",
     "TwoForm",
     "ZeroForm",
+    "exterior_derivative",
 ]
