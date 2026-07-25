@@ -4,6 +4,7 @@ import numpy as np
 
 from polygeo import (
     ORDINARY_FORM,
+    CochainSpace,
     Closed,
     Complex,
     Connected,
@@ -45,7 +46,9 @@ class AlternateSemantics(FieldSemantics):
     pass
 
 
-def consume(value: Form[Domain, Literal[1], OrdinaryForm]) -> None:
+def consume(
+    value: Form[CochainSpace[Domain, Literal[1]], OrdinaryForm],
+) -> None:
     pass
 
 

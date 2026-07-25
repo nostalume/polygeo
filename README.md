@@ -87,7 +87,7 @@ zero_map = d1.compose(d0)
 assert zero_map.matrix().nnz == 0
 ```
 
-`LinearMap[K, SourceDegree, TargetDegree]` retains exact source and target spaces. Its mathematical methods are `apply`, `compose`, and `matrix`: application preserves field semantics, composition statically unifies the intermediate degree and checks the exact runtime space, and `matrix()` returns a caller-owned CSR representation. Explicit spaces keep the API arbitrary-dimensional without pretending Python can calculate `SourceDegree + 1` at the type level. The chain boundary remains `Complex.boundary_matrix(k)`; the cochain exterior derivative uses its transpose. Before Hodge, forms and maps will migrate separately to exact space-generic `Form[Space, Semantics]` and `LinearMap[SourceSpace, TargetSpace]`, then add a subordinate dual cochain space without a duplicated `DualComplex`.
+`Form[Space, Semantics]` and `LinearMap[SourceSpace, TargetSpace]` retain exact coefficient-space identity. `Form.coefficients()` and `LinearMap.matrix()` return caller-owned representations. Map application preserves field semantics, while composition statically unifies the intermediate space and checks its exact runtime identity. The exterior derivative still accepts explicit adjacent `CochainSpace` values because Python cannot calculate `SourceDegree + 1` at the type level; the chain boundary remains `Complex.boundary_matrix(k)` and the cochain derivative uses its transpose. A later Hodge slice can add a subordinate dual cochain space without changing these generic classes or duplicating a `DualComplex`.
 
 ## Documentation
 

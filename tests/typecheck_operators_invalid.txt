@@ -5,6 +5,7 @@ import numpy as np
 from polygeo import (
     ORDINARY_FORM,
     BoundaryUnknown,
+    CochainSpace,
     Complex,
     ConnectivityUnknown,
     FieldSemantics,
@@ -42,7 +43,10 @@ derivative.apply(wrong_form)
 
 
 def consume_two_to_three(
-    value: LinearMap[Domain, Literal[2], Literal[3]],
+    value: LinearMap[
+        CochainSpace[Domain, Literal[2]],
+        CochainSpace[Domain, Literal[3]],
+    ],
 ) -> None:
     pass
 
@@ -53,7 +57,7 @@ derivative.compose(derivative)
 
 
 def consume_ordinary(
-    value: Form[Domain, Literal[4], OrdinaryForm],
+    value: Form[CochainSpace[Domain, Literal[4]], OrdinaryForm],
 ) -> None:
     pass
 

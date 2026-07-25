@@ -242,7 +242,7 @@ class CochainSpace[
         self,
         coefficients: FloatArray,
         semantics: Semantics,
-    ) -> Form[K, Degree, Semantics]: ...
+    ) -> Form[CochainSpace[K, Degree], Semantics]: ...
 ```
 
 The space owns:
@@ -256,32 +256,30 @@ The space owns:
 
 ```python
 class Form[
-    K,
-    Degree: int,
+    Space,
     Semantics: FieldSemantics,
 ]:
     @property
-    def space(self) -> CochainSpace[K, Degree]: ...
+    def space(self) -> Space: ...
 
-    @property
     def coefficients(self) -> FloatArray: ...
 ```
 
 Examples are generic specializations, not subclasses:
 
 ```text
-Form[K, Literal[0], OrdinaryForm]
-Form[K, Literal[1], OrdinaryForm]
-Form[K, Literal[2], OrdinaryForm]
-Form[K, Literal[1], SO2Connection]
+Form[CochainSpace[K, Literal[0]], OrdinaryForm]
+Form[CochainSpace[K, Literal[1]], OrdinaryForm]
+Form[CochainSpace[K, Literal[2]], OrdinaryForm]
+Form[CochainSpace[K, Literal[1]], SO2Connection]
 ```
 
 Convenience aliases may reduce annotation noise:
 
 ```python
-type ZeroForm[K] = Form[K, Literal[0], OrdinaryForm]
-type OneForm[K] = Form[K, Literal[1], OrdinaryForm]
-type TwoForm[K] = Form[K, Literal[2], OrdinaryForm]
+type ZeroForm[K] = Form[CochainSpace[K, Literal[0]], OrdinaryForm]
+type OneForm[K] = Form[CochainSpace[K, Literal[1]], OrdinaryForm]
+type TwoForm[K] = Form[CochainSpace[K, Literal[2]], OrdinaryForm]
 ```
 
 These aliases create no runtime classes and remain generic over `K`.
@@ -296,27 +294,26 @@ Python cannot express arbitrary type-level arithmetic such as `Degree + 1`. Oper
 
 ```python
 class LinearMap[
-    K,
-    SourceDegree: int,
-    TargetDegree: int,
+    SourceSpace,
+    TargetSpace,
 ]:
     @property
-    def source(self) -> CochainSpace[K, SourceDegree]: ...
+    def source(self) -> SourceSpace: ...
 
     @property
-    def target(self) -> CochainSpace[K, TargetDegree]: ...
+    def target(self) -> TargetSpace: ...
 
     def matrix(self) -> csr_array: ...
 
     def apply[Semantics: FieldSemantics](
         self,
-        value: Form[K, SourceDegree, Semantics],
-    ) -> Form[K, TargetDegree, Semantics]: ...
+        value: Form[SourceSpace, Semantics],
+    ) -> Form[TargetSpace, Semantics]: ...
 
-    def compose[InputDegree: int](
+    def compose[InputSpace](
         self,
-        before: LinearMap[K, InputDegree, SourceDegree],
-    ) -> LinearMap[K, InputDegree, TargetDegree]: ...
+        before: LinearMap[InputSpace, SourceSpace],
+    ) -> LinearMap[InputSpace, TargetSpace]: ...
 ```
 
 An exterior derivative is a map:
@@ -333,7 +330,7 @@ target = complex_.cochain_space(target_degree)
 derivative = exterior_derivative(source, target)
 ```
 
-The `k + 1` relation is checked when constructing the derivative at runtime. A bounded integer generic is a type parameter, not a value-level integer variable, and Python typing has no successor arithmetic over `Literal` types. In contrast, composition only requires equality of the intermediate category, which static generic unification expresses by reusing `SourceDegree` as `before`'s target degree. Runtime `same_space` validation then distinguishes equal-typed spaces from different complex instances. An explicitly typed `Literal[k]` preserves arbitrary fixed degrees such as `Literal[7] -> Literal[8]`; a calculated degree remains honestly typed as `int -> int`. Ty 0.0.32 widens a bare higher integer expression passed through a generic parameter. Existing 0/1/2 overloads retain ergonomic inference for common bare literals, while the generic fallback—not an overload expansion to a chosen maximum dimension—carries explicit arbitrary literals.
+The `k + 1` relation is checked when constructing the derivative at runtime. A bounded integer generic is a type parameter, not a value-level integer variable, and Python typing has no successor arithmetic over `Literal` types. In contrast, composition only requires equality of the intermediate category, which static generic unification expresses by reusing the exact `SourceSpace` as `before`'s target space. Runtime `same_space` validation then distinguishes equal-typed spaces from different complex instances. An explicitly typed `Literal[k]` preserves arbitrary fixed degrees such as `Literal[7] -> Literal[8]`; a calculated degree remains honestly typed as `int -> int`. Ty widens a bare higher integer expression passed through a generic parameter. Existing 0/1/2 overloads retain ergonomic inference for common bare literals, while the generic fallback—not an overload expansion to a chosen maximum dimension—carries explicit arbitrary literals.
 
 The chain boundary remains `Complex.boundary_matrix(k)`. `LinearMap` currently models cochain maps, so boundary is not mislabeled as a map between `CochainSpace` values. The exterior derivative has sparse representation `boundary_matrix(k + 1).T`.
 
@@ -342,7 +339,7 @@ The same explicit-space model will apply to:
 - Hodge star;
 - codifferential;
 - Laplacian;
-- restriction and prolongation maps.
+- restriction and zero-extension maps.
 
 Sparse matrices are representations of these maps, not the public mathematical identity of the operator. A complete `LinearMap` admits structurally valid, real, finite CSR data aligned to exact source/target sizes and owns a canonicalized float64 copy. `matrix()` makes allocation explicit by returning a caller-owned representation; `apply()` and `compose()` compute directly from private representations without copying operand matrices.
 
@@ -406,7 +403,7 @@ For closed-surface degree-one Hodge decomposition, the effective requirement is:
 ```text
 K has TriangleManifold, Closed, Oriented, Connected
 geometry is a complete piecewise-Euclidean Geometry[K]
-input is Form[K, Literal[1], OrdinaryForm]
+input is Form[CochainSpace[K, Literal[1]], OrdinaryForm]
 ```
 
 Conceptually:
@@ -459,8 +456,8 @@ class Certified[Value, Property]:
 Examples:
 
 ```text
-Certified[Form[K, Literal[0], OrdinaryForm], MeanZero]
-Certified[Form[K, Literal[1], SO2Connection], Integrable]
+Certified[Form[CochainSpace[K, Literal[0]], OrdinaryForm], MeanZero]
+Certified[Form[CochainSpace[K, Literal[1]], SO2Connection], Integrable]
 Certified[LinearSolution[Space], ResidualCertified]
 ```
 
@@ -489,7 +486,7 @@ The ownership chain is:
 ```text
 complex topology
   -> canonical topological-boundary subset
-  -> cochain subspace plus restriction/prolongation maps
+  -> cochain subspace plus restriction/zero-extension maps
   -> formulation-specific reduced or augmented linear problem
   -> boundary-agnostic numerical solve
   -> typed full-space reconstruction and residual certificate
@@ -505,7 +502,7 @@ and reconstructs the prescribed boundary values exactly. Neumann data enters the
 
 Dirichlet, Neumann, and Robin formulations must not be collapsed into a mode string, optional boundary argument, solver flag, or behavior-bearing configuration union. The numerical solver receives only an admitted matrix/system and right-hand side. It never discovers boundary vertices, selects a gauge, projects incompatible forcing, or interprets cochain semantics.
 
-Python generics cannot prove that two runtime subspaces came from one complex instance. A cochain subspace therefore retains its actual parent `CochainSpace` and canonical indices; restriction/prolongation and problem assembly verify runtime identity once before numerical kernels run. No owner token or independent boundary renumbering substitutes for that mathematical data.
+Python generics cannot prove that two runtime subspaces came from one complex instance. A cochain subspace therefore retains its actual parent `CochainSpace` and canonical indices; restriction, zero extension, and problem assembly verify runtime identity once before numerical kernels run. No owner token or independent boundary renumbering substitutes for that mathematical data.
 
 ## Numerical Behavior Interfaces
 

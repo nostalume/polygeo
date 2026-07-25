@@ -55,7 +55,7 @@ def test_exterior_derivative_is_oriented_endpoint_difference() -> None:
 
     result = exterior_derivative(source, target).apply(value)
 
-    np.testing.assert_array_equal(result.coefficients, expected)
+    np.testing.assert_array_equal(result.coefficients(), expected)
 
 
 def test_exterior_derivative_is_nilpotent_above_surface_dimension() -> None:
@@ -74,7 +74,7 @@ def test_exterior_derivative_is_nilpotent_above_surface_dimension() -> None:
     assert composed.source is space_2
     assert composed.target is space_4
     assert result.semantics is semantics
-    np.testing.assert_array_equal(result.coefficients, np.zeros(space_4.size))
+    np.testing.assert_array_equal(result.coefficients(), np.zeros(space_4.size))
     assert composed.matrix().nnz == 0
 
 
@@ -123,8 +123,8 @@ def test_linear_map_composition_matches_sequential_application() -> None:
     assert composed.target is target
     assert composed.apply(value).semantics is semantics
     np.testing.assert_array_equal(
-        composed.apply(value).coefficients,
-        after.apply(before.apply(value)).coefficients,
+        composed.apply(value).coefficients(),
+        after.apply(before.apply(value)).coefficients(),
     )
     np.testing.assert_array_equal(
         composed.matrix().toarray(),
@@ -251,7 +251,9 @@ def test_linear_map_owns_its_sparse_representation() -> None:
     exposed = map_.matrix()
     exposed.data[:] = 0.0
 
-    np.testing.assert_array_equal(map_.apply(value).coefficients, value.coefficients)
+    np.testing.assert_array_equal(
+        map_.apply(value).coefficients(), value.coefficients()
+    )
 
 
 def test_linear_map_exposes_canonical_sparse_representation() -> None:

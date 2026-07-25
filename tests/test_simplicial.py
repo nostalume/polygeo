@@ -241,11 +241,11 @@ def test_cochain_spaces_and_forms_own_coefficients() -> None:
 
     form = left_space.form(coefficients, ORDINARY_FORM)
     coefficients[:] = -1
-    exposed = form.coefficients
+    exposed = form.coefficients()
     exposed[:] = -2
 
     np.testing.assert_array_equal(
-        form.coefficients,
+        form.coefficients(),
         np.arange(left_space.size, dtype=np.float64),
     )
     assert isinstance(form.semantics, OrdinaryForm)

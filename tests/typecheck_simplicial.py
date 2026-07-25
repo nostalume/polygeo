@@ -40,8 +40,10 @@ form = space.form(np.zeros(space.size), ORDINARY_FORM)
 assert_type(
     form,
     Form[
-        Complex[Closed, Oriented, Connected, TriangleManifold],
-        Literal[1],
+        CochainSpace[
+            Complex[Closed, Oriented, Connected, TriangleManifold],
+            Literal[1],
+        ],
         OrdinaryForm,
     ],
 )

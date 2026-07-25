@@ -367,6 +367,16 @@ class _SubsetDomain(Protocol):
     def simplices(self, degree: int) -> IndexArray: ...
 
 
+class _CoefficientSpace(Protocol):
+    @property
+    def complex(self) -> _SubsetDomain: ...
+
+    @property
+    def size(self) -> int: ...
+
+    def same_space(self, other: object) -> bool: ...
+
+
 class SimplexSubset[K: _SubsetDomain]:
     """Degree-aligned simplex membership bound to one runtime complex."""
 
@@ -506,21 +516,25 @@ class CochainSpace[K: _SubsetDomain, Degree: int]:
     def belongs_to(self, complex_: K) -> bool:
         return self._complex is complex_
 
-    def same_space(self, other: CochainSpace[K, Degree]) -> bool:
-        return self._complex is other._complex and self._degree == other._degree
+    def same_space(self, other: object) -> bool:
+        return (
+            isinstance(other, CochainSpace)
+            and self._complex is other._complex
+            and self._degree == other._degree
+        )
 
     def form[Semantics: FieldSemantics](
         self, coefficients: CoefficientArray, semantics: Semantics
-    ) -> Form[K, Degree, Semantics]:
+    ) -> Form[CochainSpace[K, Degree], Semantics]:
         return Form(self, coefficients, semantics)
 
 
-class Form[K: _SubsetDomain, Degree: int, Semantics: FieldSemantics]:
+class Form[Space: _CoefficientSpace, Semantics: FieldSemantics]:
     __slots__ = ("_space", "_coefficients", "_semantics")
 
     def __init__(
         self,
-        space: CochainSpace[K, Degree],
+        space: Space,
         coefficients: CoefficientArray,
         semantics: Semantics,
     ) -> None:
@@ -545,11 +559,11 @@ class Form[K: _SubsetDomain, Degree: int, Semantics: FieldSemantics]:
         self._semantics = semantics
 
     @property
-    def space(self) -> CochainSpace[K, Degree]:
+    def space(self) -> Space:
         return self._space
 
-    @property
     def coefficients(self) -> CoefficientArray:
+        """Return caller-owned coefficients."""
         return self._coefficients.copy()
 
     @property
@@ -557,9 +571,9 @@ class Form[K: _SubsetDomain, Degree: int, Semantics: FieldSemantics]:
         return self._semantics
 
 
-type ZeroForm[K: _SubsetDomain] = Form[K, Literal[0], OrdinaryForm]
-type OneForm[K: _SubsetDomain] = Form[K, Literal[1], OrdinaryForm]
-type TwoForm[K: _SubsetDomain] = Form[K, Literal[2], OrdinaryForm]
+type ZeroForm[K: _SubsetDomain] = Form[CochainSpace[K, Literal[0]], OrdinaryForm]
+type OneForm[K: _SubsetDomain] = Form[CochainSpace[K, Literal[1]], OrdinaryForm]
+type TwoForm[K: _SubsetDomain] = Form[CochainSpace[K, Literal[2]], OrdinaryForm]
 
 
 def _assemble_boundary_matrix(data: _ComplexData, degree: int) -> csr_array:

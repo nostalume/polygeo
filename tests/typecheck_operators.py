@@ -41,23 +41,37 @@ assert_type(space_3, CochainSpace[Domain, Literal[3]])
 assert_type(space_4, CochainSpace[Domain, Literal[4]])
 
 derivative = exterior_derivative(space_3, space_4)
-assert_type(derivative, LinearMap[Domain, Literal[3], Literal[4]])
+assert_type(
+    derivative,
+    LinearMap[
+        CochainSpace[Domain, Literal[3]],
+        CochainSpace[Domain, Literal[4]],
+    ],
+)
 assert_type(derivative.matrix(), csr_array)
 derivative_2 = exterior_derivative(space_2, space_3)
 assert_type(
     derivative.compose(derivative_2),
-    LinearMap[Domain, Literal[2], Literal[4]],
+    LinearMap[
+        CochainSpace[Domain, Literal[2]],
+        CochainSpace[Domain, Literal[4]],
+    ],
 )
 
 semantics = AlternateSemantics()
 value = space_3.form(np.zeros(space_3.size), semantics)
 assert_type(
     derivative.apply(value),
-    Form[Domain, Literal[4], AlternateSemantics],
+    Form[CochainSpace[Domain, Literal[4]], AlternateSemantics],
 )
 
 
-def runtime_derivative(degree: int) -> LinearMap[Domain, int, int]:
+def runtime_derivative(
+    degree: int,
+) -> LinearMap[
+    CochainSpace[Domain, int],
+    CochainSpace[Domain, int],
+]:
     runtime_source = complex_.cochain_space(degree)
     runtime_target = complex_.cochain_space(degree + 1)
     return exterior_derivative(runtime_source, runtime_target)
@@ -65,7 +79,7 @@ def runtime_derivative(degree: int) -> LinearMap[Domain, int, int]:
 
 assert_type(
     runtime_derivative(2),
-    LinearMap[Domain, int, int],
+    LinearMap[CochainSpace[Domain, int], CochainSpace[Domain, int]],
 )
 
 complex_8 = Complex.from_maximal_simplices(np.array([list(range(9))], dtype=np.int64))
@@ -74,9 +88,15 @@ degree_8: Literal[8] = 8
 space_7 = complex_8.cochain_space(degree_7)
 space_8 = complex_8.cochain_space(degree_8)
 derivative_7 = exterior_derivative(space_7, space_8)
-assert_type(derivative_7, LinearMap[Domain, Literal[7], Literal[8]])
+assert_type(
+    derivative_7,
+    LinearMap[
+        CochainSpace[Domain, Literal[7]],
+        CochainSpace[Domain, Literal[8]],
+    ],
+)
 value_7 = space_7.form(np.zeros(space_7.size), semantics)
 assert_type(
     derivative_7.apply(value_7),
-    Form[Domain, Literal[8], AlternateSemantics],
+    Form[CochainSpace[Domain, Literal[8]], AlternateSemantics],
 )

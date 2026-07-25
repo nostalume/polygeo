@@ -149,10 +149,10 @@ The spike must test:
 
 ```text
 CochainSpace[K, Literal[1]]
-    -> Form[K, Literal[1], OrdinaryForm]
+    -> Form[CochainSpace[K, Literal[1]], OrdinaryForm]
 
 CochainSpace[K, Literal[1]]
-    -> Form[K, Literal[1], SO2Connection]
+    -> Form[CochainSpace[K, Literal[1]], SO2Connection]
 ```
 
 The spike must determine whether Ty preserves `Literal[1]` from a literal space-construction call. If it widens to `int`, define the narrowest honest fixed-degree constructor or refinement. Do not enumerate arbitrary dimensions or degrees.
@@ -174,13 +174,13 @@ The spike must determine whether Ty preserves `Literal[1]` from a literal space-
 **Work:** Prove:
 
 ```text
-LinearMap[K, SourceDegree, TargetDegree]
-    .apply(Form[K, SourceDegree, S])
-    -> Form[K, TargetDegree, S]
+LinearMap[SourceSpace, TargetSpace]
+    .apply(Form[SourceSpace, S])
+    -> Form[TargetSpace, S]
 
-LinearMap[K, MiddleDegree, TargetDegree]
-    .compose(LinearMap[K, SourceDegree, MiddleDegree])
-    -> LinearMap[K, SourceDegree, TargetDegree]
+LinearMap[MiddleSpace, TargetSpace]
+    .compose(LinearMap[SourceSpace, MiddleSpace])
+    -> LinearMap[SourceSpace, TargetSpace]
 ```
 
 Also prove runtime source-space identity is checked once when a value enters `apply`.
@@ -295,7 +295,7 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 - wrong coefficient shape fails at construction;
 - two runtime spaces with equal sizes remain distinct identities.
 
-**Work:** Implement generic `Form[K, Degree, Semantics]`; do not add `SurfaceOneForm`, `EdgeOneForm`, or owner tokens.
+**Work:** Implement exact-space generic `Form[CochainSpace[K, Degree], Semantics]`; do not add `SurfaceOneForm`, `EdgeOneForm`, or owner tokens.
 
 ## T1 continued — Simplicial Property Refinement
 
@@ -373,7 +373,7 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 
 ### OP-01 — Typed exterior derivative
 
-**Purpose:** Land arbitrary-dimensional `LinearMap[K, SourceDegree, TargetDegree]` for topological cochain differentiation. The chain boundary remains `Complex.boundary_matrix`.
+**Purpose:** Land arbitrary-dimensional `LinearMap[SourceSpace, TargetSpace]` for topological cochain differentiation. The chain boundary remains `Complex.boundary_matrix`.
 
 **Prerequisite:** `CORE-03`, `CORE-05`, and `TYPE-03`.
 
@@ -453,14 +453,14 @@ Two-dimensional cotangent weights are a later specialization law of the generic 
 
 ### OP-BC-01 — Cochain subspaces and trace maps
 
-**Purpose:** Represent boundary/interior degrees of freedom and their exact restriction/prolongation maps.
+**Purpose:** Represent boundary/interior degrees of freedom and their exact restriction/zero-extension maps.
 
 **Prerequisite:** `TOPO-BC-01` and `OP-01`.
 
 **RED laws:**
 
 - a subspace retains its parent cochain space and canonical indices;
-- restriction followed by prolongation has the expected mask law;
+- restriction and zero extension have the expected identity/mask laws;
 - wrong-complex or wrong-degree compositions fail once at admission;
 - no owner token or hidden renumbering substitutes for the actual parent space.
 
@@ -584,7 +584,7 @@ Each algorithm is a separate approved task and must use the exact phantom/certif
 
 ### SURFACE-05 — Connection and holonomy
 
-- Model a connection as `Form[K, Literal[1], SO2Connection]`.
+- Model a connection as `Form[CochainSpace[K, Literal[1]], SO2Connection]`.
 - Do not permit an ordinary one-form to substitute solely because shape matches.
 - Bind cycle data at one admitted problem boundary.
 
