@@ -18,6 +18,8 @@ dist/
 
 # Cache directories
 .cache/
+.hermes/
+__marimo__/
 .ruff_cache/
 .rumdl_cache/
 .ipynb_checkpoints/

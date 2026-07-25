@@ -1,320 +1,652 @@
-# PolyGeo Roadmap: Arbitrary-Dimensional Simplicial Complexes
+# PolyGeo Implementation Tasks
 
-## Current State (3D Triangle Mesh)
+## Status and Authorization
 
-The existing `SimplicialComplex` is specialized for 2-manifold triangle meshes:
+This document is a proposed implementation sequence for [`architecture.md`](architecture.md). It is not authorization to implement it.
 
-- Fixed dimensions: vertices (0), edges (1), faces (2)
-- Precomputed `V2E` (|E|×|V|) and `E2F` (|F|×|E|)
-- Hard-coded `star/closure/link/boundary` for dimensions 0/1/2
-- Subset masks: `v_mask`, `e_mask`, `f_mask`
+Current repository facts at the time of this plan:
 
-**Limitations**: cannot represent tetrahedra, 3D volumes, or higher-order simplices; operations are dimension-specific.
+- local `HEAD` is the initial commit `918fafe`;
+- the branch is behind `origin/main` by four commits;
+- the index retains changes from the previous history after a soft reset;
+- the rejected production modules and tests have been deleted from the working tree;
+- the current working tree is intentionally not an executable baseline;
+- no old implementation or test should be restored automatically.
 
-## Goal: General SimplicialComplex
+Before any task starts, the user must explicitly approve the task or a bounded group of tasks. No commit, push, force-push, reset, restore, or index cleanup is implied by this plan.
 
-Support complexes with simplices of **any dimension** `0 ≤ d ≤ D` (D = maximal dimension). Use **incidence matrices** as fundamental operators, enabling algebraic formulations of all topological operations.
+## Delivery Rules
 
----
+Every task must satisfy all of the following:
 
-## Core Design
+- less than four hours of intended work;
+- less than 500 changed lines; split before crossing the limit;
+- RED test or typecheck evidence before production implementation;
+- one mathematical concept per task;
+- no compatibility shim for the rejected architecture;
+- no movement to the next task while the current task has failing focused gates;
+- exact review after each typestate or numerical-boundary change;
+- no claim of completion from build success alone.
 
-### 1. Data Representation
+The implementation must use Python 3.14 and `uv`. Source code may use PEP 695 inline type parameters but must not declare `typing.TypeVar` or old-style `Generic` bases.
 
-**SimplicialComplex**
+## Target Physical Surface
 
-- `simplices: list[np.ndarray]` where `simplices[d]` is shape `(n_d, d+1)`, each row = vertex indices of a d-simplex (ordered, orientation-aware).
-- `dim: int` = maximal simplex dimension present.
-- `boundary_mats: dict[int, csr_matrix]` mapping `d` → `∂_d` (shape `(n_{d-1}, n_d)`).
-- Lazy construction: build `∂_d` on first access via `boundary_operator(d)`.
-
-**Why this representation?**
-
-- Uniform across dimensions
-- `∂_d` directly encodes inclusion: `∂_d[s, σ] = ±1` if σ is a face of s, sign = orientation.
-- All topological operators become linear algebra on chains/cochains.
-
-### 2. Chains and Cochains
+Physical layout is intentionally compact. It is an implementation consequence, not the architecture authority.
 
 ```text
-Chain space C_d  ≅  R^{n_d}   (coeffs per d-simplex)
-Cochain space C^d ≅ R^{n_d}   (functions on d-simplices)
+src/polygeo/
+  __init__.py      root exports and load_surface
+  simplicial.py    complete complex data, refinements, cochain spaces and topology
+  operators.py     typed maps and metric DEC operators
+  dec.py           general DEC problem assembly and certified products
+  surface.py       complete triangle geometry and specific-dimensional algorithms
+  solver.py        domain-neutral numerical behavior
 
-Boundary   : ∂_d : C_d → C_{d-1}    (matrix)
-Coboundary : δ^{d-1} = (-1)^d ∂_d^T  (up to sign conventions)
+tests/
+  test_simplicial.py
+  test_operators.py
+  test_dec.py
+  test_surface.py
 ```
 
-- **Chains**: vectors with one entry per d-simplex (integer or real coefficients).
-- **Cochains**: same shape, represent "densities" on simplices.
-- All subset operations become **characteristic chains** (0/1 vectors).
+Do not create `api.py`, `io.py`, `errors.py`, `result.py`, `forms.py`, `metric.py`, `geometry.py`, `dual.py`, or one test file per source module unless a later approved design demonstrates a separate behavior owner.
 
-### 3. Boundary Operator Construction
+## Mandatory Gates
 
-Given `simplices[d]` (each row = vertex indices in consistent orientation):
+Each implemented task runs its focused test and typecheck commands. A phase exit additionally requires:
 
-```python
-def _build_boundary(d: int) -> csr_matrix:
-    # ∂_d shape (n_{d-1}, n_d)
-    # For each d-simplex s (row), list its (d) faces (d-1)-simplices.
-    # Orientation sign = (-1)^i for i-th face (omit vertex i).
-    # Map each face → its index in simplices[d-1] via precomputed index dict.
+```bash
+uv run ruff format --check .
+uv run ruff check .
+uv run ty check --error-on-warning .
+uv run pytest -q
 ```
 
-**Precomputation**: Build `(d+1)×n_d` array `faces_of_simplex[d]` for all d≥1. Also `(d)×n_{d-1}` `faces_containing_simplex[d]` (inverse) for efficient `E2F`-like builds.
+When examples exist:
 
-**Optimization**: Precompute all boundary matrices once at construction (lazy) using adjacency dictionary maps. Complexity O(∑_d n_d·(d+1)).
-
-### 4. Generic Subset Representation
-
-Replace `SimplicialSubset` (3 masks) with `SimplicialSubset`:
-
-```python
-@dataclass
-class SimplicialSubset:
-    dim: int                     # maximal dimension of subset
-    chains: dict[int, np.ndarray] # d → bool/int vector of length n_d
-    parent: SimplicialComplex
+```bash
+uv run marimo check <all tracked Marimo studies>
 ```
 
-**Semantics**: The subset is the **support** of a chain (all simplices with non-zero coefficient). For "pure" subsets, only `chains[dim]` may be non-zero after closure.
+Final delivery additionally requires:
 
-**Factory**: `complex.subset(d=2, faces=np.array([0,3]))` or `complex.subset(chains={1: np.array([...])})`.
-
-### 5. Generic Operations (as chain maps)
-
-All operations return `SimplicialSubset`:
-
-#### Star
-
-St(S) = { σ | ∃ τ∈S with σ ≤ τ }  (all faces of simplices in S)
-
-**Algorithm**:
-
-```python
-def star(self):
-    out_chains = {}
-    max_d = self.dim
-    for d in range(max_d, -1, -1):
-        if d == max_d:
-            out_chains[d] = self.chains[d].copy()
-        else:
-            # all d-simplices that are faces of some simplex in out_chains[d+1]
-            out_chains[d] = (self.parent.boundary_operator(d+1).T @ out_chains[d+1]) != 0
-    return SimplicialSubset(max_d, out_chains, self.parent)
+```bash
+uv lock --check
+uv build
 ```
 
-**Note**: Uses `∂_{d+1}^T` (coboundary) to go downwards in dimension.
+Then install and smoke-test the wheel and sdist independently in fresh environments. Build success without import and behavior smoke is insufficient.
 
-#### Closure
+## T0 — Repository and Type-System Admission
 
-Cl(S) = { σ | σ ≤ τ for some τ∈S }  (all faces of simplices in S)
+### TYPE-00 — Confirm the implementation baseline
 
-**Algorithm**: Same as star for a downward-closed set; but star may include cofaces. **Closure = all faces**, i.e. traversing downwards only.
+**Purpose:** Prevent implementation on an ambiguous soft-reset/index state.
 
-```python
-def closure(self):
-    out_chains = {self.dim: self.chains[self.dim].copy()}
-    for d in range(self.dim-1, -1, -1):
-        out_chains[d] = (self.parent.boundary_operator(d+1).T @ out_chains[d+1]) != 0
-    return SimplicialSubset(d, out_chains, self.parent)
+**Prerequisite:** Explicit user approval for repository-state handling.
+
+**Work:**
+
+1. Record `HEAD`, branch, staged paths, unstaged paths, and untracked paths.
+2. Confirm which staged historical files are intentionally retained or discarded.
+3. Confirm no deleted production module or test should be restored.
+4. Agree on whether implementation changes remain unstaged or replace the staged index.
+5. Do not commit or rewrite remote history.
+
+**Exit evidence:** A reported, user-confirmed baseline. No code change.
+
+### TYPE-01 — PEP 695 refinement spike
+
+**Purpose:** Prove the central type transition before building domain values.
+
+**Prerequisite:** `TYPE-00`.
+
+**Work:** Create a disposable typecheck spike outside production code. It models only tiny scalar placeholders and proves:
+
+```text
+Complex[BoundaryUnknown, O, C, T]
+    .refine(CHECK_CLOSED)
+-> Complex[Closed, O, C, T]
 ```
 
-**Difference from star**: star(S) includes any simplex having a face in S, i.e. cofaces too. For a **pure** subset, star requires traversing upwards via `∂_{d+1}` (cochain→cochain). Actually: to get cofaces, use `∂_{d+1}^T`? Wait:
+The spike must test:
 
-- Cofaces of a d-simplex are (d+1)-simplices that have it as a face → rows of `∂_{d+1}` where column (the d-simplex) has non-zero → `∂_{d+1}` multiplied by indicator vector gives counts of how many times each (d-1)-simplex appears in boundaries; that's not cofaces.
-- Cofaces: for a d-simplex s, set of (d+1)-simplices τ such that s ∈ faces(τ). This is the **transpose** of the `(d+1)`-boundary matrix: `∂_{d+1}^T` maps (d)-chains to (d+1)-chains giving "coface counts". So:
-  - `∂_d`: d → d-1 (faces)
-  - `∂_d^T`: d-1 → d (cofaces, i.e., simplices having a given (d-1)-simplex as a face)
+- PEP 695 bounded class parameters;
+- `Refinement[Source, Target]` behavior;
+- `Self`-based `.refine(rule)` inference;
+- preservation of unrelated axes;
+- rejection of refinement from an invalid source state;
+- runtime behavior dispatch through the rule object;
+- no runtime inspection of parameterized generics.
 
-Thus:
+**RED cases:** Ty must reject:
 
-- **Closure (all faces)**: start from top-dim, repeatedly apply `∂_d^T`? No: to get *faces* we go down: from d-simplices get their (d-1)-faces via `∂_d`. So closure = repeatedly apply `∂` downwards.
-- **Star (all cofaces)**: from d-simplices get their cofaces via `∂_{d+1}^T` (if d < D), and also include all faces (downwards). So star = closure ∪ (cups of faces). Actually definition: St(S) = { σ | ∃ τ∈S with σ ≤ τ } includes all σ that are faces of some τ∈S. **That is exactly the closure of S**! Wait – the standard definition: star of a simplex is the set of all simplices that contain it; star of a set is union of stars of its elements. So star(S) = { σ | ∃ τ∈S such that τ ≤ σ } (cofaces, not faces). That's *opposite*: σ is a coface of τ. So star goes **upwards** (cups). Closure goes **downwards** (faces). Many texts define link = star ∩ closure of a *single* simplex. But for a *set*, operations are:
-- **Star(S)**: all simplices that have a face in S (i.e. contain some element of S) → upward closure from S.
-- **Closure(S)**: all faces of simplices in S → downward closure.
-- **Link(S)**: Star(S) ∩ Closure(S) (simplices disjoint from S but adjacent).
+- passing a closed-only value before refinement;
+- applying `CHECK_CLOSED` to an already incompatible boundary state;
+- losing orientation/connectivity/topology axes during transition.
 
-Thus:
+**Hard failure conditions:**
 
-- `Closure(S)`: start with S, go down via `∂_d` repeatedly (d, d-1, ... 0).
-- `Star(S)`: start with S, go up via `∂_{d+1}^T` repeatedly (d, d+1, ... D), and *also* include all faces of those cofaces? Wait: If σ is in star, it means σ has a face in S. That does NOT require σ to be ≥ S element; it requires that some face of σ is in S. That's exactly: there exists τ ∈ S s.t. τ is a face of σ → σ is a coface of τ. So star(S) = all cofaces of S. But do we also include the faces of those cofaces? Those are already in closure(S). However, star(S) as a set may include simplices of many dimensions: all cofaces at all higher dimensions, *and also* the simplices themselves (since τ ≤ τ). That yields a union over dimensions. A simple algorithm:
-  - Initialize out_chains[d] = self.chains[d] for all d.
-  - For d from max_dim down to 0:
-    - Propagate upward: if some d-simplex is in star, then all (d+1)-simplices having it as a face are in star. This is `out_chains[d+1] |= (∂_{d+1}^T @ out_chains[d]) > 0`.
-  - Repeat until no change (or single pass top-down works if we start at lowest dim and propagate up through all levels).
+- `Any`;
+- opaque `object`;
+- `typing.TypeVar`;
+- old-style `Generic`;
+- `cast` or `type: ignore` required at every transition;
+- Ty silently resolves target state to Unknown.
 
-**Correct star algorithm**:
+**Result:** Generic `.refine(rule)` inferred `Unknown`. Direct constrained methods such as `connected(self: Complex[B, O, ConnectivityUnknown, T]) -> Complex[B, O, Connected, T]` passed positive and negative Ty probes and are the accepted API.
 
-```python
-def star(self):
-    out = {d: self.chains[d].copy() for d in self.chains}
-    # propagate upwards from each dimension
-    for d in range(0, self.parent.dim):
-        if d in out and np.any(out[d]):
-            # cofaces of d-simplices are (d+1)-simplices
-            up = (self.parent.boundary_operator(d+1).T @ out[d]) > 0
-            out[d+1] = out.get(d+1, False) | up
-    return SimplicialSubset(out, parent)
+### TYPE-02 — Generic cochain-space and form spike
+
+**Purpose:** Prove `Complex × degree × semantics` without `SurfaceOneForm`.
+
+**Prerequisite:** `TYPE-01`.
+
+**Work:** Prove:
+
+```text
+CochainSpace[K, Literal[1]]
+    -> Form[K, Literal[1], OrdinaryForm]
+
+CochainSpace[K, Literal[1]]
+    -> Form[K, Literal[1], SO2Connection]
 ```
 
-**Closure algorithm**:
+The spike must determine whether Ty preserves `Literal[1]` from a literal space-construction call. If it widens to `int`, define the narrowest honest fixed-degree constructor or refinement. Do not enumerate arbitrary dimensions or degrees.
 
-```python
-def closure(self):
-    out = {d: self.chains[d].copy() for d in self.chains}
-    # propagate downwards
-    for d in range(self.parent.dim, 0, -1):
-        if d in out and np.any(out[d]):
-            down = (self.parent.boundary_operator(d) @ out[d]) > 0  # faces
-            out[d-1] = out.get(d-1, False) | down
-    return SimplicialSubset(out, parent)
+**RED cases:** Ty must reject:
+
+- degree-zero form where degree one is required;
+- ordinary form where connection semantics are required;
+- form constructed from coefficients without a cochain space.
+
+**Exit evidence:** Ty diagnostics prove positive and negative cases.
+
+### TYPE-03 — Typed linear-map spike
+
+**Purpose:** Avoid unsupported type-level `degree + 1` arithmetic.
+
+**Prerequisite:** `TYPE-02`.
+
+**Work:** Prove:
+
+```text
+LinearMap[K, SourceDegree, TargetDegree]
+    .apply(Form[K, SourceDegree, S])
+    -> Form[K, TargetDegree, S]
 ```
 
-**Link**: `Lk(S) = St(S) ∩ Cl(S)` interpreted as simplices disjoint from S? Standard definition: link of a set S is { σ | σ ∩ S = ∅ and σ ∪ S is a simplex? Actually for a *single* simplex σ, link = star(σ) ∩ closure(σ). For a set, often defined similarly. SimplicialSubset's link should return `star() & closure()` elementwise? But that intersection would be simplices that are both cofaces and faces of S; that's the "middle" layer. Indeed link(S) = St(S) ∩ Cl(S). This yields simplices disjoint from S but adjacent.
+Also prove runtime source-space identity is checked once when a value enters `apply`.
 
-#### IsComplex
+**RED cases:**
 
-S is a simplicial complex iff `S == closure(S)` (downward closed). Equivalent to: no d-simplex present without all its faces.
+- applying a map to the wrong source-degree category;
+- claiming the output remains in the source degree;
+- substituting different field semantics when the operator preserves semantics.
 
-```python
-def is_complex(self):
-    cl = self.closure()
-    return all(np.array_equal(self.chains.get(d, False), cl.chains[d]) for d in cl.chains)
+**Exit evidence:** No overload family proportional to arbitrary dimension; no type-level arithmetic simulation.
+
+### TYPE-04 — Constrained specific-dimensional algorithm spike
+
+**Purpose:** Prove a surface algorithm can require mathematical capability rather than a `SurfaceOneForm` class.
+
+**Prerequisite:** `TYPE-01` through `TYPE-03`.
+
+**Work:** Model one placeholder Hodge call requiring:
+
+```text
+TriangleManifold
+Closed
+Oriented
+Connected
+Literal[1]
+OrdinaryForm
 ```
 
-#### IsPure
+Ty must accept exactly the qualified specialization and reject unknown/open/unoriented/wrong-degree/wrong-semantics inputs.
 
-S is pure of degree k if:
+**Exit gate for T0:** If this cannot be expressed without unsafe escapes, stop and revise architecture before production code.
 
-- All maximal simplices have same dimension k.
-- Every simplex of dimension < k is face of some k-simplex in S.
+## T1 — Complete Simplicial Values
 
-**Algorithm**:
+### CORE-01 — Array ownership and complete construction
 
-1. Compute `max_d = max { d | chains[d] nonempty }`.
-2. For each `d < max_d`: every d-simplex in S must be face of some (d+1)-simplex in S. Use `∂_{d+1}` incidence: `(∂_{d+1} @ chains[d+1]) > 0` yields d-simplices that are faces of some (d+1)-simplex. Must cover `chains[d]`.
-3. Also check no simplices of dimension > max_d (obvious).
+**Purpose:** Establish the no-hack data owner pattern.
 
-Returns `(is_pure, max_d or -1)`.
+**Prerequisite:** T0 accepted.
 
-#### Boundary
+**RED tests in `test_simplicial.py`:**
 
-For a pure k-complex, boundary consists of (k-1)-simplices incident to **exactly one** k-simplex in S. Compute via `∂_k` restricted to S:
+- source array mutation does not change the owner;
+- exposed arrays cannot mutate retained storage under the chosen contract;
+- malformed bases fail during construction;
+- no zero-argument or half-initialized object exists;
+- construction returns a fully printable and queryable value.
 
-```python
-def boundary(self):
-    is_pur, k = self.is_pure()
-    if not is_pur or k == 0: raise or return empty
-    bd_counts = self.parent.boundary_operator(k) @ self.chains[k].astype(float)
-    bd_mask = bd_counts == 1
-    # collect lower dims via faces of boundary simplices? Actually boundary ∂S is a (k-1)-chain; to return full subset we need all faces of those boundary (k-1)-simplices? The boundary *as a subset* is the support of the (k-1)-chain: all (k-1)-simplices with coefficient ≡1 mod 2? Typically boundary of a chain is a chain; as a subset, we include those (k-1)-simplices. So output subset has only dimension (k-1) non-zero.
-    return SimplicialSubset({k-1: bd_mask}, parent)
+**Work:** Implement one standard `__slots__` data owner with ordinary assignments in `__init__`. Do not use frozen dataclasses for NumPy ownership.
+
+**Review firewall:** Search for `object.__setattr__`, `__new__`, `init=False`, mutable cache fields, `Any`, casts, and ignores.
+
+### CORE-02 — Canonical arbitrary-dimensional simplex bases
+
+**Purpose:** Construct a valid finite complex without geometry.
+
+**Prerequisite:** `CORE-01`.
+
+**RED laws:**
+
+- closure under faces;
+- canonical identity independent of input row ordering policy;
+- orientation kept distinct from identity;
+- duplicate/degenerate/out-of-range simplices rejected;
+- runtime dimension correct for arbitrary maximal-simplex width.
+
+**Work:** Build complete simplex bases and construction-local lookup data. Do not compute or retain sparse boundary maps yet.
+
+### CORE-03 — Boundary and incidence as intrinsic uncached methods
+
+**Purpose:** Implement topology without instance caches.
+
+**Prerequisite:** `CORE-02`.
+
+**RED laws:**
+
+- exact integer boundary coefficients;
+- $B_{k-1}B_k=0$;
+- unsigned incidence equals absolute boundary support;
+- caller mutation of returned sparse arrays does not alter the complex or later calls.
+
+**Work:** Expose `complex.boundary_matrix(k)` as the intrinsic API, delegate to a pure assembly helper, and return caller-owned sparse maps. No lazy dictionaries on the complex and no global `lru_cache`.
+
+### CORE-04 — Boolean subset algebra
+
+**Purpose:** Restore closure, star, link, purity, and boundary with one clear convention.
+
+**Prerequisite:** `CORE-03`.
+
+**RED laws:**
+
+- closure is extensive, monotone, and idempotent;
+- star is upward closure under the frozen definition;
+- link follows one documented formula;
+- purity and topological boundary are not confused with signed chain support;
+- subset arrays are owned and dimension-aligned.
+
+**Work:** Keep subset behavior within the simplicial concept. Do not create a separate topology wrapper.
+
+### CORE-05 — Cochain spaces and forms
+
+**Purpose:** Land the type shape proven by `TYPE-02`.
+
+**Prerequisite:** `CORE-03`.
+
+**RED tests:**
+
+- a cochain space binds complex, runtime degree, basis, and coefficient count;
+- forms are constructed only through a space;
+- degree and semantics remain precise where statically known;
+- wrong coefficient shape fails at construction;
+- two runtime spaces with equal sizes remain distinct identities.
+
+**Work:** Implement generic `Form[K, Degree, Semantics]`; do not add `SurfaceOneForm`, `EdgeOneForm`, or owner tokens.
+
+## T1 continued — Simplicial Property Refinement
+
+### REFINE-01 — Triangle-manifold refinement
+
+**Purpose:** Prove the capability actually consumed by specific-dimensional algorithms.
+
+**Prerequisite:** `CORE-02` and accepted `TYPE-01` design.
+
+**RED tests:**
+
+- top-dimensional bases are triangles;
+- edge incidence satisfies manifold policy;
+- vertex links satisfy cycle/path policy;
+- refinement failure leaves no stronger value;
+- successful refinement preserves unrelated axes.
+
+**Work:** Implement a constrained `triangle_manifold()` method on `Complex`; do not create `TriangleMesh` or a triangle-topology owner parallel to the complex.
+
+### REFINE-02 — Orientation, boundary, and connectivity rules
+
+**Purpose:** Add only independently consumed mathematical facts.
+
+**Prerequisite:** `REFINE-01`.
+
+**Slices:** Implement each rule as a separate subtask if the total diff approaches 500 lines.
+
+**RED laws:**
+
+- orientation consistency across interior faces;
+- deterministic boundary classification and loops;
+- connectedness from topology;
+- disk-boundary evidence only when one connected boundary and Euler/topology law agree;
+- each transition preserves all unrelated phantom axes.
+
+**Work:** Keep navigation indices derived from canonical simplex bases; do not renumber edges/faces independently.
+
+## T3 — Complete Geometry
+
+### GEOM-01 — Geometry construction and ownership
+
+**Purpose:** Create one complete geometry value rather than public embedding and metric owners.
+
+**Prerequisite:** `REFINE-01`.
+
+**RED tests in `test_surface.py`:**
+
+- positions are finite, aligned, owned, and complete;
+- source mutation does not change geometry;
+- edge lengths, face areas, normals, corner angles, and cotangents agree on canonical bases;
+- degenerate or unrepresentable geometry fails before construction returns;
+- no derived field is lazily stored later.
+
+**Work:** Compute routinely required intrinsic and extrinsic fields eagerly during construction through pure helper calculations.
+
+### GEOM-02 — Geometry refinements and state weakening
+
+**Purpose:** Make nondegeneracy and geometry-changing transitions honest.
+
+**Prerequisite:** `GEOM-01`.
+
+**RED type/runtime tests:**
+
+- algorithms requiring nondegeneracy reject unchecked geometry statically;
+- geometry refinement validates once;
+- a position-changing operation returns an unchecked geometry state;
+- preserved topology phantom axes remain unchanged.
+
+## T4 — Typed DEC Operators
+
+### OP-01 — Typed boundary and coboundary maps
+
+**Purpose:** Land `LinearMap[K, SourceDegree, TargetDegree]` for topology.
+
+**Prerequisite:** `CORE-03`, `CORE-05`, and `TYPE-03`.
+
+**RED laws in `test_operators.py`:**
+
+- source/target runtime spaces agree with static categories;
+- wrong runtime space is rejected at one admission boundary;
+- $d_{k+1}d_k=0$;
+- operator application preserves field semantics when mathematically valid.
+
+### OP-02 — Primal/dual measures without a dual owner
+
+**Purpose:** Supply Hodge data as complete computation products.
+
+**Prerequisite:** `GEOM-01` and `OP-01`.
+
+**RED laws:**
+
+- primal and signed dual measures align with exact cochain bases;
+- no `CircumcentricDual` object exists;
+- zero/non-finite inverse entries are rejected only by operations requiring inversion;
+- non-Delaunay signs are preserved rather than silently absolutized.
+
+### OP-03 — Hodge star and weighted pairing
+
+**Purpose:** Implement general metric DEC maps.
+
+**Prerequisite:** `OP-02`.
+
+**RED laws:**
+
+- source and target spaces explicit;
+- diagonal ratio follows the frozen convention;
+- weighted pairing is symmetric under its valid metric assumptions;
+- returned sparse representation is caller-owned.
+
+### OP-04 — Codifferential and Hodge Laplacian
+
+**Purpose:** Compose typed maps rather than owner methods.
+
+**Prerequisite:** `OP-03`.
+
+**RED laws:**
+
+- codifferential is the weighted adjoint;
+- Laplacian maps one cochain space to itself;
+- constant/nullspace laws for degree zero;
+- map composition rejects incompatible spaces.
+
+## T5 — Numerical Behavior
+
+### SOLVE-01 — Direct prepared solve
+
+**Purpose:** Isolate sparse factorization and residual evidence.
+
+**Prerequisite:** T0 type decisions.
+
+**RED tests in `test_dec.py`:**
+
+- factorization prepared once for multiple RHS;
+- singular and non-finite systems raise stable numerical errors;
+- backend message text is not the public error contract;
+- full residual is measured and certified;
+- no factorization is stored on a domain value.
+
+**Work:** Implement the minimum callable/protocol proven by the spike. Do not add a solver hierarchy or registry.
+
+### SOLVE-02 — Iterative solve only on demonstrated demand
+
+**Purpose:** Add CG only if an accepted study or requirement needs it.
+
+**Prerequisite:** Direct path accepted plus explicit user approval.
+
+**Admission:** Measured reason to avoid direct-factor storage or to compare numerical behavior.
+
+**Work:** Bounded iterations, explicit preconditioner lifetime, convergence evidence, and no silent direct fallback.
+
+## T6 — DEC Algorithms
+
+### DEC-01 — Scalar Poisson problem
+
+**Purpose:** Separate mathematical compatibility/gauge from numerical solving.
+
+**Prerequisite:** `OP-04`, `SOLVE-01`.
+
+**RED laws:**
+
+- closed connected compatibility condition;
+- incompatible density rejected, not silently projected;
+- explicit gauge;
+- scale-relative residual;
+- typed degree-zero input/output;
+- runtime domain identity admitted once.
+
+### DEC-02 — Degree-one Hodge decomposition
+
+**Purpose:** Implement the first specific-dimensional typed algorithm.
+
+**Prerequisite:** `TYPE-04`, `OP-04`, `SOLVE-01`, and closed/oriented/connected refinements.
+
+**RED laws:**
+
+- only qualified triangle-manifold geometry and ordinary degree-one form typecheck;
+- exact, coexact, and harmonic components reconstruct the input;
+- exact/coexact orthogonality under the admitted metric;
+- harmonic component is closed and coclosed;
+- no unrestricted cochain path performs deep degree/surface checks.
+
+**Output:** A complete immutable decomposition product generic over the domain, not an algorithm facade.
+
+### DEC-03 — Homology, periods, and harmonic bases
+
+**Purpose:** Bind topology-derived bases through real cochain spaces without owner-token glue.
+
+**Prerequisite:** `CORE-03`, `CORE-05`, `DEC-02`.
+
+**RED laws:**
+
+- basis dimensions agree with topology;
+- periods use the exact runtime domain once admitted;
+- wrong-domain basis/form pair fails at the problem boundary;
+- no repeated matching inside numerical kernels.
+
+## T7 — Specific-Dimensional Geometry Algorithms
+
+Each algorithm is a separate approved task and must use the exact phantom/certification requirements documented in architecture.
+
+### SURFACE-01 — Curvature
+
+- Require oriented nondegenerate embedded triangle-manifold geometry.
+- Return degree-zero forms on the same domain.
+- Verify Gauss--Bonnet, scale law, and mixed-sign behavior.
+
+### SURFACE-02 — One immutable mean-curvature-flow step
+
+- Require nondegenerate embedded triangle geometry and positive scale-aware step.
+- Return geometry with nondegeneracy weakened to unchecked.
+- Preserve topology state; verify centroid, dissipation, residual, and scale covariance.
+
+### SURFACE-03 — Disk harmonic extension
+
+- Require disk-boundary, oriented, connected triangle-manifold evidence.
+- Bind boundary values to the canonical boundary space.
+- Restore boundary exactly and certify residual.
+
+### SURFACE-04 — Conformal parameterization
+
+- Freeze the exact mathematical formulation before coding.
+- Use an explicit eigen/linear solve behavior.
+- Do not combine disk and closed-surface modes through a `mode` string or optional boundary argument.
+
+### SURFACE-05 — Connection and holonomy
+
+- Model a connection as `Form[K, Literal[1], SO2Connection]`.
+- Do not permit an ordinary one-form to substitute solely because shape matches.
+- Bind cycle data at one admitted problem boundary.
+
+### SURFACE-06 — Integrability and direction fields
+
+- Certify connection integrability as `Certified[Connection, Integrable]`.
+- Direction-field integration accepts only the certified value.
+- Do not discover the mathematical precondition halfway through field traversal.
+
+## T8 — Root Public Boundary
+
+### API-01 — Root exports
+
+**Purpose:** Publish only implemented, verified concepts.
+
+**Prerequisite:** At least one complete vertical slice.
+
+**Work:** Export constructors, refinement behaviors, typed values, and the accepted algorithm from `polygeo.__init__`. Do not create `api.py` or re-export planned names.
+
+**RED tests in the relevant existing behavior file:**
+
+- exact public imports needed by the current slice;
+- planned APIs absent;
+- rejected owner-chain names absent;
+- importing `polygeo` does not import Trimesh.
+
+### API-02 — `load_surface`
+
+**Purpose:** Keep the small mesh-loading boundary in `__init__.py`.
+
+**Prerequisite:** Geometry construction and root API.
+
+**Work:** Function-local Trimesh import; NPZ/mesh payload admission; return one complete geometry value with only properties actually verified by loading.
+
+**RED tests:**
+
+- supported formats;
+- malformed payloads;
+- one triangular object requirement;
+- lazy Trimesh import;
+- no path/I/O dependency in mathematical owners.
+
+## T9 — Consolidated Product Verification
+
+### VERIFY-01 — Structural firewall
+
+Scan source and reject any match or equivalent structure:
+
+```text
+object.__setattr__
+object.__dict__ mutation
+custom __new__ construction gate
+init=False empty shell
+cached_property on domain values
+owner/matches_metric identity APIs
+SurfaceOneForm or combination classes
+CircumcentricDual owner
+Any/object/cast/type-ignore leakage in target relations
+backend exception-message classification
 ```
 
-But our earlier boundary returned all faces of boundary edges etc. Actually for a pure k-complex, `∂(S)` is a (k-1)-chain. Its **support** is the set of (k-1)-simplices that appear. That's the boundary subset. So we return subset of dimension `k-1` only.
+AST review must supplement text search for mutable nested fields and hidden state.
 
----
+### VERIFY-02 — Consolidated test ownership
 
-## Implementation Phases
+Keep tests grouped by mathematical behavior:
 
-### Phase 1: Generic Incidence Machinery
+- `test_simplicial.py`: construction, refinement, topology, spaces, forms;
+- `test_operators.py`: typed maps and DEC operator laws;
+- `test_dec.py`: numerical behavior and solve-based DEC algorithms;
+- `test_surface.py`: geometry, specific-dimensional algorithms, loading, root API, installed smoke.
 
-- Build `simplices` list from vertex list and top-level simplex arrays (user provides: list of arrays per dimension, or a single array + dimension parameter).
-- Implement `_build_boundary(d)` that constructs `∂_d` as sparse matrix using `simplices[d]` and `simplices[d-1]`. Precompute index maps: `simplex_index[d][tuple(sorted(vs))] → index`.
-- Provide `boundary_operator(d)` property (lazy, cached).
-- Unit test: check `∂_1 ∂_2 = 0` (boundary of boundaryzero) on small complexes.
+Do not recreate one test file per implementation noun. Shared fixtures remain local until at least two behavior files need the same fixture.
 
-### Phase 2: Generic SimplicialSubset
+### VERIFY-03 — Independent review
 
-- Represent as `chains: dict[int, np.ndarray]` (bool or int).
-- `subset(d, indices=None, mask=None)` factory: constructs a pure-d subset or mixed if multiple dims given.
-- `is_complex()`: compare with closure.
-- `closure()`: downward via `∂`.
-- `star()`: upward via `∂^T` plus downward? Wait: star = all simplices having a face in S. That equals: start with S; for each dimension d from min(S) to D-1, compute cofaces of current d-simplices via `∂_{d+1}^T` and add to (d+1); then also add *all faces* of those cofaces? Actually if σ is a coface of some τ∈S, then σ is in star. The faces of σ are not necessarily in star unless they are also cofaces of something in S (they might be, since if σ has a face in S, some face of σ might also have a face in S? Not guaranteed). Standard star of a *vertex* includes all simplices that contain that vertex; that includes edges, faces, tetrahedra etc. It does *not* include faces of those faces that don't contain the vertex. So star = all simplices σ such that ∃ τ∈S with τ ⊆ σ. That's upward closure only, not including faces of cofaces that don't contain S. So algorithm: start with S; for d from min_d to D-1, compute `out[d+1] |= ∂_{d+1}^T @ out[d] > 0`. No downward propagation. **Closure** does downward. So for a vertex v, star(v) = {σ | v ∈ σ} = all simplices incident to v; that's cofaces only.
-- `link()`: `star() & closure()` intersection? Actually link(S) = star(S) ∩ closure(S) for a set S (sometimes also requires disjointness? For a single simplex, link = star ∩ closure with that simplex removed). For a set S, link = { σ | σ ∩ S = ∅ and σ ∪ S is a simplex } but easier: `link(S) = closure(star(S)) ∩ star(closure(S))`? Simpler: `link(S) = star(S) ∩ closure(S)` and then remove S? In many definitions, link of a face is St(F) ∩ Cl(F) with F removed. For our subset S, we can compute `lk = star() & closure()`, then subtract S if needed. But earlier version returned `star & ~closure` (set difference). That gave edges/faces *adjacent* but not containing. Correction: For vertex v, star(v) includes faces containing v; closure(v) = {v}. Link(v) = star(v) ∖ closure(v) = edges/faces containing v, with v removed. That matches earlier: link had only edges/faces, no vertices. That's the correct geometric link. So `link = star() - closure()`.
-- `is_pure()`: check closure equals union of all maximal simplices? Implementation: find max d with non-zero; verify every lower-d simplex in subset is face of some higher-d simplex in subset (using `∂`). Also verify subset is a complex first (or incorporate).
-- `boundary()`: for pure k, compute `∂_k @ chains[k]`. Support of that (k-1)-chain is boundary.
+Review the exact diff after all gates pass. The reviewer must attack:
 
-### Phase 3: API and Usability
+- phantom-state preservation;
+- runtime generic erasure assumptions;
+- runtime mesh/space identity admission;
+- constructor completeness;
+- array and sparse mutation isolation;
+- surface-specific generic constraints;
+- numerical signs, gauges, residuals, and scale laws;
+- package imports and artifact behavior.
 
-- Provide convenience methods: `complex.star(d, indices)`, `complex.closure(d, indices)`.
-- Support mixed-dimension subsets via combined masks.
-- `complex.pure_subset(d, selection)` returns pure d-complex (closure of selection).
-- `complex.boundary_of_subset(...)`.
+Any edit after review invalidates the review and requires rerunning affected gates.
 
-### Phase 4: Integration and Performance
+### VERIFY-04 — Fresh source and artifact verification
 
-- Lazy evaluation + caching of boundary matrices.
-- Use `scipy.sparse.csr` for fast matrix-vector multiplies.
-- For large complexes, consider `np.bool_` accumulators or sparse boolean algebra.
-- Benchmark on tetrahedral mesh (3D volumes) vs. surface mesh.
+Use a fresh isolated copy under the user's preferred temporary verification location. Verify:
 
-### Phase 5: Applications Layer
+1. locked dependency sync;
+2. format, lint, typecheck, and full tests;
+3. source consumer smoke;
+4. wheel build, install, import, and representative behavior;
+5. sdist build, install, import, and representative behavior;
+6. root API and lazy mesh-format dependency;
+7. no rejected modules or APIs in either artifact.
 
-- Laplace–Beltrami on functions (0-cochains) via `∂^* ∂` (away from boundary).
-- Hodge Laplacian on `k`-forms: `Δ = d δ + δ d`.
-- Solver integration (conjugate gradient).
-- Export results to polyscope/trimesh.
+## Acceptance Criteria
 
----
+The first architecture implementation is complete only when:
 
-## API Sketch
+- arbitrary runtime dimension does not require one nominal type per number;
+- surface-specific algorithms are constrained by verified mathematical capabilities;
+- forms are generic over complex, degree, and semantics;
+- no `SurfaceOneForm` or dimension-degree combination class exists;
+- no explicit `TypeVar`, old-style `Generic`, `Any`, or opaque `object` appears in the approved type path;
+- degree-changing operators use typed source/target spaces rather than type-level arithmetic;
+- refinement transitions preserve unrelated axes and Ty proves the result;
+- no hidden cache or post-construction mutation exists;
+- no circumcentric-dual or form-geometry glue owner exists;
+- runtime mesh/space identity is checked once at admission and not repeatedly downstream;
+- all mathematical laws and negative typecheck cases pass;
+- source, wheel, and sdist smokes pass in fresh environments;
+- documentation describes only landed behavior.
 
-```python
-# Construction from tetrahedral mesh
-V = ...  # (n_v, 3)
-T = ...  # (n_tet, 4) vertex indices
-sc = SimplicialComplex.from_tetrahedra(V, T)
+## Stop Conditions
 
-# Or from generic list
-sc = SimplicialComplex(simplices=[
-    np.arange(n_v).reshape(-1,1),          # 0-simplices (vertices)
-    edges,                                 # (n_e,2)
-    faces,                                # (n_f,3)
-    tetrahedra                           # (n_t,4) optional
-])
+Stop and report before proceeding when:
 
-# Subsets
-v0 = sc.subset(dim=0, indices=np.array([0]))   # single vertex
-star_v0 = v0.star()    # all incident edges, faces, tetrahedra...
-
-# Pure 2-complex from faces
-surf = sc.subset(dim=2, faces=np.array([0,2,5]))
-is_pure, deg = surf.is_pure()  # (True,2)
-
-# Boundary of a 2-complex (surface)
-bd_surf = surf.boundary()  # returns 1-chain (edges)
-
-# Chain operations (advanced)
-C2 = sc.chain_space(dim=2)   # shape (n_f,)
-d1 = sc.boundary_operator(1)  # ∂_1: E→V
-cofaces = d1.T @ some_edge_mask
-```
-
----
-
-## Testing Strategy
-
-- Unit tests for `∂_d ∂_{d+1} = 0` (exactness).
-- `closure()` idempotent, `star()` monotone, `link()` definition.
-- `is_complex` for all subsets of small complexes.
-- Boundary double-application = 0 on pure complexes.
-- Tetrahedral cube, 3D torus, higher-dim analogues.
-
----
-
-## Risks & Mitigations
-
-- **Memory**: boundary matrices can be large for dense meshes. Use sparse CSR; build on demand per dimension.
-- **Orientation signs**: need consistent orientation ordering. We adopt `(-1)^i` for i-th opposite face. Verify `∂^2 = 0` in tests.
-- **API complexity**: hide matrices behind high-level subset methods. Provide both chain-level and subset-level interfaces.
-
----
-
-## Milestones
-
-1. `M1`: Generic boundary matrix builder; `∂_2 ∂_1 = 0` passes on tetrahedron.
-2. `M2`: `SimplicialSubset` with `closure()`, `star()` for any dimension.
-3. `M3`: `is_complex`, `is_pure`, `boundary` correctly on mixed dims.
-4. `M4`: Integration test suite (covers previous 3D tests as special case).
-5. `M5`: DEC operators (codifferential, Laplacian) on 0/1/2-forms.
+- Ty cannot prove a central relationship without unsafe escapes;
+- a task requires more than 500 changed lines;
+- a new type exists only to forward another value;
+- a property axis has no accepted algorithm consumer;
+- a cache is proposed without profile evidence;
+- a surface algorithm still accepts a general unrestricted form;
+- runtime identity is being misrepresented as statically proven;
+- a mathematical convention is unresolved;
+- repository/index handling is ambiguous;
+- any command would commit, push, reset, restore, or clean without explicit authorization.

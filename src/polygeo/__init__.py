@@ -1,4 +1,53 @@
-"""PolyGeo - Arbitrary-dimensional simplicial complexes."""
-from .simplicial import SimplicialComplex, SimplicialSubset
+"""Public API for the PolyGeo simplicial core."""
 
-__all__ = ["SimplicialComplex", "SimplicialSubset"]
+from .simplicial import (
+    ORDINARY_FORM,
+    BoundaryState,
+    BoundaryUnknown,
+    Closed,
+    CochainSpace,
+    Complex,
+    Connected,
+    ConnectivityState,
+    ConnectivityUnknown,
+    FieldSemantics,
+    Form,
+    OneForm,
+    OrdinaryForm,
+    OrientationState,
+    OrientationUnknown,
+    Oriented,
+    Simplicial,
+    SimplicialError,
+    SimplexSubset,
+    TopologyState,
+    TriangleManifold,
+    TwoForm,
+    ZeroForm,
+)
+
+__all__ = [
+    "ORDINARY_FORM",
+    "BoundaryState",
+    "BoundaryUnknown",
+    "Closed",
+    "CochainSpace",
+    "Complex",
+    "Connected",
+    "ConnectivityState",
+    "ConnectivityUnknown",
+    "FieldSemantics",
+    "Form",
+    "OneForm",
+    "OrdinaryForm",
+    "OrientationState",
+    "OrientationUnknown",
+    "Oriented",
+    "SimplexSubset",
+    "Simplicial",
+    "SimplicialError",
+    "TopologyState",
+    "TriangleManifold",
+    "TwoForm",
+    "ZeroForm",
+]

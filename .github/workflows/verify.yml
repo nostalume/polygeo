@@ -1,0 +1,43 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  platform-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: uv run python -W error::DeprecationWarning -W error::FutureWarning -m pytest -q
+
+  release-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run ty check --error-on-warning .
+      - run: uv run marimo check examples/sphere_curvature.py examples/poisson_flow.py examples/parameterization.py examples/hodge_fields.py
+      - run: uv run pytest -m slow -q
+      - run: uv build
+      - run: uv venv wheel-venv --python 3.14
+      - run: uv pip install --python wheel-venv dist/*.whl
+      - run: wheel-venv/bin/python -I tests/installed_distribution.py
+      - run: uv venv sdist-venv --python 3.14
+      - run: uv pip install --python sdist-venv dist/*.tar.gz
+      - run: sdist-venv/bin/python -I tests/installed_distribution.py

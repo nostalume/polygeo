@@ -1,18 +1,15 @@
 [project]
 name = "polygeo"
 version = "0.1.0"
-description = "Add your description here"
+description = "A reading implementation of discrete differential geometry"
 readme = "README.md"
 authors = [
-    { name = "lvyuemeng", email = "lv15623448685@gmail.com" }
+    { name = "nostalume", email = "nostalume@gmail.com" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
-    "gpytoolbox>=0.3.7",
-    "numpy>=2.2.6",
-    "polyscope>=2.6.1",
-    "scipy>=1.15.0",
-    "trimesh>=4.11.5",
+    "numpy>=2.3.2",
+    "scipy>=1.16.1",
 ]
 
 [build-system]
@@ -21,7 +18,13 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "marimo==0.23.15",
+    "plotly>=6",
     "pytest>=9.0.3",
     "ruff>=0.15.11",
     "ty>=0.0.32",
 ]
+
+[tool.pytest.ini_options]
+markers = ["slow: release-only notebook export smoke tests"]
+addopts = "-m 'not slow'"
