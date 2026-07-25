@@ -38,19 +38,22 @@ Physical layout is intentionally compact. It is an implementation consequence, n
 src/polygeo/
   __init__.py      root exports and load_surface
   simplicial.py    complete complex data, refinements, cochain spaces and topology
+  geometry.py      complete general Euclidean geometry and simplex measures
   operators.py     typed maps and metric DEC operators
   dec.py           general DEC problem assembly and certified products
-  surface.py       complete triangle geometry and specific-dimensional algorithms
+  surface.py       approved specific-dimensional deductions and algorithms
   solver.py        domain-neutral numerical behavior
 
 tests/
   test_simplicial.py
+  test_geometry.py
   test_operators.py
   test_dec.py
   test_surface.py
+  test_typecheck_contracts.py
 ```
 
-Do not create `api.py`, `io.py`, `errors.py`, `result.py`, `forms.py`, `metric.py`, `geometry.py`, `dual.py`, or one test file per source module unless a later approved design demonstrates a separate behavior owner.
+Do not create `api.py`, `io.py`, `errors.py`, `result.py`, `forms.py`, `metric.py`, `dual.py`, or one test file per source module unless a later approved design demonstrates a separate behavior owner. General geometry and executable negative type contracts are approved behavior owners, not organizational mirrors.
 
 ## Mandatory Gates
 
@@ -327,36 +330,41 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 
 **Work:** Keep navigation indices derived from canonical simplex bases; do not renumber edges/faces independently.
 
-## T3 — Complete Geometry
+## T3 — Complete General Geometry
 
-### GEOM-01 — Geometry construction and ownership
+### GEOM-01 — Arbitrary-dimensional geometry construction and ownership
 
-**Purpose:** Create one complete geometry value rather than public embedding and metric owners.
+**Purpose:** Bind one exact arbitrary-dimensional complex to complete Euclidean positions and canonical simplex measures.
 
-**Prerequisite:** `REFINE-01`.
+**Prerequisite:** `CORE-01` and `TYPE-01`.
 
-**RED tests in `test_surface.py`:**
+**RED tests in `test_geometry.py`:**
 
-- positions are finite, aligned, owned, and complete;
+- exact `float64` positions are finite, basis-aligned, owned, and complete;
 - source mutation does not change geometry;
-- edge lengths, face areas, normals, corner angles, and cotangents agree on canonical bases;
+- degree-$k$ Euclidean measures agree with canonical simplex bases through arbitrary runtime dimension;
+- measures scale by $s^k$ without avoidable intermediate overflow/underflow;
+- valid highly anisotropic simplices are not rejected by an absolute epsilon;
 - degenerate or unrepresentable geometry fails before construction returns;
-- no derived field is lazily stored later.
+- public arrays are caller-owned and no derived field is lazily stored later;
+- `Geometry[K]` preserves the complete static complex specialization and exact runtime complex identity.
 
-**Work:** Compute routinely required intrinsic and extrinsic fields eagerly during construction through pure helper calculations.
+**Work:** Make ordinary construction and `from_positions` share one complete boundary. Normalize each local edge column, use QR diagonal products with exponent tracking, and form an exact binary-float Gram determinant from original coordinates to resolve both rank and measure when QR is suspicious. Eagerly own one measure array for every represented degree. Do not add a dimension marker, geometry state axis, metric owner, dual owner, or cache.
 
-### GEOM-02 — Geometry refinements and state weakening
+### GEOM-02 — Constrained triangle-geometry deductions
 
-**Purpose:** Make nondegeneracy and geometry-changing transitions honest.
+**Purpose:** Add only the triangle-specific fields consumed by an approved surface/DEC operation.
 
-**Prerequisite:** `GEOM-01`.
+**Prerequisite:** `GEOM-01`, `REFINE-01`, and an accepted consumer.
 
 **RED type/runtime tests:**
 
-- algorithms requiring nondegeneracy reject unchecked geometry statically;
-- geometry refinement validates once;
-- a position-changing operation returns an unchecked geometry state;
-- preserved topology phantom axes remain unchanged.
+- normals/angles/cotangents are statically constrained to `TriangleManifold` geometry;
+- normals additionally reject unsupported ambient dimension at runtime;
+- face reorientation reverses normals but preserves measures, angles, and cotangents;
+- general `Geometry[K]` remains free of optional surface-only fields.
+
+**Work:** Prefer constrained pure methods or one consumer-owned complete computation product. Do not introduce `SurfaceGeometry`, `GeometryUnknown`, or `Nondegenerate` until a complete weaker value and real consumer prove the need.
 
 ## T4 — Typed DEC Operators
 
@@ -412,11 +420,53 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 - constant/nullspace laws for degree zero;
 - map composition rejects incompatible spaces.
 
+### TOPO-BC-01 — Canonical topological boundary
+
+**Purpose:** Identify the complete topological boundary as a subset bound to the exact complex.
+
+**Prerequisite:** `CORE-04` and the relevant manifold refinement.
+
+**RED laws:**
+
+- closed complexes return the empty boundary subset;
+- manifold boundary faces and their closure align with canonical simplex bases;
+- disconnected boundary components are preserved without renumbering;
+- nonmanifold inputs fail at the owning admission boundary.
+
+### OP-BC-01 — Cochain subspaces and trace maps
+
+**Purpose:** Represent boundary/interior degrees of freedom and their exact restriction/prolongation maps.
+
+**Prerequisite:** `TOPO-BC-01` and `OP-01`.
+
+**RED laws:**
+
+- a subspace retains its parent cochain space and canonical indices;
+- restriction followed by prolongation has the expected mask law;
+- wrong-complex or wrong-degree compositions fail once at admission;
+- no owner token or hidden renumbering substitutes for the actual parent space.
+
+### PROBLEM-BC-01 — Explicit boundary-value assembly
+
+**Purpose:** Apply essential and natural boundary semantics before numerical solving.
+
+**Prerequisite:** `OP-BC-01`, the required DEC operator, and an approved boundary-value algorithm.
+
+**RED laws:**
+
+- Dirichlet elimination assembles $A_{II}x_I=b_I-A_{IB}g_B$ and reconstructs prescribed values exactly;
+- Neumann data enters the weak-form right-hand side and incompatible forcing is rejected;
+- pure-Neumann/closed nullspaces require an explicit gauge;
+- Robin terms modify both operator and right-hand side;
+- the numerical solver receives only an assembled system and has no boundary-condition branch.
+
+**Work:** Keep Dirichlet, Neumann, and Robin as distinct mathematical formulations rather than a mode string, optional boundary argument, or solver configuration union.
+
 ## T5 — Numerical Behavior
 
 ### SOLVE-01 — Direct prepared solve
 
-**Purpose:** Isolate sparse factorization and residual evidence.
+**Purpose:** Isolate boundary-agnostic sparse factorization and residual evidence.
 
 **Prerequisite:** T0 type decisions.
 
@@ -492,14 +542,14 @@ Each algorithm is a separate approved task and must use the exact phantom/certif
 
 ### SURFACE-01 — Curvature
 
-- Require oriented nondegenerate embedded triangle-manifold geometry.
+- Require oriented complete embedded triangle-manifold geometry and the accepted triangle deductions.
 - Return degree-zero forms on the same domain.
 - Verify Gauss--Bonnet, scale law, and mixed-sign behavior.
 
 ### SURFACE-02 — One immutable mean-curvature-flow step
 
-- Require nondegenerate embedded triangle geometry and positive scale-aware step.
-- Return geometry with nondegeneracy weakened to unchecked.
+- Require complete embedded triangle geometry and positive scale-aware step.
+- Readmit changed positions through complete `Geometry.from_positions`; return complete geometry or fail.
 - Preserve topology state; verify centroid, dissipation, residual, and scale covariance.
 
 ### SURFACE-03 — Disk harmonic extension
@@ -585,9 +635,11 @@ AST review must supplement text search for mutable nested fields and hidden stat
 Keep tests grouped by mathematical behavior:
 
 - `test_simplicial.py`: construction, refinement, topology, spaces, forms;
+- `test_geometry.py`: arbitrary-dimensional Euclidean admission, measures, scale, degeneracy, and ownership;
 - `test_operators.py`: typed maps and DEC operator laws;
 - `test_dec.py`: numerical behavior and solve-based DEC algorithms;
-- `test_surface.py`: geometry, specific-dimensional algorithms, loading, root API, installed smoke.
+- `test_surface.py`: specific-dimensional deductions and algorithms, loading, root API, installed smoke;
+- `test_typecheck_contracts.py`: execute negative Ty fixtures and enforce exact diagnostic counts.
 
 Do not recreate one test file per implementation noun. Shared fixtures remain local until at least two behavior files need the same fixture.
 

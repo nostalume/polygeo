@@ -4,7 +4,7 @@ PolyGeo is a Python 3.14 reading implementation of discrete differential geometr
 
 ## Current status
 
-The first executable slice is implemented: an arbitrary-dimensional simplicial core with canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, cochain spaces, and generic forms. Geometry, metric DEC, solvers, surface algorithms, and mesh loading remain planned.
+The implemented core includes arbitrary-dimensional simplicial topology and complete Euclidean geometry: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, cochain spaces, generic forms, owned positions, and scale-safe simplex measures. Metric DEC operators, solvers, boundary-value problems, surface-specific deductions, and mesh loading remain planned.
 
 Previous topology/surface/dual owner-chain code was rejected and removed. No compatibility with that API is promised; later slices still require explicit approval.
 
@@ -40,6 +40,30 @@ boundary_2 = surface.boundary_matrix(2)
 ```
 
 `closed()` is a separate refinement and correctly rejects this disk example.
+
+## General geometry
+
+```python
+from polygeo import Geometry
+
+geometry = Geometry.from_positions(
+    raw,
+    np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ],
+        dtype=np.float64,
+    ),
+)
+
+edge_lengths = geometry.simplex_measures(1)
+triangle_areas = geometry.simplex_measures(2)
+```
+
+`Geometry[K]` preserves the exact complex identity and supports any intrinsic dimension representable in its runtime ambient dimension. Triangle normals, corner angles, and cotangents remain separate constrained computations.
 
 ## Documentation
 

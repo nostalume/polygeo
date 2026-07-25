@@ -1,5 +1,6 @@
 """Public API for the PolyGeo simplicial core."""
 
+from .geometry import Geometry, GeometryError
 from .simplicial import (
     ORDINARY_FORM,
     BoundaryState,
@@ -38,6 +39,8 @@ __all__ = [
     "ConnectivityUnknown",
     "FieldSemantics",
     "Form",
+    "Geometry",
+    "GeometryError",
     "OneForm",
     "OrdinaryForm",
     "OrientationState",

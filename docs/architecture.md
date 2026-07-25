@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the target architecture. The arbitrary-dimensional simplicial core, constrained topology refinements, boundary matrices, simplex subsets, cochain spaces, and generic forms are implemented by T1. Geometry, metric DEC, numerical solvers, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
+This document defines the target architecture. The arbitrary-dimensional simplicial core, constrained topology refinements, boundary matrices, simplex subsets, cochain spaces, generic forms, and complete general Euclidean geometry are implemented. Metric DEC, numerical solvers, boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
 
 [`roadmap.md`](roadmap.md) contains the implementation tasks. Architecture decisions and implementation status must not be mixed.
 
@@ -181,10 +181,9 @@ BoundaryUnknown | Closed | HasBoundary | DiskBoundary
 OrientationUnknown | Oriented
 ConnectivityUnknown | Connected
 TopologyUnknown | Simplicial | Manifold | TriangleManifold
-GeometryUnknown | PiecewiseEuclidean | EmbeddedEuclidean3
 ```
 
-Only properties consumed by real algorithms become axes. The architecture does not predeclare every conceivable mathematical adjective.
+Only properties consumed by real algorithms become axes. Complete `Geometry[K]` is a separate composition and does not add a speculative property axis to `Complex`. The architecture does not predeclare every conceivable mathematical adjective.
 
 A single runtime `Complex` class can therefore be viewed statically as, for example:
 
@@ -334,37 +333,50 @@ Sparse matrices are representations of these maps, not the public mathematical i
 
 ## Geometry Model
 
-### One complete geometry value
+### One complete general geometry value
 
-PolyGeo initially exposes one complete geometry composition rather than separate public `Embedding` and `Metric` owners.
-
-Conceptually:
+`Geometry[K]` composes one exact simplicial complex with a finite Euclidean position matrix. Both intrinsic simplicial dimension and ambient coordinate dimension remain runtime data.
 
 ```python
-class Geometry[K, State]:
+class Geometry[K]:
+    def __init__[
+        B: BoundaryState,
+        O: OrientationState,
+        C: ConnectivityState,
+        T: TopologyState,
+    ](
+        self: Geometry[Complex[B, O, C, T]],
+        complex_: Complex[B, O, C, T],
+        positions: FloatArray,
+    ) -> None: ...
+
+    @staticmethod
+    def from_positions[
+        B: BoundaryState,
+        O: OrientationState,
+        C: ConnectivityState,
+        T: TopologyState,
+    ](
+        complex_: Complex[B, O, C, T],
+        positions: FloatArray,
+    ) -> Geometry[Complex[B, O, C, T]]: ...
+
     @property
     def complex(self) -> K: ...
 
     @property
-    def positions(self) -> FloatArray: ...
+    def ambient_dimension(self) -> int: ...
+
+    def simplex_measures(self, degree: int) -> FloatArray: ...
 ```
 
-Construction immediately computes and validates all routinely required fields:
+Both ordinary construction and `from_positions` statically require an actual four-axis `Complex[...]` and use the same complete admission boundary. Construction validates and owns exact `float64` positions, requires ambient dimension at least intrinsic dimension (including valid zero-complex geometry in $\mathbb{R}^0$), and eagerly computes positive finite Euclidean measures for every canonical simplex basis. A degree-$k$ measure scales by $s^k$ under uniform position scaling. Each local edge column is normalized independently before QR factorization, and exponent-tracked products avoid avoidable intermediate overflow and underflow. Suspicious numerical rank falls back to an exact Gram determinant formed from the admitted binary-float coordinates before rounded subtraction, including scale-safe square-root conversion; no epsilon alone rejects a simplex or supplies an inaccurate near-singular measure.
 
-- edge lengths;
-- face areas;
-- face normals;
-- corner angles and cotangents;
-- primal measures;
-- signed dual measures required by the initial DEC path.
+Construction rejects affine degeneracy and any required public measure that is not representable. There is no speculative `GeometryUnknown`/`Nondegenerate` state axis: every returned value is complete. A future position-changing operation must call the same complete admission boundary and either return a valid `Geometry[K]` or raise `GeometryError`.
+
+Triangle normals, corner angles, and corner cotangents are dimension-specific deductions and are not fields on the general geometry value. They require separate constrained methods or complete computation products after a consumer is approved. Primal/dual DEC measure products remain owned by the operator layer rather than duplicated on geometry.
 
 An independently supplied intrinsic metric becomes a separate public concept only after a real caller needs intrinsic geometry without positions or multiple embeddings sharing one metric.
-
-### Geometry state transitions
-
-A geometry-changing operation does not automatically retain `Nondegenerate` evidence. For example, a flow step returns an unchecked geometry state, which must be refined again before algorithms requiring nondegeneracy.
-
-Topology properties that are mathematically preserved remain in the generic parameter. Geometry properties that may be invalidated are deliberately weakened in the return type.
 
 ## Surface-Specific Algorithms Without Surface-Specific Form Classes
 
@@ -374,19 +386,26 @@ For closed-surface degree-one Hodge decomposition, the effective requirement is:
 
 ```text
 K has TriangleManifold, Closed, Oriented, Connected
-geometry is nondegenerate piecewise-Euclidean
+geometry is a complete piecewise-Euclidean Geometry[K]
 input is Form[K, Literal[1], OrdinaryForm]
 ```
 
 Conceptually:
 
 ```python
-def hodge_decomposition[K](
-    geometry: QualifiedGeometry[K],
-    form: OneForm[K],
+type QualifiedSurface = Complex[
+    Closed,
+    Oriented,
+    Connected,
+    TriangleManifold,
+]
+
+def hodge_decomposition(
+    geometry: Geometry[QualifiedSurface],
+    form: OneForm[QualifiedSurface],
     *,
     solve: LinearSolve,
-) -> HodgeDecomposition[K]: ...
+) -> HodgeDecomposition[QualifiedSurface]: ...
 ```
 
 The exact Python bound must be proven by the type-system spike. It must not collapse to `Any`, `object`, or a runtime-only contract.
@@ -395,8 +414,8 @@ Other requirements are similarly explicit:
 
 | Algorithm | Required domain/form semantics |
 |---|---|
-| Gaussian curvature | oriented nondegenerate embedded triangle manifold; returns degree-zero form |
-| Mean-curvature flow | nondegenerate embedded triangle manifold plus positive scale-aware step |
+| Gaussian curvature | oriented complete embedded triangle-manifold geometry; returns degree-zero form |
+| Mean-curvature flow | complete embedded triangle-manifold geometry plus positive scale-aware step; output is readmitted completely or fails |
 | Closed Poisson | connected closed metric triangle manifold plus compatible degree-zero density |
 | Harmonic extension | connected disk-boundary triangle manifold plus boundary values in canonical boundary space |
 | Hodge decomposition | connected closed oriented triangle manifold plus ordinary degree-one form |
@@ -441,6 +460,33 @@ Therefore:
 - numerical kernels consume admitted values and do not repeat owner checks.
 
 The architecture must not claim that a shared generic parameter alone proves runtime instance identity.
+
+## Boundary-Value Ownership
+
+Boundary conditions are mathematical problem assembly, not numerical solver behavior.
+
+The ownership chain is:
+
+```text
+complex topology
+  -> canonical topological-boundary subset
+  -> cochain subspace plus restriction/prolongation maps
+  -> formulation-specific reduced or augmented linear problem
+  -> boundary-agnostic numerical solve
+  -> typed full-space reconstruction and residual certificate
+```
+
+Dirichlet assembly explicitly forms
+
+$$
+A_{II}x_I = b_I - A_{IB}g_B
+$$
+
+and reconstructs the prescribed boundary values exactly. Neumann data enters the weak-form right-hand side; pure-Neumann or closed nullspaces require an explicit compatibility check and gauge. Robin data contributes to both operator and right-hand side.
+
+Dirichlet, Neumann, and Robin formulations must not be collapsed into a mode string, optional boundary argument, solver flag, or behavior-bearing configuration union. The numerical solver receives only an admitted matrix/system and right-hand side. It never discovers boundary vertices, selects a gauge, projects incompatible forcing, or interprets cochain semantics.
+
+Python generics cannot prove that two runtime subspaces came from one complex instance. A cochain subspace therefore retains its actual parent `CochainSpace` and canonical indices; restriction/prolongation and problem assembly verify runtime identity once before numerical kernels run. No owner token or independent boundary renumbering substitutes for that mathematical data.
 
 ## Numerical Behavior Interfaces
 
@@ -596,7 +642,7 @@ Implementation acceptance is based on laws, not file count:
 - Hodge Laplacian maps one cochain space to itself;
 - closed scalar Poisson enforces compatibility and gauge;
 - Hodge decomposition reconstructs the input and certifies exact, coexact, and harmonic laws;
-- geometry-changing operations weaken invalidated typestate and preserve only proven topology state;
+- geometry-changing operations readmit changed positions completely or fail while preserving the exact complex identity;
 - source, wheel, and sdist consumers observe the same root API.
 
 ## Non-Goals
