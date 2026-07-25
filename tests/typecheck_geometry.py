@@ -1,6 +1,7 @@
 from typing import assert_type
 
 import numpy as np
+from numpy.typing import NDArray
 
 from polygeo import (
     BoundaryUnknown,
@@ -37,3 +38,5 @@ assert_type(
 )
 assert_type(direct_geometry, Geometry[Domain])
 assert_type(geometry.complex, Domain)
+assert_type(geometry.primal_measures(2), NDArray[np.float64])
+assert_type(geometry.dual_measures(2), NDArray[np.float64])

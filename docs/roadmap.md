@@ -387,7 +387,7 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 - composition statically unifies the intermediate degree and checks the exact runtime space;
 - `matrix()` returns a complete, finite, canonicalized, caller-owned CSR representation without exposing a mutable view.
 
-### OP-02 — Grouped primal/circumcentric-dual geometry measures
+### OP-02 — Grouped primal/dual geometry measures
 
 **Purpose:** Let one complete `Geometry` extract primal and signed circumcentric-dual measures in its canonical simplex bases.
 
@@ -395,25 +395,32 @@ Ty must accept exactly the qualified specialization and reject unknown/open/unor
 
 **RED laws:**
 
-- `Geometry.simplex_measures(degree)` supplies primal measures;
-- `Geometry.circumcentric_dual_measures(degree)` supplies signed dual measures in the same canonical basis;
-- degree-two primal area comes from `Geometry.simplex_measures(2)` rather than a duplicate face-area field;
+- `Geometry.primal_measures(degree)` supplies $|\sigma^k|$;
+- `Geometry.dual_measures(degree)` supplies signed circumcentric $|\star\sigma^k|$ in the same canonical primal basis;
+- the dual cells have runtime dimension $n-k$, while both APIs consistently accept associated primal degree $k$;
+- degree-two primal area comes from `Geometry.primal_measures(2)` rather than a duplicate face-area field;
 - no free measure function or redundant primal/dual result wrapper exists;
 - no `CircumcentricDual` object exists;
+- no dual cache or duplicated `DualComplex` exists;
 - zero/non-finite inverse entries are rejected only by operations requiring inversion;
-- non-Delaunay signs are preserved rather than silently absolutized.
+- zero and non-Delaunay signs are preserved rather than silently absolutized;
+- immediate-coface recurrence equals explicit signed flags through dimension four;
+- degree-$k$ dual measures scale as $s^{n-k}$ and remain rigid-embedding invariant.
 
 Two-dimensional cotangent weights are a later specialization law of the generic Hodge/Laplacian construction, not stored base-geometry data.
 
 ### OP-03 — Hodge star and weighted pairing
 
-**Purpose:** Implement general metric DEC maps.
+**Purpose:** Migrate forms/maps to exact space-generic typing, add a subordinate dual cochain space, then implement general metric DEC maps.
 
 **Prerequisite:** `OP-02`.
 
 **RED laws:**
 
-- source and target spaces explicit;
+- `Form[Space, Semantics]` and `LinearMap[SourceSpace, TargetSpace]` preserve exact space identity;
+- the existing exterior derivative retains behavior while migrating to space-generic maps;
+- `DualCochainSpace[K, PrimalDegree]` references the exact geometry and primal cochain space without duplicating topology;
+- Hodge source and target spaces are explicit primal and subordinate dual spaces;
 - diagonal ratio follows the frozen convention;
 - weighted pairing is symmetric under its valid metric assumptions;
 - returned sparse representation is caller-owned.

@@ -4,7 +4,7 @@ PolyGeo is a Python 3.14 reading implementation of discrete differential geometr
 
 ## Current status
 
-The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, and the topological exterior derivative: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, cochain spaces, generic forms, typed linear maps, owned positions, and scale-safe simplex measures. Metric DEC operators, solvers, boundary-value problems, surface-specific deductions, and mesh loading remain planned.
+The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, and the topological exterior derivative: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, cochain spaces, generic forms, typed linear maps, owned positions, scale-safe primal measures, and signed circumcentric dual measures. Hodge maps, solvers, boundary-value problems, surface-specific deductions, and mesh loading remain planned.
 
 Previous topology/surface/dual owner-chain code was rejected and removed. No compatibility with that API is promised; later slices still require explicit approval.
 
@@ -59,11 +59,12 @@ geometry = Geometry.from_positions(
     ),
 )
 
-edge_lengths = geometry.simplex_measures(1)
-triangle_areas = geometry.simplex_measures(2)
+edge_lengths = geometry.primal_measures(1)
+triangle_areas = geometry.primal_measures(2)
+dual_edge_lengths = geometry.dual_measures(1)
 ```
 
-`Geometry[K]` preserves the exact complex identity and supports any intrinsic dimension representable in its runtime ambient dimension. Triangle normals, corner angles, and cotangents remain separate constrained computations.
+`Geometry[K]` preserves the exact complex identity and supports any intrinsic dimension representable in its runtime ambient dimension. Both measure methods use the associated primal degree and canonical primal simplex indices: `primal_measures(k)[i]` is $|\sigma_i^k|$, while `dual_measures(k)[i]` is the signed circumcentric $|\star\sigma_i^k|$ of runtime dimension $n-k$. The dual computation is pure and uncached; no measure-only dual owner or duplicated dual complex exists. Triangle normals, corner angles, and cotangents remain separate constrained computations.
 
 ## Topological exterior derivative
 
@@ -86,7 +87,7 @@ zero_map = d1.compose(d0)
 assert zero_map.matrix().nnz == 0
 ```
 
-`LinearMap[K, SourceDegree, TargetDegree]` retains exact source and target spaces. Its mathematical methods are `apply`, `compose`, and `matrix`: application preserves field semantics, composition statically unifies the intermediate degree and checks the exact runtime space, and `matrix()` returns a caller-owned CSR representation. Explicit spaces keep the API arbitrary-dimensional without pretending Python can calculate `SourceDegree + 1` at the type level. The chain boundary remains `Complex.boundary_matrix(k)`; the cochain exterior derivative uses its transpose. Dual measures, Hodge maps, and the two-dimensional cotangent specialization remain later metric-operator work.
+`LinearMap[K, SourceDegree, TargetDegree]` retains exact source and target spaces. Its mathematical methods are `apply`, `compose`, and `matrix`: application preserves field semantics, composition statically unifies the intermediate degree and checks the exact runtime space, and `matrix()` returns a caller-owned CSR representation. Explicit spaces keep the API arbitrary-dimensional without pretending Python can calculate `SourceDegree + 1` at the type level. The chain boundary remains `Complex.boundary_matrix(k)`; the cochain exterior derivative uses its transpose. Before Hodge, forms and maps will migrate separately to exact space-generic `Form[Space, Semantics]` and `LinearMap[SourceSpace, TargetSpace]`, then add a subordinate dual cochain space without a duplicated `DualComplex`.
 
 ## Documentation
 
