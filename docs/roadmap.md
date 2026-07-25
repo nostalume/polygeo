@@ -7,7 +7,7 @@ This document is a proposed implementation sequence for [`architecture.md`](arch
 Current implemented baseline:
 
 - arbitrary-dimensional simplicial topology, typestate refinements, cochain spaces, and forms;
-- complete arbitrary-dimensional Euclidean geometry and primal simplex measures;
+- complete arbitrary-dimensional Euclidean geometry, primal simplex measures, and signed circumcentric dual measures;
 - typed linear maps, composition, and arbitrary-dimensional topological exterior derivative;
 - executable runtime, positive Ty, and negative Ty contracts;
 - rejected owner-chain modules remain retired and must not be restored.

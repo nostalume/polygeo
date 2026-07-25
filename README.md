@@ -16,7 +16,7 @@ The approved design is based on:
 - PEP 695 generic types without explicit `TypeVar` declarations;
 - constrained typestate methods for verified topology capabilities;
 - cochain spaces that bind basis, runtime degree, and complex identity;
-- generic forms parameterized by complex, degree, and semantics;
+- generic forms parameterized by exact coefficient space and semantics;
 - typed linear maps with explicit source and target spaces;
 - specific-dimensional algorithms constrained by mathematical capability rather than `SurfaceOneForm`-style subclasses;
 - complete construction with no `object.__setattr__`, empty shells, or hidden instance caches;
