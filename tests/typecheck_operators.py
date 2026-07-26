@@ -15,8 +15,11 @@ from polygeo import (
     LinearMap,
     OrientationUnknown,
     Simplicial,
+    codifferential,
     exterior_derivative,
+    hodge_laplacian,
     hodge_star,
+    weighted_pairing,
 )
 
 
@@ -156,4 +159,32 @@ value_7 = space_7.form(np.zeros(space_7.size), semantics)
 assert_type(
     derivative_7.apply(value_7),
     Form[CochainSpace[Domain, Literal[8]], AlternateSemantics],
+)
+delta_8 = codifferential(geometry_8, derivative_7)
+assert_type(
+    delta_8,
+    LinearMap[
+        CochainSpace[Domain, Literal[8]],
+        CochainSpace[Domain, Literal[7]],
+    ],
+)
+assert_type(
+    hodge_laplacian(geometry_8, space_7),
+    LinearMap[
+        CochainSpace[Domain, Literal[7]],
+        CochainSpace[Domain, Literal[7]],
+    ],
+)
+assert_type(weighted_pairing(geometry_8, value_7, value_7), float)
+
+
+def runtime_laplacian(
+    degree: int,
+) -> LinearMap[CochainSpace[Domain, int], CochainSpace[Domain, int]]:
+    return hodge_laplacian(geometry_8, complex_8.cochain_space(degree))
+
+
+assert_type(
+    runtime_laplacian(4),
+    LinearMap[CochainSpace[Domain, int], CochainSpace[Domain, int]],
 )

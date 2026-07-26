@@ -5,8 +5,11 @@ from .operators import (
     DualCochainSpace,
     LinearMap,
     OperatorError,
+    codifferential,
     exterior_derivative,
+    hodge_laplacian,
     hodge_star,
+    weighted_pairing,
 )
 from .simplicial import (
     ORDINARY_FORM,
@@ -63,6 +66,9 @@ __all__ = [
     "TriangleManifold",
     "TwoForm",
     "ZeroForm",
+    "codifferential",
     "exterior_derivative",
+    "hodge_laplacian",
     "hodge_star",
+    "weighted_pairing",
 ]

@@ -16,8 +16,11 @@ from polygeo import (
     OrdinaryForm,
     OrientationUnknown,
     Simplicial,
+    codifferential,
     exterior_derivative,
+    hodge_laplacian,
     hodge_star,
+    weighted_pairing,
 )
 
 
@@ -89,3 +92,16 @@ def consume_wrong_dual(
 
 
 consume_wrong_dual(star)
+codifferential(geometry, star)
+
+
+def consume_degree_two_laplacian(
+    value: LinearMap[
+        CochainSpace[Domain, Literal[2]],
+        CochainSpace[Domain, Literal[2]],
+    ],
+) -> None:
+    pass
+
+
+consume_degree_two_laplacian(hodge_laplacian(geometry, space_3))

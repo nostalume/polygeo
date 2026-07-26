@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+import math
 from typing import Protocol
 
 import numpy as np
@@ -25,6 +27,10 @@ class _OperatorDomain(Protocol):
     def simplices(self, degree: int) -> NDArray[np.int64]: ...
 
     def boundary_matrix(self, degree: int) -> csr_array: ...
+
+
+class _MetricOperatorDomain(_GeometryDomain, _OperatorDomain, Protocol):
+    pass
 
 
 class DualCochainSpace[
@@ -179,15 +185,7 @@ def hodge_star[
     """Construct the signed circumcentric Hodge star on one primal space."""
     if geometry.complex is not source.complex:
         raise OperatorError("Hodge geometry and source belong to different complexes")
-    try:
-        primal = geometry.primal_measures(source.degree)
-        dual = geometry.dual_measures(source.degree)
-    except GeometryError as error:
-        raise OperatorError("Hodge measures are not representable") from error
-    with np.errstate(all="ignore"):
-        weights = np.divide(dual, primal)
-    if not np.all(np.isfinite(weights)) or np.any((dual != 0.0) & (weights == 0.0)):
-        raise OperatorError("Hodge coefficients are not representable as float64")
+    weights = _hodge_weights(geometry, source.degree)
     target = DualCochainSpace(geometry, source)
     indices = np.arange(source.size, dtype=np.int64)
     matrix = csr_array(
@@ -195,6 +193,218 @@ def hodge_star[
         shape=(target.size, source.size),
     )
     return LinearMap(source, target, matrix)
+
+
+def weighted_pairing[
+    K: _GeometryDomain,
+    Degree: int,
+    LeftSemantics: FieldSemantics,
+    RightSemantics: FieldSemantics,
+](
+    geometry: Geometry[K],
+    left: Form[CochainSpace[K, Degree], LeftSemantics],
+    right: Form[CochainSpace[K, Degree], RightSemantics],
+) -> float:
+    """Evaluate the signed circumcentric weighted bilinear pairing."""
+    if geometry.complex is not left.space.complex:
+        raise OperatorError("pairing geometry and forms belong to different complexes")
+    if not left.space.same_space(right.space):
+        raise OperatorError("pairing forms must share the same cochain space")
+    weights = _hodge_weights(geometry, left.space.degree)
+    with np.errstate(all="ignore"):
+        intermediate = left._coefficients * weights
+        terms = intermediate * right._coefficients
+    nonzero = (
+        (left._coefficients != 0.0) & (weights != 0.0) & (right._coefficients != 0.0)
+    )
+    tiny = np.finfo(np.float64).tiny
+    suspicious_intermediate = (
+        ~np.isfinite(intermediate)
+        | ((intermediate == 0.0) & (left._coefficients != 0.0) & (weights != 0.0))
+        | ((intermediate != 0.0) & (np.abs(intermediate) < tiny))
+    )
+    suspicious_term = (
+        ~np.isfinite(terms)
+        | (nonzero & (terms == 0.0))
+        | ((terms != 0.0) & (np.abs(terms) < tiny))
+    )
+    if np.any(suspicious_intermediate) or np.any(suspicious_term):
+        return _exact_pairing(left._coefficients, weights, right._coefficients)
+    try:
+        value = math.fsum(float(term) for term in terms)
+    except OverflowError:
+        return _exact_pairing(left._coefficients, weights, right._coefficients)
+    if value == 0.0 and np.any(terms != 0.0):
+        return _exact_pairing(left._coefficients, weights, right._coefficients)
+    if not math.isfinite(value):
+        raise OperatorError("weighted pairing is not representable as float64")
+    return value
+
+
+def codifferential[
+    K: _GeometryDomain,
+    PreviousDegree: int,
+    Degree: int,
+](
+    geometry: Geometry[K],
+    derivative: LinearMap[
+        CochainSpace[K, PreviousDegree],
+        CochainSpace[K, Degree],
+    ],
+) -> LinearMap[
+    CochainSpace[K, Degree],
+    CochainSpace[K, PreviousDegree],
+]:
+    """Construct the weighted adjoint of an adjacent primal cochain map."""
+    if not isinstance(derivative.source, CochainSpace) or not isinstance(
+        derivative.target, CochainSpace
+    ):
+        raise OperatorError("codifferential requires primal cochain map endpoints")
+    if geometry.complex is not derivative.source.complex:
+        raise OperatorError(
+            "codifferential geometry and map belong to different complexes"
+        )
+    if derivative.target.degree != derivative.source.degree + 1:
+        raise OperatorError("codifferential requires adjacent degrees")
+    matrix = _codifferential_matrix(
+        derivative._matrix,
+        _hodge_weights(geometry, derivative.source.degree),
+        _hodge_weights(geometry, derivative.target.degree),
+    )
+    return LinearMap(derivative.target, derivative.source, matrix)
+
+
+def hodge_laplacian[
+    K: _MetricOperatorDomain,
+    Degree: int,
+](
+    geometry: Geometry[K],
+    space: CochainSpace[K, Degree],
+) -> LinearMap[
+    CochainSpace[K, Degree],
+    CochainSpace[K, Degree],
+]:
+    """Construct the degree-wise signed circumcentric Hodge Laplacian."""
+    if geometry.complex is not space.complex:
+        raise OperatorError(
+            "Laplacian geometry and space belong to different complexes"
+        )
+    degree = space.degree
+    current_weights = _hodge_weights(geometry, degree)
+    terms: list[csr_array] = []
+    if degree > 0:
+        lower = space.complex.boundary_matrix(degree).transpose().tocsr()
+        delta = _codifferential_matrix(
+            lower,
+            _hodge_weights(geometry, degree - 1),
+            current_weights,
+        )
+        with np.errstate(all="ignore"):
+            terms.append((lower @ delta).tocsr())
+    if degree < space.complex.dimension:
+        upper = space.complex.boundary_matrix(degree + 1).transpose().tocsr()
+        delta = _codifferential_matrix(
+            upper,
+            current_weights,
+            _hodge_weights(geometry, degree + 1),
+        )
+        with np.errstate(all="ignore"):
+            terms.append((delta @ upper).tocsr())
+    if not terms:
+        matrix = csr_array((space.size, space.size), dtype=np.float64)
+    elif len(terms) == 1:
+        matrix = terms[0]
+    else:
+        with np.errstate(all="ignore"):
+            matrix = (terms[0] + terms[1]).tocsr()
+    return LinearMap(space, space, matrix)
+
+
+def _hodge_weights[K: _GeometryDomain](
+    geometry: Geometry[K],
+    degree: int,
+) -> NDArray[np.float64]:
+    try:
+        primal = geometry.primal_measures(degree)
+        dual = geometry.dual_measures(degree)
+    except GeometryError as error:
+        raise OperatorError("Hodge measures are not representable") from error
+    with np.errstate(all="ignore"):
+        weights = np.divide(dual, primal)
+    if not np.all(np.isfinite(weights)) or np.any((dual != 0.0) & (weights == 0.0)):
+        raise OperatorError("Hodge coefficients are not representable as float64")
+    return weights
+
+
+def _exact_pairing(
+    left: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    right: NDArray[np.float64],
+) -> float:
+    exact = sum(
+        (
+            Fraction(float(left_value))
+            * Fraction(float(weight))
+            * Fraction(float(right_value))
+            for left_value, weight, right_value in zip(
+                left, weights, right, strict=True
+            )
+        ),
+        start=Fraction(),
+    )
+    try:
+        value = float(exact)
+    except OverflowError as error:
+        raise OperatorError(
+            "weighted pairing is not representable as float64"
+        ) from error
+    if not math.isfinite(value) or (value == 0.0 and exact != 0):
+        raise OperatorError("weighted pairing is not representable as float64")
+    return value
+
+
+def _codifferential_matrix(
+    derivative: csr_array,
+    previous_weights: NDArray[np.float64],
+    current_weights: NDArray[np.float64],
+) -> csr_array:
+    if np.any(previous_weights == 0.0):
+        raise OperatorError("codifferential has a zero reciprocal Hodge weight")
+    matrix = derivative.transpose().tocsr(copy=True)
+    column_weights = current_weights[matrix.indices]
+    row_weights = np.repeat(previous_weights, np.diff(matrix.indptr))
+    nonzero = (matrix.data != 0.0) & (column_weights != 0.0) & (row_weights != 0.0)
+    with np.errstate(all="ignore"):
+        quotient = matrix.data / row_weights
+        scaled = quotient * column_weights
+    tiny = np.finfo(np.float64).tiny
+    suspicious = (
+        ~np.isfinite(quotient)
+        | ((quotient == 0.0) & (matrix.data != 0.0))
+        | ((quotient != 0.0) & (np.abs(quotient) < tiny))
+        | ~np.isfinite(scaled)
+        | (nonzero & (scaled == 0.0))
+        | ((scaled != 0.0) & (np.abs(scaled) < tiny))
+    )
+    for index in np.flatnonzero(suspicious):
+        exact = (
+            Fraction(float(matrix.data[index]))
+            * Fraction(float(column_weights[index]))
+            / Fraction(float(row_weights[index]))
+        )
+        try:
+            scaled[index] = float(exact)
+        except OverflowError as error:
+            raise OperatorError(
+                "codifferential coefficients are not representable as float64"
+            ) from error
+        if not np.isfinite(scaled[index]) or (scaled[index] == 0.0 and exact != 0):
+            raise OperatorError(
+                "codifferential coefficients are not representable as float64"
+            )
+    matrix.data = scaled
+    matrix.eliminate_zeros()
+    return matrix
 
 
 def _admit_matrix[
@@ -233,9 +443,12 @@ def _admit_matrix[
 
 
 __all__ = [
+    "codifferential",
     "DualCochainSpace",
+    "hodge_laplacian",
     "LinearMap",
     "OperatorError",
     "exterior_derivative",
     "hodge_star",
+    "weighted_pairing",
 ]

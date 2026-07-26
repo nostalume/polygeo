@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the target architecture. The arbitrary-dimensional simplicial core, constrained topology refinements, boundary matrices, simplex subsets, cochain spaces, generic forms, complete general Euclidean geometry, typed linear maps, and topological exterior derivative are implemented. Metric DEC, numerical solvers, boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
+This document defines the target architecture. The arbitrary-dimensional simplicial core, constrained topology refinements, complete general Euclidean geometry, typed linear maps, exterior derivative, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian are implemented. Numerical solvers, boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
 
 [`roadmap.md`](roadmap.md) contains the implementation tasks. Architecture decisions and implementation status must not be mixed.
 
@@ -348,7 +348,7 @@ $$
 
 Finite signed and zero coefficients are preserved. A required nonzero ratio that is not representable as `float64` raises `OperatorError`. The forward map does not require reciprocal weights; inverse Hodge remains deferred.
 
-The explicit-space model will later apply to codifferentials, Laplacians, and restriction/zero-extension maps.
+The explicit-space model also applies to the implemented weighted pairing, codifferential, and Hodge Laplacian. The codifferential is the exact weighted adjoint with no additional orientation sign; negative Hodge weights remain valid, while a zero weight is rejected only when the operation requires its reciprocal. Restriction and zero-extension maps remain planned.
 
 Sparse matrices are representations of these maps, not the public mathematical identity of the operator. A complete `LinearMap` admits structurally valid, real, finite CSR data aligned to exact source/target sizes and owns a canonicalized float64 copy. `matrix()` makes allocation explicit by returning a caller-owned representation; `apply()` and `compose()` compute directly from private representations without copying operand matrices.
 

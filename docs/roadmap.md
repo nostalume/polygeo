@@ -8,7 +8,7 @@ Current implemented baseline:
 
 - arbitrary-dimensional simplicial topology, typestate refinements, cochain spaces, and forms;
 - complete arbitrary-dimensional Euclidean geometry, primal simplex measures, and signed circumcentric dual measures;
-- typed linear maps, composition, arbitrary-dimensional topological exterior derivative, subordinate dual cochain identity, and signed Hodge star;
+- typed linear maps, composition, arbitrary-dimensional exterior derivative, subordinate dual cochain identity, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian;
 - executable runtime, positive Ty, and negative Ty contracts;
 - rejected owner-chain modules remain retired and must not be restored.
 
@@ -425,7 +425,7 @@ Two-dimensional cotangent weights are a later specialization law of the generic 
 - weighted pairing is symmetric under its valid metric assumptions;
 - returned sparse representation is caller-owned.
 
-The exact-space migration, subordinate dual identity, and forward signed Hodge map are implemented. Weighted pairing remains the next bounded OP-03 slice; inverse Hodge remains deferred until an independent public consumer requires it.
+The exact-space migration, subordinate dual identity, forward signed Hodge map, and direct weighted pairing are implemented. Inverse Hodge remains private operation demand rather than a public API.
 
 ### OP-04 — Codifferential and Hodge Laplacian
 
@@ -439,6 +439,8 @@ The exact-space migration, subordinate dual identity, and forward signed Hodge m
 - Laplacian maps one cochain space to itself;
 - constant/nullspace laws for degree zero;
 - map composition rejects incompatible spaces.
+
+The weighted-adjoint codifferential and degree-general Hodge Laplacian are implemented, including terminal-degree logic and fail-closed zero-reciprocal handling. Signed geometry does not imply Euclidean symmetry, positive semidefiniteness, or CG suitability.
 
 ### TOPO-BC-01 — Canonical topological boundary
 

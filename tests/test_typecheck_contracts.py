@@ -12,7 +12,7 @@ import pytest
     [
         ("typecheck_simplicial_invalid.txt", 6),
         ("typecheck_geometry_invalid.txt", 3),
-        ("typecheck_operators_invalid.txt", 6),
+        ("typecheck_operators_invalid.txt", 8),
     ],
 )
 def test_negative_type_contracts_are_enforced(
