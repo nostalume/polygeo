@@ -6,7 +6,7 @@ This document is a proposed implementation sequence for [`architecture.md`](arch
 
 Current implemented baseline:
 
-- arbitrary-dimensional simplicial topology, typestate refinements, cochain spaces, and forms;
+- arbitrary-dimensional simplicial topology, boundary-regular extraction, parent-retaining cochain subspaces, restriction and zero extension, and forms;
 - complete arbitrary-dimensional Euclidean geometry, primal simplex measures, and signed circumcentric dual measures;
 - typed linear maps, composition, arbitrary-dimensional exterior derivative, subordinate dual cochain identity, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian;
 - executable runtime, positive Ty, and negative Ty contracts;
@@ -455,6 +455,8 @@ The weighted-adjoint codifferential and degree-general Hodge Laplacian are imple
 - disconnected boundary components are preserved without renumbering;
 - nonmanifold inputs fail at the owning admission boundary.
 
+`BoundaryRegular` and dimension-general `topological_boundary()` are implemented. `TriangleManifold` refines the boundary-regular state; zero-dimensional and closed domains return canonical empty subsets, while codimension-one branching and non-pure inputs fail admission.
+
 ### OP-BC-01 — Cochain subspaces and trace maps
 
 **Purpose:** Represent boundary/interior degrees of freedom and their exact restriction/zero-extension maps.
@@ -467,6 +469,8 @@ The weighted-adjoint codifferential and degree-general Hodge Laplacian are imple
 - restriction and zero extension have the expected identity/mask laws;
 - wrong-complex or wrong-degree compositions fail once at admission;
 - no owner token or hidden renumbering substitutes for the actual parent space.
+
+Strict parent-retaining `CochainSubspace`, `restrict()`, and `extend_zero()` are implemented, including empty-subspace behavior and the $RE=I$, $ER=M_I$ laws. These maps perform coefficient selection/insertion only and do not apply induced-orientation signs.
 
 ### PROBLEM-BC-01 — Explicit boundary-value assembly
 

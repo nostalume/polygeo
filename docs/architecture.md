@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the target architecture. The arbitrary-dimensional simplicial core, constrained topology refinements, complete general Euclidean geometry, typed linear maps, exterior derivative, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian are implemented. Numerical solvers, boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
+This document defines the target architecture. The arbitrary-dimensional simplicial core, boundary-regular extraction, parent-retaining cochain subspaces, restriction and zero extension, complete general Euclidean geometry, typed linear maps, exterior derivative, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian are implemented. Numerical solvers, assembled boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
 
 [`roadmap.md`](roadmap.md) contains the implementation tasks. Architecture decisions and implementation status must not be mixed.
 
@@ -348,7 +348,7 @@ $$
 
 Finite signed and zero coefficients are preserved. A required nonzero ratio that is not representable as `float64` raises `OperatorError`. The forward map does not require reciprocal weights; inverse Hodge remains deferred.
 
-The explicit-space model also applies to the implemented weighted pairing, codifferential, and Hodge Laplacian. The codifferential is the exact weighted adjoint with no additional orientation sign; negative Hodge weights remain valid, while a zero weight is rejected only when the operation requires its reciprocal. Restriction and zero-extension maps remain planned.
+The explicit-space model also applies to the implemented weighted pairing, codifferential, Hodge Laplacian, restriction, and zero-extension maps. The codifferential is the exact weighted adjoint with no additional orientation sign; negative Hodge weights remain valid, while a zero weight is rejected only when the operation requires its reciprocal.
 
 Sparse matrices are representations of these maps, not the public mathematical identity of the operator. A complete `LinearMap` admits structurally valid, real, finite CSR data aligned to exact source/target sizes and owns a canonicalized float64 copy. `matrix()` makes allocation explicit by returning a caller-owned representation; `apply()` and `compose()` compute directly from private representations without copying operand matrices.
 
@@ -511,7 +511,7 @@ and reconstructs the prescribed boundary values exactly. Neumann data enters the
 
 Dirichlet, Neumann, and Robin formulations must not be collapsed into a mode string, optional boundary argument, solver flag, or behavior-bearing configuration union. The numerical solver receives only an admitted matrix/system and right-hand side. It never discovers boundary vertices, selects a gauge, projects incompatible forcing, or interprets cochain semantics.
 
-Python generics cannot prove that two runtime subspaces came from one complex instance. A cochain subspace therefore retains its actual parent `CochainSpace` and canonical indices; restriction, zero extension, and problem assembly verify runtime identity once before numerical kernels run. No owner token or independent boundary renumbering substitutes for that mathematical data.
+Python generics cannot prove that two runtime subspaces came from one complex instance. The implemented `CochainSubspace` therefore retains its actual parent `CochainSpace` and strict canonical indices; `restrict()` and `extend_zero()` verify the exact parent object once before numerical kernels run. `BoundaryRegular` admits pure complexes whose codimension-one simplices have one or two top cofaces, and `TriangleManifold` refines that dimension-general state. `topological_boundary()` returns an unsigned, closure-complete subset in parent basis order; induced-boundary orientation is not hidden in ordinary restriction. No owner token or independent boundary renumbering substitutes for that mathematical data.
 
 ## Numerical Behavior Interfaces
 

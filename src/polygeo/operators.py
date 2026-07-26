@@ -11,7 +11,14 @@ from numpy.typing import NDArray
 from scipy.sparse import csr_array
 
 from .geometry import Geometry, GeometryError, _GeometryDomain
-from .simplicial import CochainSpace, FieldSemantics, Form, _CoefficientSpace
+from .simplicial import (
+    CochainSpace,
+    CochainSubspace,
+    FieldSemantics,
+    Form,
+    _CochainParent,
+    _CoefficientSpace,
+)
 
 
 class OperatorError(ValueError):
@@ -170,6 +177,38 @@ def exterior_derivative[
         raise OperatorError("exterior derivative requires adjacent cochain degrees")
     matrix = source.complex.boundary_matrix(target.degree).transpose().tocsr()
     return LinearMap(source, target, matrix)
+
+
+def restrict[ParentSpace: _CochainParent](
+    parent: ParentSpace,
+    subspace: CochainSubspace[ParentSpace],
+) -> LinearMap[ParentSpace, CochainSubspace[ParentSpace]]:
+    """Select canonical parent coefficients without orientation conversion."""
+    if not subspace.belongs_to(parent):
+        raise OperatorError("restriction requires the subspace's exact parent")
+    rows = np.arange(subspace.size, dtype=np.int64)
+    indices = subspace.indices()
+    matrix = csr_array(
+        (np.ones(subspace.size), (rows, indices)),
+        shape=(subspace.size, parent.size),
+    )
+    return LinearMap(parent, subspace, matrix)
+
+
+def extend_zero[ParentSpace: _CochainParent](
+    subspace: CochainSubspace[ParentSpace],
+    parent: ParentSpace,
+) -> LinearMap[CochainSubspace[ParentSpace], ParentSpace]:
+    """Insert subspace coefficients into their parent and zero the complement."""
+    if not subspace.belongs_to(parent):
+        raise OperatorError("zero extension requires the subspace's exact parent")
+    columns = np.arange(subspace.size, dtype=np.int64)
+    indices = subspace.indices()
+    matrix = csr_array(
+        (np.ones(subspace.size), (indices, columns)),
+        shape=(parent.size, subspace.size),
+    )
+    return LinearMap(subspace, parent, matrix)
 
 
 def hodge_star[
@@ -448,7 +487,9 @@ __all__ = [
     "hodge_laplacian",
     "LinearMap",
     "OperatorError",
+    "extend_zero",
     "exterior_derivative",
     "hodge_star",
+    "restrict",
     "weighted_pairing",
 ]

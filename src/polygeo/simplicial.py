@@ -63,7 +63,13 @@ class Simplicial(TopologyState):
     __slots__ = ()
 
 
-class TriangleManifold(TopologyState):
+class BoundaryRegular(TopologyState):
+    """Every codimension-one simplex has one or two top cofaces."""
+
+    __slots__ = ()
+
+
+class TriangleManifold(BoundaryRegular):
     __slots__ = ()
 
 
@@ -299,6 +305,18 @@ class Complex[
             TriangleManifold(),
         )
 
+    def boundary_regular(
+        self: Complex[B, O, C, Simplicial],
+    ) -> Complex[B, O, C, BoundaryRegular]:
+        _require_boundary_regular(self)
+        return Complex(
+            self._data,
+            self.boundary_state,
+            self.orientation_state,
+            self.connectivity_state,
+            BoundaryRegular(),
+        )
+
     def oriented(
         self: Complex[B, OrientationUnknown, C, T],
     ) -> Complex[B, Oriented, C, T]:
@@ -375,6 +393,12 @@ class _CoefficientSpace(Protocol):
     def size(self) -> int: ...
 
     def same_space(self, other: object) -> bool: ...
+
+
+class _CochainParent(_CoefficientSpace):
+    @property
+    def degree(self) -> int:
+        raise NotImplementedError
 
 
 class SimplexSubset[K: _SubsetDomain]:
@@ -493,7 +517,34 @@ class SimplexSubset[K: _SubsetDomain]:
         return SimplexSubset(complex_, tuple(masks))
 
 
-class CochainSpace[K: _SubsetDomain, Degree: int]:
+def topological_boundary[
+    B: BoundaryState,
+    O: OrientationState,
+    C: ConnectivityState,
+    T: BoundaryRegular,
+](
+    complex_: Complex[B, O, C, T],
+) -> SimplexSubset[Complex[B, O, C, T]]:
+    """Return the unsigned, closure-complete ordinary topological boundary."""
+    if not isinstance(complex_.topology_state, BoundaryRegular):
+        raise SimplicialError("topological boundary requires boundary-regular input")
+    masks = [
+        np.zeros(complex_.simplex_count(degree), dtype=np.bool_)
+        for degree in range(complex_.dimension + 1)
+    ]
+    if complex_.dimension == 0:
+        return SimplexSubset(complex_, tuple(masks))
+    facets = complex_.boundary_matrix(complex_.dimension).tocsr()
+    masks[complex_.dimension - 1] = np.diff(facets.indptr) == 1
+    for degree in range(complex_.dimension - 1, 0, -1):
+        incidence = abs(complex_.boundary_matrix(degree)).astype(np.int64)
+        masks[degree - 1] = (
+            np.asarray(incidence @ masks[degree].astype(np.int64)).ravel() > 0
+        )
+    return SimplexSubset(complex_, tuple(masks))
+
+
+class CochainSpace[K: _SubsetDomain, Degree: int](_CochainParent):
     __slots__ = ("_complex", "_degree", "_size")
 
     def __init__(self, complex_: K, degree: Degree) -> None:
@@ -526,6 +577,72 @@ class CochainSpace[K: _SubsetDomain, Degree: int]:
     def form[Semantics: FieldSemantics](
         self, coefficients: CoefficientArray, semantics: Semantics
     ) -> Form[CochainSpace[K, Degree], Semantics]:
+        return Form(self, coefficients, semantics)
+
+
+class CochainSubspace[ParentSpace: _CochainParent]:
+    """A canonical coefficient subspace retaining its exact parent space."""
+
+    __slots__ = ("_parent", "_indices")
+
+    def __init__(
+        self,
+        parent: ParentSpace,
+        indices: IndexArray,
+    ) -> None:
+        if not isinstance(parent, CochainSpace):
+            raise SimplicialError("cochain subspace requires a primal parent space")
+        candidate = np.asarray(indices)
+        if candidate.ndim != 1 or candidate.dtype.kind not in "iu":
+            raise SimplicialError(
+                "subspace indices must be a one-dimensional integer array"
+            )
+        if np.any(candidate < 0) or np.any(candidate >= parent.size):
+            raise SimplicialError("subspace index is outside the parent space")
+        admitted = np.array(candidate, dtype=np.int64, order="C", copy=True)
+        if len(admitted) > 1 and np.any(admitted[1:] <= admitted[:-1]):
+            raise SimplicialError("subspace indices must be strictly increasing")
+        admitted.flags.writeable = False
+        self._parent = parent
+        self._indices = admitted
+
+    @property
+    def parent(self) -> ParentSpace:
+        return self._parent
+
+    @property
+    def complex(self) -> _SubsetDomain:
+        return self._parent.complex
+
+    @property
+    def degree(self) -> int:
+        return self._parent.degree
+
+    @property
+    def size(self) -> int:
+        return len(self._indices)
+
+    def indices(self) -> IndexArray:
+        return self._indices.copy()
+
+    def belongs_to(self, parent: ParentSpace) -> bool:
+        return self._parent is parent
+
+    def same_space(self, other: object) -> bool:
+        return (
+            isinstance(other, CochainSubspace)
+            and self._parent.same_space(other._parent)
+            and np.array_equal(self._indices, other._indices)
+        )
+
+    def complement(self) -> Self:
+        selected = np.ones(self._parent.size, dtype=np.bool_)
+        selected[self._indices] = False
+        return type(self)(self._parent, np.flatnonzero(selected))
+
+    def form[Semantics: FieldSemantics](
+        self, coefficients: CoefficientArray, semantics: Semantics
+    ) -> Form[CochainSubspace[ParentSpace], Semantics]:
         return Form(self, coefficients, semantics)
 
 
@@ -604,6 +721,25 @@ def _assemble_boundary_matrix(data: _ComplexData, degree: int) -> csr_array:
         shape=(len(lower), columns),
         dtype=np.int8,
     )
+
+
+def _require_boundary_regular[
+    B: BoundaryState,
+    O: OrientationState,
+    C: ConnectivityState,
+](
+    complex_: Complex[B, O, C, Simplicial],
+) -> None:
+    if complex_.dimension == 0:
+        return
+    used_vertices = np.unique(complex_._data._simplices[complex_.dimension])
+    if len(used_vertices) != complex_.vertex_count:
+        raise SimplicialError("boundary-regular input must be pure")
+    coface_counts = np.diff(complex_.boundary_matrix(complex_.dimension).tocsr().indptr)
+    if np.any((coface_counts < 1) | (coface_counts > 2)):
+        raise SimplicialError(
+            "every codimension-one simplex needs one or two top cofaces"
+        )
 
 
 def _require_triangle_manifold[
@@ -690,10 +826,12 @@ def _require_connected[B: BoundaryState, O: OrientationState, T: TopologyState](
 
 __all__ = [
     "ORDINARY_FORM",
+    "BoundaryRegular",
     "BoundaryState",
     "BoundaryUnknown",
     "Closed",
     "CochainSpace",
+    "CochainSubspace",
     "Complex",
     "Connected",
     "ConnectivityState",
@@ -712,4 +850,5 @@ __all__ = [
     "TriangleManifold",
     "TwoForm",
     "ZeroForm",
+    "topological_boundary",
 ]
