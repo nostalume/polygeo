@@ -10,6 +10,7 @@ Current implemented baseline:
 - complete arbitrary-dimensional Euclidean geometry, primal simplex measures, and signed circumcentric dual measures;
 - typed linear maps, composition, arbitrary-dimensional exterior derivative, subordinate dual cochain identity, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian;
 - typed assembled systems plus true-boundary, endomorphism-only Dirichlet block elimination and exact reconstruction;
+- operation-scoped sparse direct factorization, repeated-right-hand-side reuse, and certified residual evidence;
 - executable runtime, positive Ty, and negative Ty contracts;
 - rejected owner-chain modules remain retired and must not be restored.
 
@@ -36,20 +37,20 @@ Physical layout is intentionally compact. It is an implementation consequence, n
 
 ```text
 src/polygeo/
-  __init__.py      root exports and load_surface
+  __init__.py      root exports
   simplicial.py    complete complex data, refinements, cochain spaces and topology
   geometry.py      complete general Euclidean geometry and simplex measures
   operators.py     typed maps and metric DEC operators
-  dec.py           general DEC problem assembly and certified products
-  surface.py       approved specific-dimensional deductions and algorithms
-  solver.py        domain-neutral numerical behavior
+  systems.py       assembled linear systems and boundary elimination
+  numerics.py      package-private exact binary64 arithmetic
+  solvers.py       domain-neutral prepared numerical behavior
 
 tests/
   test_simplicial.py
   test_geometry.py
   test_operators.py
-  test_dec.py
-  test_surface.py
+  test_systems.py
+  test_solvers.py
   test_typecheck_contracts.py
 ```
 
@@ -489,17 +490,19 @@ Strict parent-retaining `CochainSubspace`, `restrict()`, and `extend_zero()` are
 
 **Work:** Keep Dirichlet, Neumann, and Robin as distinct mathematical formulations rather than a mode string, optional boundary argument, or solver configuration union.
 
-`AssembledSystem`, endomorphism-only `eliminate_dirichlet()`, and flat `DirichletProblem.reconstruct()` are implemented. Elimination requires a `BoundaryRegular` primal parent, verifies the canonical topological boundary, handles empty and fully prescribed regions, and assembles $A_{II}$ and $b_I-A_{IB}g_B$ by sparse block indexing. Neumann, Robin, compatibility/gauge assembly, and solver orchestration remain deferred.
+`AssembledSystem`, endomorphism-only `eliminate_dirichlet()`, and flat `DirichletProblem.reconstruct()` are implemented. Elimination requires a `BoundaryRegular` primal parent, verifies the canonical topological boundary, handles empty and fully prescribed regions, and assembles $A_{II}$ and $b_I-A_{IB}g_B$ by sparse block indexing. Neumann, Robin, and compatibility/gauge assembly remain deferred.
 
 ## T5 — Numerical Behavior
 
 ### SOLVE-01 — Direct prepared solve
 
+`prepare_direct()`, `PreparedLinearSolve`, `PrepareLinearSolve`, and flat residual-evidence `LinearSolution` are implemented. Returned direct solutions are certified against their operator and right-hand side; the complete public value constructor validates evidence consistency. `AssembledSystem.solve()` and `DirichletProblem.solve()` receive preparers explicitly; no solver strings, stored solver behavior, implicit fallback, or iterative method is present.
+
 **Purpose:** Isolate boundary-agnostic sparse factorization and residual evidence.
 
 **Prerequisite:** T0 type decisions.
 
-**RED tests in `test_dec.py`:**
+**RED tests in `test_solvers.py`:**
 
 - factorization prepared once for multiple RHS;
 - singular and non-finite systems raise stable numerical errors;
@@ -666,7 +669,8 @@ Keep tests grouped by mathematical behavior:
 - `test_simplicial.py`: construction, refinement, topology, spaces, forms;
 - `test_geometry.py`: arbitrary-dimensional Euclidean admission, measures, scale, degeneracy, and ownership;
 - `test_operators.py`: typed maps and DEC operator laws;
-- `test_dec.py`: numerical behavior and solve-based DEC algorithms;
+- `test_solvers.py`: prepared numerical behavior and residual certification;
+- later solve-based DEC algorithm tests stay with their owning mathematical behavior;
 - `test_surface.py`: specific-dimensional deductions and algorithms, loading, root API, installed smoke;
 - `test_typecheck_contracts.py`: execute negative Ty fixtures and enforce exact diagnostic counts.
 

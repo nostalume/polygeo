@@ -15,6 +15,7 @@ import pytest
         ("typecheck_operators_invalid.txt", 8),
         ("typecheck_subspaces_invalid.txt", 8),
         ("typecheck_systems_invalid.txt", 11),
+        ("typecheck_solvers_invalid.txt", 5),
     ],
 )
 def test_negative_type_contracts_are_enforced(

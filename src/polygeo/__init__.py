@@ -41,6 +41,13 @@ from .simplicial import (
     ZeroForm,
     topological_boundary,
 )
+from .solvers import (
+    LinearSolution,
+    NumericalError,
+    PrepareLinearSolve,
+    PreparedLinearSolve,
+    prepare_direct,
+)
 from .systems import (
     AssembledSystem,
     DirichletProblem,
@@ -68,12 +75,16 @@ __all__ = [
     "Geometry",
     "GeometryError",
     "LinearMap",
+    "LinearSolution",
+    "NumericalError",
     "OneForm",
     "OrdinaryForm",
     "OrientationState",
     "OrientationUnknown",
     "OperatorError",
     "Oriented",
+    "PrepareLinearSolve",
+    "PreparedLinearSolve",
     "SimplexSubset",
     "Simplicial",
     "SimplicialError",
@@ -88,6 +99,7 @@ __all__ = [
     "exterior_derivative",
     "hodge_laplacian",
     "hodge_star",
+    "prepare_direct",
     "restrict",
     "topological_boundary",
     "weighted_pairing",

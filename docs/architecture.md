@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the target architecture. The arbitrary-dimensional simplicial core, boundary-regular extraction, parent-retaining cochain subspaces, restriction and zero extension, typed assembled systems, true-boundary Dirichlet elimination and reconstruction, complete general Euclidean geometry, typed linear maps, exterior derivative, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian are implemented. Numerical solvers, Neumann/Robin assembly, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
+This document defines the target architecture. The arbitrary-dimensional simplicial core, boundary-regular extraction, parent-retaining cochain subspaces, restriction and zero extension, typed assembled systems, true-boundary Dirichlet elimination and reconstruction, prepared sparse direct solves with residual certification, complete general Euclidean geometry, typed linear maps, exterior derivative, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian are implemented. Iterative solvers, Neumann/Robin assembly, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
 
 [`roadmap.md`](roadmap.md) contains the implementation tasks. Architecture decisions and implementation status must not be mixed.
 
@@ -429,7 +429,7 @@ def hodge_decomposition(
     geometry: Geometry[QualifiedSurface],
     form: OneForm[QualifiedSurface],
     *,
-    solve: LinearSolve,
+    prepare: PrepareLinearSolve,
 ) -> HodgeDecomposition[QualifiedSurface]: ...
 ```
 
@@ -467,10 +467,10 @@ Examples:
 ```text
 Certified[Form[CochainSpace[K, Literal[0]], OrdinaryForm], MeanZero]
 Certified[Form[CochainSpace[K, Literal[1]], SO2Connection], Integrable]
-Certified[LinearSolution[Space], ResidualCertified]
+LinearSolution[UnknownSpace, EquationSpace, Semantics]
 ```
 
-This is one generic composition, not one wrapper class per property combination.
+The form examples use one generic certification composition rather than one wrapper class per property combination. `LinearSolution` is already a complete flat evidence product and needs no second wrapper.
 
 ## Runtime Identity Boundary
 
@@ -519,7 +519,7 @@ Replaceable behavior uses small protocols or callable aliases:
 
 ```text
 PreparedLinearSolve: rhs -> solution
-LinearSolve: system -> PreparedLinearSolve
+PrepareLinearSolve: operator -> PreparedLinearSolve
 EigenSolve: eigenproblem -> eigenspace
 ResidualCertifier: problem x candidate -> certificate
 ```
@@ -615,6 +615,7 @@ from polygeo import (
     ORDINARY_FORM,
     hodge_decomposition,
     load_surface,
+    prepare_direct,
 )
 
 geometry = load_surface("mesh.obj")
@@ -630,7 +631,11 @@ domain = (
 
 space = domain.cochain_space(1)
 omega = space.form(values, ORDINARY_FORM)
-result = hodge_decomposition(geometry.for_complex(domain), omega, solve=direct_solve)
+result = hodge_decomposition(
+    geometry.for_complex(domain),
+    omega,
+    prepare=prepare_direct,
+)
 ```
 
 This remains a design sketch beyond the landed T1 simplicial surface. T0 proved the constrained method chain and the finite fixed-degree overloads used here.

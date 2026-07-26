@@ -7,7 +7,13 @@ from typing import Self
 import numpy as np
 from scipy.sparse import csr_array
 
+from .numerics import (
+    binary64_from_lattice,
+    binary64_lattice,
+    binary64_sum_product_lattice,
+)
 from .operators import LinearMap
+from .solvers import LinearSolution, PrepareLinearSolve
 from .simplicial import (
     BoundaryRegular,
     BoundaryState,
@@ -54,6 +60,12 @@ class AssembledSystem[
     @property
     def rhs(self) -> Form[EquationSpace, Semantics]:
         return self._rhs
+
+    def solve(
+        self,
+        prepare: PrepareLinearSolve[UnknownSpace, EquationSpace],
+    ) -> LinearSolution[UnknownSpace, EquationSpace, Semantics]:
+        return prepare(self._operator)(self._rhs)
 
 
 class DirichletProblem[
@@ -161,6 +173,26 @@ class DirichletProblem[
         coefficients[self._interior.indices()] = interior.coefficients()
         return Form(self._parent, coefficients, interior.semantics)
 
+    def solve(
+        self,
+        prepare: PrepareLinearSolve[
+            CochainSubspace[ParentSpace],
+            CochainSubspace[ParentSpace],
+        ],
+    ) -> LinearSolution[
+        ParentSpace,
+        CochainSubspace[ParentSpace],
+        Semantics,
+    ]:
+        reduced = prepare(self._operator)(self._rhs)
+        return LinearSolution(
+            self.reconstruct(reduced.form),
+            reduced.equation_space,
+            reduced.residual_norm,
+            reduced.residual_scale,
+            reduced.relative_residual,
+        )
+
 
 def eliminate_dirichlet[
     B: BoundaryState,
@@ -240,10 +272,6 @@ def _reduce_rhs(
     return reduced
 
 
-_PRODUCT_LATTICE_BITS = 2148
-_PRODUCT_LATTICE_DENOMINATOR = 1 << _PRODUCT_LATTICE_BITS
-
-
 def _exact_reduced_row(
     rhs: float,
     coupling: csr_array,
@@ -254,23 +282,15 @@ def _exact_reduced_row(
     stop = int(coupling.indptr[row + 1])
     if start == stop:
         return rhs
-    numerator, denominator = rhs.as_integer_ratio()
-    exact = numerator << (_PRODUCT_LATTICE_BITS - (denominator.bit_length() - 1))
-    for offset in range(start, stop):
-        coefficient = float(coupling.data[offset])
-        value = float(boundary_values[coupling.indices[offset]])
-        if coefficient == 0.0 or value == 0.0:
-            continue
-        coefficient_numerator, coefficient_denominator = coefficient.as_integer_ratio()
-        value_numerator, value_denominator = value.as_integer_ratio()
-        denominator_bits = (
-            coefficient_denominator.bit_length() + value_denominator.bit_length() - 2
-        )
-        exact -= (coefficient_numerator * value_numerator) << (
-            _PRODUCT_LATTICE_BITS - denominator_bits
-        )
+    exact = binary64_lattice(rhs) - binary64_sum_product_lattice(
+        (float(value) for value in coupling.data[start:stop]),
+        (
+            float(boundary_values[coupling.indices[offset]])
+            for offset in range(start, stop)
+        ),
+    )
     try:
-        reduced = exact / _PRODUCT_LATTICE_DENOMINATOR
+        reduced = binary64_from_lattice(exact)
     except OverflowError as error:
         raise SystemError(
             "Dirichlet elimination produced an unrepresentable right-hand side"
