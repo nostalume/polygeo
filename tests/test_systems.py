@@ -20,7 +20,7 @@ from polygeo import (
 def _disk() -> Complex:
     return Complex.from_maximal_simplices(
         np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
-    ).boundary_regular()
+    ).codimension_one_regular()
 
 
 def _cycle_operator(parent) -> LinearMap:

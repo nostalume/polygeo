@@ -1,3 +1,5 @@
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
+
 from typing import Literal
 
 import numpy as np
@@ -20,7 +22,6 @@ from polygeo import (
     exterior_derivative,
     hodge_laplacian,
     hodge_star,
-    weighted_pairing,
 )
 
 

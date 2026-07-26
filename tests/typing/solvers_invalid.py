@@ -1,3 +1,5 @@
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, subclass-of-final-class
+
 import numpy as np
 from scipy.sparse import csr_array
 
@@ -15,7 +17,7 @@ from polygeo import (
 
 domain = Complex.from_maximal_simplices(
     np.array([[0, 1, 2]], dtype=np.int64)
-).boundary_regular()
+).codimension_one_regular()
 C0 = domain.cochain_space(0)
 C1 = domain.cochain_space(1)
 identity0 = LinearMap(C0, C0, csr_array(np.eye(C0.size)))

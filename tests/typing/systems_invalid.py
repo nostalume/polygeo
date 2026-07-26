@@ -1,19 +1,19 @@
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
+
 import numpy as np
 from scipy.sparse import csr_array
 
 from polygeo import (
     ORDINARY_FORM,
     AssembledSystem,
-    BoundaryRegular,
+    CodimensionOneRegular,
     BoundaryUnknown,
-    CochainSpace,
     CochainSubspace,
     Complex,
     ConnectivityUnknown,
     FieldSemantics,
     LinearMap,
     OrientationUnknown,
-    Simplicial,
     eliminate_dirichlet,
 )
 
@@ -22,18 +22,14 @@ type Regular = Complex[
     BoundaryUnknown,
     OrientationUnknown,
     ConnectivityUnknown,
-    BoundaryRegular,
+    CodimensionOneRegular,
 ]
 
-raw = Complex.from_maximal_simplices(
-    np.array([[0, 1, 2]], dtype=np.int64)
-)
-regular: Regular = raw.boundary_regular()
+raw = Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
+regular: Regular = raw.codimension_one_regular()
 
 raw_parent = raw.cochain_space(0)
-raw_operator = LinearMap(
-    raw_parent, raw_parent, csr_array(np.eye(raw_parent.size))
-)
+raw_operator = LinearMap(raw_parent, raw_parent, csr_array(np.eye(raw_parent.size)))
 raw_system = AssembledSystem(
     raw_operator,
     raw_parent.form(np.ones(raw_parent.size), ORDINARY_FORM),
@@ -47,9 +43,7 @@ eliminate_dirichlet(
 
 C0 = regular.cochain_space(0)
 C1 = regular.cochain_space(1)
-rectangular = LinearMap(
-    C0, C1, csr_array((C1.size, C0.size))
-)
+rectangular = LinearMap(C0, C1, csr_array((C1.size, C0.size)))
 rectangular_system = AssembledSystem(
     rectangular,
     C1.form(np.ones(C1.size), ORDINARY_FORM),
@@ -62,9 +56,7 @@ eliminate_dirichlet(
 )
 
 region1 = CochainSubspace(C1, np.array([0], dtype=np.int64))
-identity0 = LinearMap(
-    C0, C0, csr_array(np.eye(C0.size))
-)
+identity0 = LinearMap(C0, C0, csr_array(np.eye(C0.size)))
 system0 = AssembledSystem(
     identity0,
     C0.form(np.ones(C0.size), ORDINARY_FORM),

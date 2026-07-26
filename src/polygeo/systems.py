@@ -15,7 +15,7 @@ from .numerics import (
 from .operators import LinearMap
 from .solvers import LinearSolution, PrepareLinearSolve
 from .simplicial import (
-    BoundaryRegular,
+    CodimensionOneRegular,
     BoundaryState,
     CochainSpace,
     CochainSubspace,
@@ -198,7 +198,7 @@ def eliminate_dirichlet[
     B: BoundaryState,
     O: OrientationState,
     C: ConnectivityState,
-    T: BoundaryRegular,
+    T: CodimensionOneRegular,
     Degree: int,
     Semantics: FieldSemantics,
 ](

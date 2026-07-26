@@ -6,7 +6,6 @@ import pytest
 from polygeo import (
     ORDINARY_FORM,
     BoundaryUnknown,
-    Closed,
     CochainSpace,
     Complex,
     Connected,
@@ -17,6 +16,8 @@ from polygeo import (
     Simplicial,
     SimplicialError,
     TriangleManifold,
+    WithBoundary,
+    WithoutBoundary,
 )
 
 
@@ -181,7 +182,7 @@ def test_refinement_methods_preserve_data_and_strengthen_one_state() -> None:
     raw = Complex.from_maximal_simplices(_tetrahedron_boundary())
     triangle = raw.triangle_manifold()
     oriented = triangle.oriented()
-    closed = oriented.closed()
+    closed = oriented.without_boundary()
     domain = closed.connected()
 
     assert isinstance(raw.boundary_state, BoundaryUnknown)
@@ -189,7 +190,7 @@ def test_refinement_methods_preserve_data_and_strengthen_one_state() -> None:
     assert isinstance(raw.connectivity_state, ConnectivityUnknown)
     assert isinstance(raw.topology_state, Simplicial)
 
-    assert isinstance(domain.boundary_state, Closed)
+    assert isinstance(domain.boundary_state, WithoutBoundary)
     assert isinstance(domain.orientation_state, Oriented)
     assert isinstance(domain.connectivity_state, Connected)
     assert isinstance(domain.topology_state, TriangleManifold)
@@ -214,7 +215,7 @@ def test_triangle_manifold_rejects_wrong_dimension_nonmanifold_edge_and_fan() ->
         disconnected_fan.triangle_manifold()
 
 
-def test_oriented_closed_and_connected_fail_independently() -> None:
+def test_oriented_boundary_and_connected_refinements_fail_independently() -> None:
     flipped = Complex.from_maximal_simplices(
         np.array([[0, 1, 2], [0, 3, 2]], dtype=np.int64)
     ).triangle_manifold()
@@ -222,8 +223,21 @@ def test_oriented_closed_and_connected_fail_independently() -> None:
         flipped.oriented()
 
     disk = Complex.from_maximal_simplices(_disk()).triangle_manifold().oriented()
+    assert isinstance(disk.with_boundary().boundary_state, WithBoundary)
     with pytest.raises(SimplicialError):
-        disk.closed()
+        disk.without_boundary()
+
+    sphere = Complex.from_maximal_simplices(_tetrahedron_boundary()).triangle_manifold()
+    assert isinstance(sphere.without_boundary().boundary_state, WithoutBoundary)
+    with pytest.raises(SimplicialError):
+        sphere.with_boundary()
+
+    nonregular = Complex.from_maximal_simplices(
+        np.array([[0, 1, 2], [1, 0, 3], [0, 1, 4]], dtype=np.int64)
+    )
+    assert not hasattr(nonregular, "closed")
+    with pytest.raises(SimplicialError, match="codimension-one regular"):
+        getattr(nonregular, "without_boundary")()
 
     disconnected = Complex.from_maximal_simplices(
         np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int64)

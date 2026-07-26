@@ -23,7 +23,7 @@ from polygeo import (
 def _disk():
     return Complex.from_maximal_simplices(
         np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
-    ).boundary_regular()
+    ).codimension_one_regular()
 
 
 def test_prepare_direct_solves_and_certifies_exact_endpoint_spaces() -> None:
@@ -156,7 +156,7 @@ def test_direct_residual_evidence_is_scale_stable() -> None:
 def test_direct_residual_rejects_cancellation_damaged_backend_solution() -> None:
     domain = Complex.from_maximal_simplices(
         np.array([[0, 1, 2]], dtype=np.int64)
-    ).boundary_regular()
+    ).codimension_one_regular()
     parent = domain.cochain_space(0)
     operator = LinearMap(
         parent,

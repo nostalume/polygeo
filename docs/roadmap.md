@@ -51,7 +51,8 @@ tests/
   test_operators.py
   test_systems.py
   test_solvers.py
-  test_typecheck_contracts.py
+  test_typing.py
+  typing/             flat positive and negative real-Python Ty fixtures
 ```
 
 Do not create `api.py`, `io.py`, `errors.py`, `result.py`, `forms.py`, `metric.py`, `dual.py`, or one test file per source module unless a later approved design demonstrates a separate behavior owner. General geometry and executable negative type contracts are approved behavior owners, not organizational mirrors.
@@ -109,9 +110,9 @@ Then install and smoke-test the wheel and sdist independently in fresh environme
 **Work:** Create a disposable typecheck spike outside production code. It models only tiny scalar placeholders and proves:
 
 ```text
-Complex[BoundaryUnknown, O, C, T]
-    .refine(CHECK_CLOSED)
--> Complex[Closed, O, C, T]
+Complex[BoundaryUnknown, O, C, CodimensionOneRegular]
+    .without_boundary()
+-> Complex[WithoutBoundary, O, C, CodimensionOneRegular]
 ```
 
 The spike must test:
@@ -127,7 +128,7 @@ The spike must test:
 **RED cases:** Ty must reject:
 
 - passing a closed-only value before refinement;
-- applying `CHECK_CLOSED` to an already incompatible boundary state;
+- applying `without_boundary()` to an already classified boundary state;
 - losing orientation/connectivity/topology axes during transition.
 
 **Hard failure conditions:**
@@ -205,7 +206,7 @@ Also prove runtime source-space identity is checked once when a value enters `ap
 
 ```text
 TriangleManifold
-Closed
+WithoutBoundary
 Oriented
 Connected
 Literal[1]
@@ -457,7 +458,7 @@ The weighted-adjoint codifferential and degree-general Hodge Laplacian are imple
 - disconnected boundary components are preserved without renumbering;
 - nonmanifold inputs fail at the owning admission boundary.
 
-`BoundaryRegular` and dimension-general `topological_boundary()` are implemented. `TriangleManifold` refines the boundary-regular state; zero-dimensional and closed domains return canonical empty subsets, while codimension-one branching and non-pure inputs fail admission.
+`CodimensionOneRegular` and dimension-general `topological_boundary()` are implemented. Regular admission retains immutable canonical boundary masks, and `TriangleManifold` refines that state. `without_boundary()` and `with_boundary()` classify the extracted boundary only after regular admission; zero-dimensional and boundaryless domains return canonical empty subsets, while codimension-one branching and non-pure inputs fail admission.
 
 ### OP-BC-01 — Cochain subspaces and trace maps
 
@@ -490,7 +491,7 @@ Strict parent-retaining `CochainSubspace`, `restrict()`, and `extend_zero()` are
 
 **Work:** Keep Dirichlet, Neumann, and Robin as distinct mathematical formulations rather than a mode string, optional boundary argument, or solver configuration union.
 
-`AssembledSystem`, endomorphism-only `eliminate_dirichlet()`, and flat `DirichletProblem.reconstruct()` are implemented. Elimination requires a `BoundaryRegular` primal parent, verifies the canonical topological boundary, handles empty and fully prescribed regions, and assembles $A_{II}$ and $b_I-A_{IB}g_B$ by sparse block indexing. Neumann, Robin, and compatibility/gauge assembly remain deferred.
+`AssembledSystem`, endomorphism-only `eliminate_dirichlet()`, and flat `DirichletProblem.reconstruct()` are implemented. Elimination requires a `CodimensionOneRegular` primal parent, verifies the canonical topological boundary, handles empty and fully prescribed regions, and assembles $A_{II}$ and $b_I-A_{IB}g_B$ by sparse block indexing. Neumann, Robin, and compatibility/gauge assembly remain deferred.
 
 ## T5 — Numerical Behavior
 
@@ -672,7 +673,8 @@ Keep tests grouped by mathematical behavior:
 - `test_solvers.py`: prepared numerical behavior and residual certification;
 - later solve-based DEC algorithm tests stay with their owning mathematical behavior;
 - `test_surface.py`: specific-dimensional deductions and algorithms, loading, root API, installed smoke;
-- `test_typecheck_contracts.py`: execute negative Ty fixtures and enforce exact diagnostic counts.
+- `test_typing.py`: execute positive fixtures and enforce exact negative Ty rule-ID multisets in one batched process;
+- `typing/*.py`: flat real-Python positive fixtures plus excluded `*_invalid.py` negative contracts.
 
 Do not recreate one test file per implementation noun. Shared fixtures remain local until at least two behavior files need the same fixture.
 

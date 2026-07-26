@@ -28,3 +28,6 @@ dev = [
 [tool.pytest.ini_options]
 markers = ["slow: release-only notebook export smoke tests"]
 addopts = "-m 'not slow'"
+
+[tool.ty.src]
+exclude = ["tests/typing/*_invalid.py"]

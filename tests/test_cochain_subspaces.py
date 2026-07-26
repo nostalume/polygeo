@@ -130,7 +130,7 @@ def test_transfer_maps_require_the_exact_parent_object() -> None:
 
 
 def test_boundary_subspace_uses_canonical_parent_basis_indices() -> None:
-    domain = _disk().boundary_regular()
+    domain = _disk().codimension_one_regular()
     boundary = topological_boundary(domain)
     parent = domain.cochain_space(1)
     indices = np.flatnonzero(boundary.mask(1)).astype(np.int64)

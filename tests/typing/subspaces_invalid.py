@@ -1,9 +1,11 @@
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
+
 from typing import Literal
 
 import numpy as np
 
 from polygeo import (
-    BoundaryRegular,
+    CodimensionOneRegular,
     BoundaryUnknown,
     CochainSpace,
     CochainSubspace,
@@ -28,15 +30,13 @@ type Regular = Complex[
     BoundaryUnknown,
     OrientationUnknown,
     ConnectivityUnknown,
-    BoundaryRegular,
+    CodimensionOneRegular,
 ]
 
-raw: Raw = Complex.from_maximal_simplices(
-    np.array([[0, 1, 2]], dtype=np.int64)
-)
+raw: Raw = Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
 topological_boundary(raw)
-regular: Regular = raw.boundary_regular()
-regular.boundary_regular()
+regular: Regular = raw.codimension_one_regular()
+regular.codimension_one_regular()
 
 C0 = regular.cochain_space(0)
 C1 = regular.cochain_space(1)

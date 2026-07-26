@@ -5,7 +5,7 @@ from scipy.sparse import csr_array
 
 from polygeo import (
     AssembledSystem,
-    BoundaryRegular,
+    CodimensionOneRegular,
     BoundaryUnknown,
     CochainSpace,
     CochainSubspace,
@@ -24,7 +24,7 @@ type Regular = Complex[
     BoundaryUnknown,
     OrientationUnknown,
     ConnectivityUnknown,
-    BoundaryRegular,
+    CodimensionOneRegular,
 ]
 type Parent = CochainSpace[Regular, Literal[0]]
 type Reduced = CochainSubspace[Parent]
@@ -35,7 +35,7 @@ class AlternateSemantics(FieldSemantics):
 
 
 raw = Complex.from_maximal_simplices(np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64))
-regular: Regular = raw.boundary_regular()
+regular: Regular = raw.codimension_one_regular()
 parent = regular.cochain_space(0)
 operator = LinearMap(parent, parent, csr_array(np.eye(parent.size)))
 rhs = parent.form(np.ones(parent.size), AlternateSemantics())

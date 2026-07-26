@@ -27,7 +27,11 @@ class BoundaryUnknown(BoundaryState):
     __slots__ = ()
 
 
-class Closed(BoundaryState):
+class WithoutBoundary(BoundaryState):
+    __slots__ = ()
+
+
+class WithBoundary(BoundaryState):
     __slots__ = ()
 
 
@@ -63,13 +67,13 @@ class Simplicial(TopologyState):
     __slots__ = ()
 
 
-class BoundaryRegular(TopologyState):
-    """Every codimension-one simplex has one or two top cofaces."""
+class CodimensionOneRegular(TopologyState):
+    """A pure complex with one or two top cofaces per codimension-one simplex."""
 
     __slots__ = ()
 
 
-class TriangleManifold(BoundaryRegular):
+class TriangleManifold(CodimensionOneRegular):
     __slots__ = ()
 
 
@@ -132,6 +136,45 @@ class _ComplexData:
         self._orientations = tuple(owned_orientations)
 
 
+_EVIDENCE_TOKEN = object()
+
+
+class _BoundaryEvidence:
+    __slots__ = ("_data", "_masks", "_sealed")
+    _data: _ComplexData
+    _masks: tuple[BoolArray, ...]
+    _sealed: bool
+
+    def __init__(
+        self,
+        token: object,
+        data: _ComplexData,
+        masks: tuple[BoolArray, ...],
+    ) -> None:
+        if token is not _EVIDENCE_TOKEN:
+            raise SimplicialError("boundary evidence is package-private")
+        if len(masks) != data._dimension + 1:
+            raise SimplicialError("boundary evidence must cover every degree")
+        owned: list[BoolArray] = []
+        for degree, mask in enumerate(masks):
+            candidate = np.asarray(mask)
+            if candidate.dtype.kind != "b" or candidate.shape != (
+                len(data._simplices[degree]),
+            ):
+                raise SimplicialError(
+                    "boundary evidence does not align with its complex"
+                )
+            owned.append(_owned_array(candidate, np.dtype(np.bool_)))
+        object.__setattr__(self, "_data", data)
+        object.__setattr__(self, "_masks", tuple(owned))
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("boundary evidence is immutable")
+        object.__setattr__(self, name, value)
+
+
 class Complex[
     B: BoundaryState,
     O: OrientationState,
@@ -146,7 +189,16 @@ class Complex[
         "_orientation_state",
         "_connectivity_state",
         "_topology_state",
+        "_boundary_evidence",
+        "_sealed",
     )
+    _data: _ComplexData
+    _boundary_state: B
+    _orientation_state: O
+    _connectivity_state: C
+    _topology_state: T
+    _boundary_evidence: _BoundaryEvidence | None
+    _sealed: bool
 
     def __init__(
         self,
@@ -155,12 +207,52 @@ class Complex[
         orientation_state: O,
         connectivity_state: C,
         topology_state: T,
+        boundary_evidence: _BoundaryEvidence | None = None,
     ) -> None:
-        self._data = data
-        self._boundary_state = boundary_state
-        self._orientation_state = orientation_state
-        self._connectivity_state = connectivity_state
-        self._topology_state = topology_state
+        authentic_evidence = (
+            type(boundary_evidence) is _BoundaryEvidence
+            and boundary_evidence._data is data
+        )
+        if isinstance(topology_state, CodimensionOneRegular):
+            if not authentic_evidence:
+                raise SimplicialError(
+                    "codimension-one regular state requires verified topology evidence"
+                )
+        elif boundary_evidence is not None:
+            raise SimplicialError(
+                "simplicial topology cannot carry codimension-one boundary evidence"
+            )
+
+        classified = isinstance(boundary_state, (WithoutBoundary, WithBoundary))
+        if classified:
+            if not authentic_evidence:
+                raise SimplicialError(
+                    "classified boundary state requires regular topology evidence"
+                )
+            if type(boundary_evidence) is not _BoundaryEvidence:
+                raise SimplicialError(
+                    "classified boundary state requires regular topology evidence"
+                )
+            actual = data._dimension > 0 and bool(
+                boundary_evidence._masks[data._dimension - 1].any()
+            )
+            expected = isinstance(boundary_state, WithBoundary)
+            if actual != expected:
+                raise SimplicialError(
+                    "classified boundary state conflicts with topology evidence"
+                )
+        object.__setattr__(self, "_data", data)
+        object.__setattr__(self, "_boundary_state", boundary_state)
+        object.__setattr__(self, "_orientation_state", orientation_state)
+        object.__setattr__(self, "_connectivity_state", connectivity_state)
+        object.__setattr__(self, "_topology_state", topology_state)
+        object.__setattr__(self, "_boundary_evidence", boundary_evidence)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("complexes are immutable")
+        object.__setattr__(self, name, value)
 
     @classmethod
     def from_maximal_simplices(
@@ -296,25 +388,33 @@ class Complex[
     def triangle_manifold(
         self: Complex[B, O, C, Simplicial],
     ) -> Complex[B, O, C, TriangleManifold]:
-        _require_triangle_manifold(self)
+        boundary_masks = _require_triangle_manifold(self)
+        boundary_evidence = _BoundaryEvidence(
+            _EVIDENCE_TOKEN, self._data, boundary_masks
+        )
         return Complex(
             self._data,
             self.boundary_state,
             self.orientation_state,
             self.connectivity_state,
             TriangleManifold(),
+            boundary_evidence,
         )
 
-    def boundary_regular(
+    def codimension_one_regular(
         self: Complex[B, O, C, Simplicial],
-    ) -> Complex[B, O, C, BoundaryRegular]:
-        _require_boundary_regular(self)
+    ) -> Complex[B, O, C, CodimensionOneRegular]:
+        boundary_masks = _require_codimension_one_regular(self)
+        boundary_evidence = _BoundaryEvidence(
+            _EVIDENCE_TOKEN, self._data, boundary_masks
+        )
         return Complex(
             self._data,
             self.boundary_state,
             self.orientation_state,
             self.connectivity_state,
-            BoundaryRegular(),
+            CodimensionOneRegular(),
+            boundary_evidence,
         )
 
     def oriented(
@@ -327,18 +427,33 @@ class Complex[
             Oriented(),
             self.connectivity_state,
             self.topology_state,
+            self._boundary_evidence,
         )
 
-    def closed(
-        self: Complex[BoundaryUnknown, O, C, T],
-    ) -> Complex[Closed, O, C, T]:
-        _require_closed(self)
+    def without_boundary[T2: CodimensionOneRegular](
+        self: Complex[BoundaryUnknown, O, C, T2],
+    ) -> Complex[WithoutBoundary, O, C, T2]:
+        _require_boundary_extent(self, present=False)
         return Complex(
             self._data,
-            Closed(),
+            WithoutBoundary(),
             self.orientation_state,
             self.connectivity_state,
             self.topology_state,
+            self._boundary_evidence,
+        )
+
+    def with_boundary[T2: CodimensionOneRegular](
+        self: Complex[BoundaryUnknown, O, C, T2],
+    ) -> Complex[WithBoundary, O, C, T2]:
+        _require_boundary_extent(self, present=True)
+        return Complex(
+            self._data,
+            WithBoundary(),
+            self.orientation_state,
+            self.connectivity_state,
+            self.topology_state,
+            self._boundary_evidence,
         )
 
     def connected(
@@ -351,6 +466,7 @@ class Complex[
             self.orientation_state,
             Connected(),
             self.topology_state,
+            self._boundary_evidence,
         )
 
     @overload
@@ -521,27 +637,19 @@ def topological_boundary[
     B: BoundaryState,
     O: OrientationState,
     C: ConnectivityState,
-    T: BoundaryRegular,
+    T: CodimensionOneRegular,
 ](
     complex_: Complex[B, O, C, T],
 ) -> SimplexSubset[Complex[B, O, C, T]]:
     """Return the unsigned, closure-complete ordinary topological boundary."""
-    if not isinstance(complex_.topology_state, BoundaryRegular):
-        raise SimplicialError("topological boundary requires boundary-regular input")
-    masks = [
-        np.zeros(complex_.simplex_count(degree), dtype=np.bool_)
-        for degree in range(complex_.dimension + 1)
-    ]
-    if complex_.dimension == 0:
-        return SimplexSubset(complex_, tuple(masks))
-    facets = complex_.boundary_matrix(complex_.dimension).tocsr()
-    masks[complex_.dimension - 1] = np.diff(facets.indptr) == 1
-    for degree in range(complex_.dimension - 1, 0, -1):
-        incidence = abs(complex_.boundary_matrix(degree)).astype(np.int64)
-        masks[degree - 1] = (
-            np.asarray(incidence @ masks[degree].astype(np.int64)).ravel() > 0
+    if not isinstance(complex_.topology_state, CodimensionOneRegular):
+        raise SimplicialError(
+            "topological boundary requires codimension-one regular input"
         )
-    return SimplexSubset(complex_, tuple(masks))
+    evidence = complex_._boundary_evidence
+    if evidence is None:
+        raise SimplicialError("codimension-one regular state has no verified evidence")
+    return SimplexSubset(complex_, evidence._masks)
 
 
 class CochainSpace[K: _SubsetDomain, Degree: int](_CochainParent):
@@ -726,23 +834,34 @@ def _assemble_boundary_matrix(data: _ComplexData, degree: int) -> csr_array:
     )
 
 
-def _require_boundary_regular[
+def _require_codimension_one_regular[
     B: BoundaryState,
     O: OrientationState,
     C: ConnectivityState,
 ](
     complex_: Complex[B, O, C, Simplicial],
-) -> None:
+) -> tuple[BoolArray, ...]:
+    masks = [
+        np.zeros(complex_.simplex_count(degree), dtype=np.bool_)
+        for degree in range(complex_.dimension + 1)
+    ]
     if complex_.dimension == 0:
-        return
+        return tuple(masks)
     used_vertices = np.unique(complex_._data._simplices[complex_.dimension])
     if len(used_vertices) != complex_.vertex_count:
-        raise SimplicialError("boundary-regular input must be pure")
+        raise SimplicialError("codimension-one regular input must be pure")
     coface_counts = np.diff(complex_.boundary_matrix(complex_.dimension).tocsr().indptr)
     if np.any((coface_counts < 1) | (coface_counts > 2)):
         raise SimplicialError(
             "every codimension-one simplex needs one or two top cofaces"
         )
+    masks[complex_.dimension - 1] = coface_counts == 1
+    for degree in range(complex_.dimension - 1, 0, -1):
+        incidence = abs(complex_.boundary_matrix(degree)).astype(np.int64)
+        masks[degree - 1] = (
+            np.asarray(incidence @ masks[degree].astype(np.int64)).ravel() > 0
+        )
+    return tuple(masks)
 
 
 def _require_triangle_manifold[
@@ -751,12 +870,10 @@ def _require_triangle_manifold[
     C: ConnectivityState,
 ](
     complex_: Complex[B, O, C, Simplicial],
-) -> None:
+) -> tuple[BoolArray, ...]:
     if complex_.dimension != 2:
         raise SimplicialError("triangle-manifold refinement requires dimension two")
-    edge_counts = np.diff(complex_.boundary_matrix(2).tocsr().indptr)
-    if np.any((edge_counts < 1) | (edge_counts > 2)):
-        raise SimplicialError("every manifold edge needs one or two incident triangles")
+    boundary_masks = _require_codimension_one_regular(complex_)
     triangles = complex_._data._simplices[2]
     for vertex in range(complex_.vertex_count):
         link: dict[int, set[int]] = {}
@@ -782,6 +899,7 @@ def _require_triangle_manifold[
         cycle = all(value == 2 for value in degrees)
         if len(seen) != len(link) or not (path or cycle):
             raise SimplicialError("a vertex link must be one path or one cycle")
+    return boundary_masks
 
 
 def _require_oriented[B: BoundaryState, C: ConnectivityState, T: TopologyState](
@@ -796,14 +914,30 @@ def _require_oriented[B: BoundaryState, C: ConnectivityState, T: TopologyState](
             raise SimplicialError("top-simplex orientations are not coherent")
 
 
-def _require_closed[O: OrientationState, C: ConnectivityState, T: TopologyState](
+def _require_boundary_extent[
+    O: OrientationState,
+    C: ConnectivityState,
+    T: TopologyState,
+](
     complex_: Complex[BoundaryUnknown, O, C, T],
+    *,
+    present: bool,
 ) -> None:
-    if complex_.dimension == 0:
-        return
-    counts = np.diff(complex_.boundary_matrix(complex_.dimension).tocsr().indptr)
-    if np.any(counts == 1):
-        raise SimplicialError("the complex has topological boundary")
+    if not isinstance(complex_.topology_state, CodimensionOneRegular):
+        raise SimplicialError(
+            "boundary classification requires codimension-one regular input"
+        )
+    evidence = complex_._boundary_evidence
+    if evidence is None:
+        raise SimplicialError("codimension-one regular state has no verified evidence")
+    actual = complex_.dimension > 0 and bool(
+        evidence._masks[complex_.dimension - 1].any()
+    )
+    if actual != present:
+        expected = "nonempty" if present else "empty"
+        raise SimplicialError(
+            f"the complex does not have {expected} topological boundary"
+        )
 
 
 def _require_connected[B: BoundaryState, O: OrientationState, T: TopologyState](
@@ -829,12 +963,11 @@ def _require_connected[B: BoundaryState, O: OrientationState, T: TopologyState](
 
 __all__ = [
     "ORDINARY_FORM",
-    "BoundaryRegular",
     "BoundaryState",
     "BoundaryUnknown",
-    "Closed",
     "CochainSpace",
     "CochainSubspace",
+    "CodimensionOneRegular",
     "Complex",
     "Connected",
     "ConnectivityState",
@@ -852,6 +985,8 @@ __all__ = [
     "TopologyState",
     "TriangleManifold",
     "TwoForm",
+    "WithBoundary",
+    "WithoutBoundary",
     "ZeroForm",
     "topological_boundary",
 ]

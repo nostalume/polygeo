@@ -3,7 +3,7 @@ from typing import Literal, assert_type
 import numpy as np
 
 from polygeo import (
-    BoundaryRegular,
+    CodimensionOneRegular,
     BoundaryUnknown,
     CochainSpace,
     CochainSubspace,
@@ -31,7 +31,7 @@ type Regular = Complex[
     BoundaryUnknown,
     OrientationUnknown,
     ConnectivityUnknown,
-    BoundaryRegular,
+    CodimensionOneRegular,
 ]
 type Triangle = Complex[
     BoundaryUnknown,
@@ -45,7 +45,7 @@ type SubspaceOne = CochainSubspace[ParentOne]
 raw: Raw = Complex.from_maximal_simplices(
     np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
 )
-regular = raw.boundary_regular()
+regular = raw.codimension_one_regular()
 assert_type(regular, Regular)
 assert_type(topological_boundary(regular), SimplexSubset[Regular])
 

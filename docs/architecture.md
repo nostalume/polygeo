@@ -177,10 +177,10 @@ Common, orthogonal domain facts use fixed generic axes rather than one refinemen
 Conceptual markers include:
 
 ```text
-BoundaryUnknown | Closed | HasBoundary | DiskBoundary
+BoundaryUnknown | WithoutBoundary | WithBoundary
 OrientationUnknown | Oriented
 ConnectivityUnknown | Connected
-TopologyUnknown | Simplicial | Manifold | TriangleManifold
+Simplicial | CodimensionOneRegular | TriangleManifold
 ```
 
 Only properties consumed by real algorithms become axes. Complete `Geometry[K]` is a separate composition and does not add a speculative property axis to `Complex`. The architecture does not predeclare every conceivable mathematical adjective.
@@ -188,7 +188,7 @@ Only properties consumed by real algorithms become axes. Complete `Geometry[K]` 
 A single runtime `Complex` class can therefore be viewed statically as, for example:
 
 ```text
-Complex[Closed, Oriented, Connected, TriangleManifold]
+Complex[WithoutBoundary, Oriented, Connected, TriangleManifold]
 ```
 
 No `ClosedOrientedTriangleSurface` runtime subclass is created.
@@ -202,7 +202,7 @@ domain = (
     complex_
     .triangle_manifold()
     .oriented()
-    .closed()
+    .without_boundary()
     .connected()
 )
 ```
@@ -410,7 +410,7 @@ A surface algorithm constrains the complex and degree generically.
 For closed-surface degree-one Hodge decomposition, the effective requirement is:
 
 ```text
-K has TriangleManifold, Closed, Oriented, Connected
+K has TriangleManifold, WithoutBoundary, Oriented, Connected
 geometry is a complete piecewise-Euclidean Geometry[K]
 input is Form[CochainSpace[K, Literal[1]], OrdinaryForm]
 ```
@@ -419,7 +419,7 @@ Conceptually:
 
 ```python
 type QualifiedSurface = Complex[
-    Closed,
+    WithoutBoundary,
     Oriented,
     Connected,
     TriangleManifold,
@@ -507,11 +507,11 @@ $$
 A_{II}x_I = b_I - A_{IB}g_B
 $$
 
-and reconstructs the prescribed boundary values exactly. The implemented `AssembledSystem` preserves distinct exact unknown/equation spaces, while `eliminate_dirichlet()` deliberately admits only primal cochain endomorphisms on `BoundaryRegular` complexes and verifies that prescribed indices lie on the canonical topological boundary. Neumann data enters the weak-form right-hand side; pure-Neumann or closed nullspaces require an explicit compatibility check and gauge. Robin data contributes to both operator and right-hand side; those natural-boundary formulations remain deferred.
+and reconstructs the prescribed boundary values exactly. The implemented `AssembledSystem` preserves distinct exact unknown/equation spaces, while `eliminate_dirichlet()` deliberately admits only primal cochain endomorphisms on `CodimensionOneRegular` complexes and verifies that prescribed indices lie on the canonical topological boundary. Neumann data enters the weak-form right-hand side; pure-Neumann or closed nullspaces require an explicit compatibility check and gauge. Robin data contributes to both operator and right-hand side; those natural-boundary formulations remain deferred.
 
 Dirichlet, Neumann, and Robin formulations must not be collapsed into a mode string, optional boundary argument, solver flag, or behavior-bearing configuration union. The numerical solver receives only an admitted matrix/system and right-hand side. It never discovers boundary vertices, selects a gauge, projects incompatible forcing, or interprets cochain semantics.
 
-Python generics cannot prove that two runtime subspaces came from one complex instance. The implemented `CochainSubspace` therefore retains its actual parent `CochainSpace` and strict canonical indices; `restrict()` and `extend_zero()` verify the exact parent object once before numerical kernels run. `BoundaryRegular` admits pure complexes whose codimension-one simplices have one or two top cofaces, and `TriangleManifold` refines that dimension-general state. `topological_boundary()` returns an unsigned, closure-complete subset in parent basis order; induced-boundary orientation is not hidden in ordinary restriction. No owner token or independent boundary renumbering substitutes for that mathematical data.
+Python generics cannot prove that two runtime subspaces came from one complex instance. The implemented `CochainSubspace` therefore retains its actual parent `CochainSpace` and strict canonical indices; `restrict()` and `extend_zero()` verify the exact parent object once before numerical kernels run. `CodimensionOneRegular` admits pure complexes whose codimension-one simplices have one or two top cofaces. Admission attaches immutable, exact-`_ComplexData`-bound canonical boundary evidence to the complete `Complex`; the public topology marker carries no forgeable masks. `TriangleManifold` refines that dimension-general state. `topological_boundary()` returns an unsigned, closure-complete subset from private evidence in parent basis order; `without_boundary()` and `with_boundary()` classify its emptiness only after regular admission. Induced-boundary orientation is not hidden in ordinary restriction. No owner token or independent boundary renumbering substitutes for that mathematical data.
 
 ## Numerical Behavior Interfaces
 
@@ -625,7 +625,7 @@ domain = (
     complex_
     .triangle_manifold()
     .oriented()
-    .closed()
+    .without_boundary()
     .connected()
 )
 

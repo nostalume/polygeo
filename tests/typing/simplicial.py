@@ -5,7 +5,7 @@ import numpy as np
 from polygeo import (
     ORDINARY_FORM,
     BoundaryUnknown,
-    Closed,
+    WithoutBoundary,
     CochainSpace,
     Complex,
     Connected,
@@ -16,6 +16,7 @@ from polygeo import (
     Oriented,
     Simplicial,
     TriangleManifold,
+    WithBoundary,
 )
 
 raw = Complex.from_maximal_simplices(
@@ -29,10 +30,25 @@ raw = Complex.from_maximal_simplices(
         dtype=np.int64,
     )
 )
-domain = raw.triangle_manifold().oriented().closed().connected()
+domain = raw.triangle_manifold().oriented().without_boundary().connected()
 assert_type(
     domain,
-    Complex[Closed, Oriented, Connected, TriangleManifold],
+    Complex[WithoutBoundary, Oriented, Connected, TriangleManifold],
+)
+
+bounded = (
+    Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
+    .triangle_manifold()
+    .with_boundary()
+)
+assert_type(
+    bounded,
+    Complex[
+        WithBoundary,
+        OrientationUnknown,
+        ConnectivityUnknown,
+        TriangleManifold,
+    ],
 )
 
 space = domain.cochain_space(1)
@@ -41,7 +57,7 @@ assert_type(
     form,
     Form[
         CochainSpace[
-            Complex[Closed, Oriented, Connected, TriangleManifold],
+            Complex[WithoutBoundary, Oriented, Connected, TriangleManifold],
             Literal[1],
         ],
         OrdinaryForm,

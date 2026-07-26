@@ -1,3 +1,5 @@
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
+
 from typing import Literal
 
 import numpy as np
@@ -5,7 +7,7 @@ import numpy as np
 from polygeo import (
     ORDINARY_FORM,
     CochainSpace,
-    Closed,
+    WithoutBoundary,
     Complex,
     Connected,
     FieldSemantics,
@@ -29,17 +31,21 @@ qualified = (
     )
     .triangle_manifold()
     .oriented()
-    .closed()
+    .without_boundary()
     .connected()
 )
 
 qualified.triangle_manifold()
 qualified.oriented()
-qualified.closed()
+qualified.without_boundary()
 qualified.connected()
 
+unrefined = Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
+unrefined.without_boundary()
+unrefined.with_boundary()
 
-type Domain = Complex[Closed, Oriented, Connected, TriangleManifold]
+
+type Domain = Complex[WithoutBoundary, Oriented, Connected, TriangleManifold]
 
 
 class AlternateSemantics(FieldSemantics):

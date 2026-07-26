@@ -1,3 +1,5 @@
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -7,7 +9,6 @@ from polygeo import (
     ConnectivityUnknown,
     Geometry,
     OrientationUnknown,
-    Simplicial,
     TriangleManifold,
 )
 
