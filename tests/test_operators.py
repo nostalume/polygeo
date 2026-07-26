@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from scipy.sparse import csr_array
@@ -374,6 +376,30 @@ def test_linear_map_rejects_misaligned_or_nonfinite_representation() -> None:
         )
         with pytest.raises(OperatorError, match="CSR"):
             LinearMap(source, target, malformed)
+
+    descending_indptr = csr_array(
+        (
+            np.array([1.0]),
+            np.array([0], dtype=np.int64),
+            np.array([0, 1, 0, 0], dtype=np.int64),
+        ),
+        shape=(target.size, source.size),
+    )
+    with pytest.raises(OperatorError, match="CSR"):
+        LinearMap(source, target, descending_indptr)
+
+    nonintegral_indptr = csr_array((target.size, source.size))
+    nonintegral_indptr.indptr = np.array([0.0, np.nan, 0.0, 0.0], dtype=np.float64)
+    with pytest.raises(OperatorError, match="CSR"):
+        LinearMap(source, target, nonintegral_indptr)
+
+    unsigned_structure = csr_array(np.eye(source.size))
+    unsigned_structure.indices = unsigned_structure.indices.astype(np.uint32)
+    unsigned_structure.indptr = unsigned_structure.indptr.astype(np.uint32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(OperatorError, match="CSR"):
+            LinearMap(source, source, unsigned_structure)
 
 
 def test_linear_map_rejects_spaces_from_different_complexes() -> None:

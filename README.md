@@ -4,7 +4,7 @@ PolyGeo is a Python 3.14 reading implementation of discrete differential geometr
 
 ## Current status
 
-The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, and signed metric DEC operators: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, dimension-general boundary-regular admission and extraction, parent-retaining cochain subspaces, restriction and zero extension, primal and subordinate dual cochain spaces, generic forms, typed linear maps, owned positions, scale-safe primal measures, signed circumcentric dual measures, exterior derivatives, Hodge stars, weighted pairings, codifferentials, and Hodge Laplacians. Solvers, assembled boundary-value problems, and higher algorithms remain planned.
+The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, and signed metric DEC operators: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, dimension-general boundary-regular admission and extraction, parent-retaining cochain subspaces, restriction and zero extension, typed assembled systems, true-boundary Dirichlet elimination and reconstruction, primal and subordinate dual cochain spaces, generic forms, typed linear maps, owned positions, scale-safe primal measures, signed circumcentric dual measures, exterior derivatives, Hodge stars, weighted pairings, codifferentials, and Hodge Laplacians. Numerical solvers, Neumann/Robin assembly, and higher algorithms remain planned.
 
 Previous topology/surface/dual owner-chain code was rejected and removed. No compatibility with that API is promised; later slices still require explicit approval.
 

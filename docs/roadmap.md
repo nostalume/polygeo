@@ -9,6 +9,7 @@ Current implemented baseline:
 - arbitrary-dimensional simplicial topology, boundary-regular extraction, parent-retaining cochain subspaces, restriction and zero extension, and forms;
 - complete arbitrary-dimensional Euclidean geometry, primal simplex measures, and signed circumcentric dual measures;
 - typed linear maps, composition, arbitrary-dimensional exterior derivative, subordinate dual cochain identity, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian;
+- typed assembled systems plus true-boundary, endomorphism-only Dirichlet block elimination and exact reconstruction;
 - executable runtime, positive Ty, and negative Ty contracts;
 - rejected owner-chain modules remain retired and must not be restored.
 
@@ -487,6 +488,8 @@ Strict parent-retaining `CochainSubspace`, `restrict()`, and `extend_zero()` are
 - the numerical solver receives only an assembled system and has no boundary-condition branch.
 
 **Work:** Keep Dirichlet, Neumann, and Robin as distinct mathematical formulations rather than a mode string, optional boundary argument, or solver configuration union.
+
+`AssembledSystem`, endomorphism-only `eliminate_dirichlet()`, and flat `DirichletProblem.reconstruct()` are implemented. Elimination requires a `BoundaryRegular` primal parent, verifies the canonical topological boundary, handles empty and fully prescribed regions, and assembles $A_{II}$ and $b_I-A_{IB}g_B$ by sparse block indexing. Neumann, Robin, compatibility/gauge assembly, and solver orchestration remain deferred.
 
 ## T5 — Numerical Behavior
 

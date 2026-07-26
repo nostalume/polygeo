@@ -456,6 +456,12 @@ def _admit_matrix[
 ) -> csr_array:
     if not isinstance(matrix, csr_array):
         raise OperatorError("linear-map representation must be a CSR sparse array")
+    supported_index_dtypes = (np.dtype(np.int32), np.dtype(np.int64))
+    if (
+        matrix.indices.dtype not in supported_index_dtypes
+        or matrix.indptr.dtype not in supported_index_dtypes
+    ):
+        raise OperatorError("linear-map representation has invalid CSR structure")
     try:
         matrix.check_format(full_check=True)
     except ValueError as error:
@@ -472,10 +478,15 @@ def _admit_matrix[
         raise OperatorError(
             "linear-map representation cannot be converted to float64"
         ) from error
-    with np.errstate(over="ignore", invalid="ignore"):
-        owned.sum_duplicates()
-    owned.eliminate_zeros()
-    owned.sort_indices()
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            owned.sum_duplicates()
+        owned.eliminate_zeros()
+        owned.sort_indices()
+    except (IndexError, ValueError, OverflowError) as error:
+        raise OperatorError(
+            "linear-map representation has invalid CSR structure"
+        ) from error
     if not np.all(np.isfinite(owned.data)):
         raise OperatorError("linear-map coefficients must be finite")
     return owned

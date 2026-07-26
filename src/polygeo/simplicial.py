@@ -687,6 +687,9 @@ class Form[Space: _CoefficientSpace, Semantics: FieldSemantics]:
     def semantics(self) -> Semantics:
         return self._semantics
 
+    def uses_semantics(self, semantics: Semantics) -> bool:
+        return type(self._semantics) is type(semantics)
+
 
 type ZeroForm[K: _SubsetDomain] = Form[CochainSpace[K, Literal[0]], OrdinaryForm]
 type OneForm[K: _SubsetDomain] = Form[CochainSpace[K, Literal[1]], OrdinaryForm]

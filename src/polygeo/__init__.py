@@ -41,9 +41,16 @@ from .simplicial import (
     ZeroForm,
     topological_boundary,
 )
+from .systems import (
+    AssembledSystem,
+    DirichletProblem,
+    SystemError,
+    eliminate_dirichlet,
+)
 
 __all__ = [
     "ORDINARY_FORM",
+    "AssembledSystem",
     "BoundaryRegular",
     "BoundaryState",
     "BoundaryUnknown",
@@ -54,6 +61,7 @@ __all__ = [
     "Connected",
     "ConnectivityState",
     "ConnectivityUnknown",
+    "DirichletProblem",
     "DualCochainSpace",
     "FieldSemantics",
     "Form",
@@ -69,11 +77,13 @@ __all__ = [
     "SimplexSubset",
     "Simplicial",
     "SimplicialError",
+    "SystemError",
     "TopologyState",
     "TriangleManifold",
     "TwoForm",
     "ZeroForm",
     "codifferential",
+    "eliminate_dirichlet",
     "extend_zero",
     "exterior_derivative",
     "hodge_laplacian",

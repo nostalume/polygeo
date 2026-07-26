@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the target architecture. The arbitrary-dimensional simplicial core, boundary-regular extraction, parent-retaining cochain subspaces, restriction and zero extension, complete general Euclidean geometry, typed linear maps, exterior derivative, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian are implemented. Numerical solvers, assembled boundary-value problems, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
+This document defines the target architecture. The arbitrary-dimensional simplicial core, boundary-regular extraction, parent-retaining cochain subspaces, restriction and zero extension, typed assembled systems, true-boundary Dirichlet elimination and reconstruction, complete general Euclidean geometry, typed linear maps, exterior derivative, signed Hodge star, weighted pairing, codifferential, and Hodge Laplacian are implemented. Numerical solvers, Neumann/Robin assembly, and specific-dimensional algorithms remain target design until their implementation tasks and verification gates pass. The rejected owner-chain implementation is not part of the working API.
 
 [`roadmap.md`](roadmap.md) contains the implementation tasks. Architecture decisions and implementation status must not be mixed.
 
@@ -507,7 +507,7 @@ $$
 A_{II}x_I = b_I - A_{IB}g_B
 $$
 
-and reconstructs the prescribed boundary values exactly. Neumann data enters the weak-form right-hand side; pure-Neumann or closed nullspaces require an explicit compatibility check and gauge. Robin data contributes to both operator and right-hand side.
+and reconstructs the prescribed boundary values exactly. The implemented `AssembledSystem` preserves distinct exact unknown/equation spaces, while `eliminate_dirichlet()` deliberately admits only primal cochain endomorphisms on `BoundaryRegular` complexes and verifies that prescribed indices lie on the canonical topological boundary. Neumann data enters the weak-form right-hand side; pure-Neumann or closed nullspaces require an explicit compatibility check and gauge. Robin data contributes to both operator and right-hand side; those natural-boundary formulations remain deferred.
 
 Dirichlet, Neumann, and Robin formulations must not be collapsed into a mode string, optional boundary argument, solver flag, or behavior-bearing configuration union. The numerical solver receives only an admitted matrix/system and right-hand side. It never discovers boundary vertices, selects a gauge, projects incompatible forcing, or interprets cochain semantics.
 
