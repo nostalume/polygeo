@@ -7,10 +7,14 @@ from scipy.sparse import csr_array
 from polygeo import (
     ORDINARY_FORM,
     Complex,
+    DualCochainSpace,
     FieldSemantics,
+    Geometry,
+    GeometryError,
     LinearMap,
     OperatorError,
     exterior_derivative,
+    hodge_star,
 )
 
 
@@ -22,6 +26,159 @@ def _simplex(dimension: int) -> Complex:
 
 class AlternateSemantics(FieldSemantics):
     pass
+
+
+def _geometry(dimension: int) -> tuple[Complex, Geometry]:
+    complex_ = _simplex(dimension)
+    positions = np.vstack(
+        [
+            np.zeros((1, dimension), dtype=np.float64),
+            np.eye(dimension, dtype=np.float64),
+        ]
+    )
+    return complex_, Geometry.from_positions(complex_, positions)
+
+
+def test_hodge_star_derives_subordinate_dual_space() -> None:
+    complex_, geometry = _geometry(4)
+    source = complex_.cochain_space(3)
+
+    star = hodge_star(geometry, source)
+
+    assert star.source is source
+    assert isinstance(star.target, DualCochainSpace)
+    assert star.target.geometry is geometry
+    assert star.target.primal is source
+    assert star.target.complex is complex_
+    assert star.target.primal_degree == 3
+    assert star.target.degree == 1
+    assert star.target.size == source.size
+    assert star.target.same_space(hodge_star(geometry, source).target)
+
+
+@pytest.mark.parametrize(
+    ("degree", "expected"),
+    [
+        (0, np.array([3.0, 3.0], dtype=np.float64)),
+        (1, np.array([1.0 / 6.0], dtype=np.float64)),
+    ],
+)
+def test_hodge_star_uses_signed_dual_to_primal_ratio(
+    degree: int,
+    expected: np.ndarray,
+) -> None:
+    complex_ = _simplex(1)
+    geometry = Geometry.from_positions(
+        complex_,
+        np.array([[0.0], [6.0]], dtype=np.float64),
+    )
+    source = complex_.cochain_space(degree)
+
+    star = hodge_star(geometry, source)
+
+    np.testing.assert_array_equal(star.matrix().diagonal(), expected)
+    semantics = AlternateSemantics()
+    value = source.form(np.ones(source.size, dtype=np.float64), semantics)
+    result = star.apply(value)
+    assert result.space is star.target
+    assert result.semantics is semantics
+    np.testing.assert_array_equal(result.coefficients(), expected)
+
+
+@pytest.mark.parametrize(
+    "positions",
+    [
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64),
+        np.array([[0.0, 0.0], [2.0, 0.0], [0.2, 0.1]], dtype=np.float64),
+    ],
+)
+def test_hodge_star_preserves_finite_signed_and_zero_coefficients(
+    positions: np.ndarray,
+) -> None:
+    complex_ = _simplex(2)
+    geometry = Geometry.from_positions(complex_, positions)
+    source = complex_.cochain_space(1)
+    expected = geometry.dual_measures(1) / geometry.primal_measures(1)
+
+    diagonal = hodge_star(geometry, source).matrix().diagonal()
+
+    np.testing.assert_array_equal(diagonal, expected)
+    assert np.any(diagonal <= 0.0)
+
+
+def test_hodge_star_rejects_foreign_geometry() -> None:
+    complex_, _ = _geometry(2)
+    foreign_complex, foreign_geometry = _geometry(2)
+    source = complex_.cochain_space(1)
+
+    with pytest.raises(OperatorError, match="different complex"):
+        hodge_star(foreign_geometry, source)
+
+    assert foreign_complex is foreign_geometry.complex
+
+
+def test_hodge_star_is_independent_of_global_numpy_error_policy() -> None:
+    complex_ = _simplex(1)
+    step = float.fromhex("0x0.0000000000002p-1022")
+    geometry = Geometry.from_positions(
+        complex_,
+        np.array([[0.0], [step]], dtype=np.float64),
+    )
+    source = complex_.cochain_space(0)
+    previous = np.seterr(all="raise")
+    try:
+        diagonal = hodge_star(geometry, source).matrix().diagonal()
+    finally:
+        np.seterr(**previous)
+
+    np.testing.assert_array_equal(diagonal, [step / 2.0, step / 2.0])
+
+
+def test_hodge_star_obeys_arbitrary_dimensional_scale_law() -> None:
+    dimension = 4
+    complex_, geometry = _geometry(dimension)
+    scale = 3.0
+    scaled = Geometry.from_positions(complex_, scale * geometry.positions)
+
+    for degree in range(dimension + 1):
+        source = complex_.cochain_space(degree)
+        original = hodge_star(geometry, source).matrix().diagonal()
+        actual = hodge_star(scaled, source).matrix().diagonal()
+        expected = scale ** (dimension - 2 * degree) * original
+        np.testing.assert_allclose(actual, expected, rtol=2e-13, atol=0.0)
+
+
+def test_hodge_star_rejects_unrepresentable_nonzero_ratio() -> None:
+    complex_ = _simplex(1)
+    step = float.fromhex("0x0.0000000000001p-1022")
+    geometry = Geometry.from_positions(
+        complex_,
+        np.array([[0.0], [step]], dtype=np.float64),
+    )
+
+    with pytest.raises(OperatorError, match="not representable"):
+        hodge_star(geometry, complex_.cochain_space(1))
+
+
+def test_hodge_star_closes_unrepresentable_dual_measure_error() -> None:
+    complex_ = _simplex(1)
+    step = float.fromhex("0x0.0000000000001p-1022")
+    geometry = Geometry.from_positions(
+        complex_,
+        np.array([[0.0], [step]], dtype=np.float64),
+    )
+
+    previous = np.seterr(all="raise")
+    try:
+        with pytest.raises(
+            OperatorError,
+            match="measures are not representable",
+        ) as exc_info:
+            hodge_star(geometry, complex_.cochain_space(0))
+        assert isinstance(exc_info.value.__cause__, GeometryError)
+        assert all(policy == "raise" for policy in np.geterr().values())
+    finally:
+        np.seterr(**previous)
 
 
 def test_exterior_derivative_uses_exact_source_and_target_spaces() -> None:

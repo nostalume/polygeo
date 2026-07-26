@@ -1,7 +1,13 @@
 """Public API for the PolyGeo simplicial core."""
 
 from .geometry import Geometry, GeometryError
-from .operators import LinearMap, OperatorError, exterior_derivative
+from .operators import (
+    DualCochainSpace,
+    LinearMap,
+    OperatorError,
+    exterior_derivative,
+    hodge_star,
+)
 from .simplicial import (
     ORDINARY_FORM,
     BoundaryState,
@@ -38,6 +44,7 @@ __all__ = [
     "Connected",
     "ConnectivityState",
     "ConnectivityUnknown",
+    "DualCochainSpace",
     "FieldSemantics",
     "Form",
     "Geometry",
@@ -57,4 +64,5 @@ __all__ = [
     "TwoForm",
     "ZeroForm",
     "exterior_derivative",
+    "hodge_star",
 ]

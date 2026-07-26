@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.sparse import csr_array
 
+from .geometry import Geometry, GeometryError, _GeometryDomain
 from .simplicial import CochainSpace, FieldSemantics, Form, _CoefficientSpace
 
 
@@ -24,6 +25,60 @@ class _OperatorDomain(Protocol):
     def simplices(self, degree: int) -> NDArray[np.int64]: ...
 
     def boundary_matrix(self, degree: int) -> csr_array: ...
+
+
+class DualCochainSpace[
+    K: _GeometryDomain,
+    PrimalDegree: int,
+]:
+    """Dual cochains subordinate to one exact geometry and primal space."""
+
+    __slots__ = ("_geometry", "_primal")
+    _geometry: Geometry[K]
+    _primal: CochainSpace[K, PrimalDegree]
+
+    def __init__(
+        self,
+        geometry: Geometry[K],
+        primal: CochainSpace[K, PrimalDegree],
+    ) -> None:
+        if geometry.complex is not primal.complex:
+            raise OperatorError(
+                "dual space geometry and primal belong to different complexes"
+            )
+        self._geometry = geometry
+        self._primal = primal
+
+    @property
+    def geometry(self) -> Geometry[K]:
+        return self._geometry
+
+    @property
+    def primal(self) -> CochainSpace[K, PrimalDegree]:
+        return self._primal
+
+    @property
+    def complex(self) -> K:
+        return self._primal.complex
+
+    @property
+    def primal_degree(self) -> PrimalDegree:
+        return self._primal.degree
+
+    @property
+    def degree(self) -> int:
+        return self._primal.complex.dimension - self._primal.degree
+
+    @property
+    def size(self) -> int:
+        return self._primal.size
+
+    def same_space(self, other: object) -> bool:
+        return (
+            isinstance(other, DualCochainSpace)
+            and self._geometry is other._geometry
+            and self._primal.same_space(other._primal)
+        )
 
 
 class LinearMap[
@@ -111,6 +166,37 @@ def exterior_derivative[
     return LinearMap(source, target, matrix)
 
 
+def hodge_star[
+    K: _GeometryDomain,
+    Degree: int,
+](
+    geometry: Geometry[K],
+    source: CochainSpace[K, Degree],
+) -> LinearMap[
+    CochainSpace[K, Degree],
+    DualCochainSpace[K, Degree],
+]:
+    """Construct the signed circumcentric Hodge star on one primal space."""
+    if geometry.complex is not source.complex:
+        raise OperatorError("Hodge geometry and source belong to different complexes")
+    try:
+        primal = geometry.primal_measures(source.degree)
+        dual = geometry.dual_measures(source.degree)
+    except GeometryError as error:
+        raise OperatorError("Hodge measures are not representable") from error
+    with np.errstate(all="ignore"):
+        weights = np.divide(dual, primal)
+    if not np.all(np.isfinite(weights)) or np.any((dual != 0.0) & (weights == 0.0)):
+        raise OperatorError("Hodge coefficients are not representable as float64")
+    target = DualCochainSpace(geometry, source)
+    indices = np.arange(source.size, dtype=np.int64)
+    matrix = csr_array(
+        (weights, (indices, indices)),
+        shape=(target.size, source.size),
+    )
+    return LinearMap(source, target, matrix)
+
+
 def _admit_matrix[
     SourceSpace: _CoefficientSpace,
     TargetSpace: _CoefficientSpace,
@@ -146,4 +232,10 @@ def _admit_matrix[
     return owned
 
 
-__all__ = ["LinearMap", "OperatorError", "exterior_derivative"]
+__all__ = [
+    "DualCochainSpace",
+    "LinearMap",
+    "OperatorError",
+    "exterior_derivative",
+    "hodge_star",
+]

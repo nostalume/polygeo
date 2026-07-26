@@ -4,7 +4,7 @@ PolyGeo is a Python 3.14 reading implementation of discrete differential geometr
 
 ## Current status
 
-The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, and the topological exterior derivative: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, cochain spaces, generic forms, typed linear maps, owned positions, scale-safe primal measures, and signed circumcentric dual measures. Hodge maps, solvers, boundary-value problems, surface-specific deductions, and mesh loading remain planned.
+The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, the topological exterior derivative, and the signed circumcentric Hodge star: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, primal and subordinate dual cochain spaces, generic forms, typed linear maps, owned positions, scale-safe primal measures, and signed circumcentric dual measures. Weighted pairings, codifferentials, Laplacians, solvers, boundary-value problems, surface-specific deductions, and mesh loading remain planned.
 
 Previous topology/surface/dual owner-chain code was rejected and removed. No compatibility with that API is promised; later slices still require explicit approval.
 
@@ -87,7 +87,7 @@ zero_map = d1.compose(d0)
 assert zero_map.matrix().nnz == 0
 ```
 
-`Form[Space, Semantics]` and `LinearMap[SourceSpace, TargetSpace]` retain exact coefficient-space identity. `Form.coefficients()` and `LinearMap.matrix()` return caller-owned representations. Map application preserves field semantics, while composition statically unifies the intermediate space and checks its exact runtime identity. The exterior derivative still accepts explicit adjacent `CochainSpace` values because Python cannot calculate `SourceDegree + 1` at the type level; the chain boundary remains `Complex.boundary_matrix(k)` and the cochain derivative uses its transpose. A later Hodge slice can add a subordinate dual cochain space without changing these generic classes or duplicating a `DualComplex`.
+`Form[Space, Semantics]` and `LinearMap[SourceSpace, TargetSpace]` retain exact coefficient-space identity. `Form.coefficients()` and `LinearMap.matrix()` return caller-owned representations. Map application preserves field semantics, while composition statically unifies the intermediate space and checks its exact runtime identity. The exterior derivative still accepts explicit adjacent `CochainSpace` values because Python cannot calculate `SourceDegree + 1` at the type level; the chain boundary remains `Complex.boundary_matrix(k)` and the cochain derivative uses its transpose. `hodge_star(geometry, source)` derives a subordinate `DualCochainSpace` that references the exact geometry and primal space without duplicating a `DualComplex`.
 
 ## Documentation
 

@@ -8,13 +8,16 @@ from polygeo import (
     CochainSpace,
     Complex,
     ConnectivityUnknown,
+    DualCochainSpace,
     FieldSemantics,
     Form,
+    Geometry,
     LinearMap,
     OrdinaryForm,
     OrientationUnknown,
     Simplicial,
     exterior_derivative,
+    hodge_star,
 )
 
 
@@ -64,3 +67,25 @@ def consume_ordinary(
 
 alternate = space_3.form(np.zeros(space_3.size), AlternateSemantics())
 consume_ordinary(derivative.apply(alternate))
+
+positions = np.vstack(
+    [
+        np.zeros((1, 4), dtype=np.float64),
+        np.eye(4, dtype=np.float64),
+    ]
+)
+geometry = Geometry.from_positions(complex_, positions)
+star = hodge_star(geometry, space_3)
+star.apply(star.apply(alternate))
+
+
+def consume_wrong_dual(
+    value: LinearMap[
+        CochainSpace[Domain, Literal[2]],
+        DualCochainSpace[Domain, Literal[2]],
+    ],
+) -> None:
+    pass
+
+
+consume_wrong_dual(star)

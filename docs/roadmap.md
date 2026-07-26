@@ -8,7 +8,7 @@ Current implemented baseline:
 
 - arbitrary-dimensional simplicial topology, typestate refinements, cochain spaces, and forms;
 - complete arbitrary-dimensional Euclidean geometry, primal simplex measures, and signed circumcentric dual measures;
-- typed linear maps, composition, and arbitrary-dimensional topological exterior derivative;
+- typed linear maps, composition, arbitrary-dimensional topological exterior derivative, subordinate dual cochain identity, and signed Hodge star;
 - executable runtime, positive Ty, and negative Ty contracts;
 - rejected owner-chain modules remain retired and must not be restored.
 
@@ -424,6 +424,8 @@ Two-dimensional cotangent weights are a later specialization law of the generic 
 - diagonal ratio follows the frozen convention;
 - weighted pairing is symmetric under its valid metric assumptions;
 - returned sparse representation is caller-owned.
+
+The exact-space migration, subordinate dual identity, and forward signed Hodge map are implemented. Weighted pairing remains the next bounded OP-03 slice; inverse Hodge remains deferred until an independent public consumer requires it.
 
 ### OP-04 — Codifferential and Hodge Laplacian
 

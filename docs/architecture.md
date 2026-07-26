@@ -334,12 +334,21 @@ The `k + 1` relation is checked when constructing the derivative at runtime. A b
 
 The chain boundary remains `Complex.boundary_matrix(k)`. `LinearMap` currently models cochain maps, so boundary is not mislabeled as a map between `CochainSpace` values. The exterior derivative has sparse representation `boundary_matrix(k + 1).T`.
 
-The same explicit-space model will apply to:
+The signed circumcentric Hodge star uses the same explicit-space model:
 
-- Hodge star;
-- codifferential;
-- Laplacian;
-- restriction and zero-extension maps.
+```python
+star = hodge_star(geometry, source)
+```
+
+Its target is a subordinate `DualCochainSpace[K, PrimalDegree]` retaining the exact `Geometry[K]` and primal `CochainSpace[K, PrimalDegree]`. It owns no simplex, incidence, numbering, orientation, or measure arrays. Its runtime geometric degree is `complex.dimension - primal_degree`, while its coefficients remain canonically aligned with the associated primal basis. The map diagonal is
+
+$$
+(H_k)_{ii}=\frac{|\star\sigma_i^k|}{|\sigma_i^k|}.
+$$
+
+Finite signed and zero coefficients are preserved. A required nonzero ratio that is not representable as `float64` raises `OperatorError`. The forward map does not require reciprocal weights; inverse Hodge remains deferred.
+
+The explicit-space model will later apply to codifferentials, Laplacians, and restriction/zero-extension maps.
 
 Sparse matrices are representations of these maps, not the public mathematical identity of the operator. A complete `LinearMap` admits structurally valid, real, finite CSR data aligned to exact source/target sizes and owns a canonicalized float64 copy. `matrix()` makes allocation explicit by returning a caller-owned representation; `apply()` and `compose()` compute directly from private representations without copying operand matrices.
 
@@ -390,7 +399,7 @@ Construction rejects affine degeneracy and any required public measure that is n
 
 `primal_measures(k)` and `dual_measures(k)` both use the associated primal degree and canonical $k$-simplex ordering. The first returns $|\sigma_i^k|$; the second returns signed circumcentric $|\star\sigma_i^k|$, whose cells have runtime dimension $n-k$. Dual measures use an immediate-coface recurrence equivalent to signed circumcentric orthoscheme flags, preserve zero and negative non-Delaunay values, and include only represented cofaces at boundaries. Each signed immediate step is computed locally as the upper circumcenter's barycentric coefficient at the added vertex times that vertex's altitude over the face, avoiding subtraction of rounded absolute centers. Ill-conditioned or cancellation-suspicious coefficients and primal measures fall back to exact arithmetic on the admitted binary-float coordinates. Barycentric coefficients, altitudes, and incidence arrays are construction-local to each call; `Geometry` gains no dual state or cache.
 
-Triangle normals, corner angles, and corner cotangents are dimension-specific deductions and are not fields on the general geometry value. They require separate constrained methods or complete computation products after a consumer is approved. Hodge ratios and later metric maps remain operator-layer constructions rather than geometry fields. A measure-only dual wrapper and duplicated `DualComplex` are forbidden; a subordinate dual cochain space appears only with the Hodge consumer.
+Triangle normals, corner angles, and corner cotangents are dimension-specific deductions and are not fields on the general geometry value. They require separate constrained methods or complete computation products after a consumer is approved. Hodge ratios and later metric maps remain operator-layer constructions rather than geometry fields. A measure-only dual wrapper and duplicated `DualComplex` are forbidden; the Hodge consumer uses only a subordinate dual cochain space referencing the exact geometry and primal space.
 
 An independently supplied intrinsic metric becomes a separate public concept only after a real caller needs intrinsic geometry without positions or multiple embeddings sharing one metric.
 
