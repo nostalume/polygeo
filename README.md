@@ -1,102 +1,94 @@
 # PolyGeo
 
-PolyGeo is a Python 3.14 reading implementation of discrete differential geometry and discrete exterior calculus.
+PolyGeo is a reading implementation of discrete differential geometry and discrete exterior calculus for finite simplicial complexes. It provides typed topology, Euclidean geometry, cochains and DEC operators, numerical assembly, and a focused set of mesh algorithms through the `polygeo` package root.
 
-## Current status
+PolyGeo requires Python 3.14. Version 0.1.0 is experimental: the implemented paths are tested, but the public API and numerical policies are not yet stable.
 
-The implemented core includes arbitrary-dimensional simplicial topology, complete Euclidean geometry, and signed metric DEC operators: canonical oriented bases, boundary matrices, simplex subsets, constrained typestate methods, dimension-general boundary-regular admission and extraction, parent-retaining cochain subspaces, restriction and zero extension, typed assembled systems, true-boundary Dirichlet elimination and reconstruction, prepared sparse direct solves with residual certification, primal and subordinate dual cochain spaces, generic forms, typed linear maps, owned positions, scale-safe primal measures, signed circumcentric dual measures, exterior derivatives, Hodge stars, weighted pairings, codifferentials, and Hodge Laplacians. Iterative solvers, Neumann/Robin assembly, and higher algorithms remain planned.
+## Install from source
 
-Previous topology/surface/dual owner-chain code was rejected and removed. No compatibility with that API is promised; later slices still require explicit approval.
+Install the core development environment with [uv](https://docs.astral.sh/uv/):
 
-## Design direction
+```bash
+git clone https://github.com/nostalume/polygeo.git
+cd polygeo
+uv sync
+```
 
-The approved design is based on:
+Optional dependencies are separate:
 
-- arbitrary-dimensional simplicial complexes with runtime dimension;
-- PEP 695 generic types without explicit `TypeVar` declarations;
-- constrained typestate methods for verified topology capabilities;
-- cochain spaces that bind basis, runtime degree, and complex identity;
-- generic forms parameterized by exact coefficient space and semantics;
-- typed linear maps with explicit source and target spaces;
-- specific-dimensional algorithms constrained by mathematical capability rather than `SurfaceOneForm`-style subclasses;
-- complete construction with no `object.__setattr__`, empty shells, or hidden instance caches;
-- a future root-level `load_surface` rather than organizational `api.py` or `io.py` modules.
+```bash
+uv sync --extra mesh
+uv sync --extra plot
+# or install both
+uv sync --extra mesh --extra plot
+```
 
-## Simplicial core
+- `polygeo[mesh]` enables the root `load_surface()` boundary, which uses Trimesh to read one triangular mesh into an unrefined `Geometry`.
+- `polygeo[plot]` enables the root plotting functions, which return ordinary Plotly figures. Importing `polygeo` does not import Plotly.
+
+## Quick start
+
+This complete script builds an oriented triangulated disk, admits its Euclidean geometry, computes integrated Gaussian curvature, and checks Gauss–Bonnet:
 
 ```python
+import math
+
 import numpy as np
 
-from polygeo import Complex, ORDINARY_FORM
+from polygeo import Complex, Geometry, gaussian_curvature_measure
 
-raw = Complex.from_maximal_simplices(
-    np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
-)
-surface = raw.triangle_manifold().oriented().connected()
-
-one_space = surface.cochain_space(1)
-one_form = one_space.form(np.zeros(one_space.size), ORDINARY_FORM)
-boundary_2 = surface.boundary_matrix(2)
-```
-
-`closed()` is a separate refinement and correctly rejects this disk example.
-
-## General geometry
-
-```python
-from polygeo import Geometry
-
-geometry = Geometry.from_positions(
-    raw,
-    np.array(
-        [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ],
-        dtype=np.float64,
-    ),
+faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+positions = np.array(
+    [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+    dtype=np.float64,
 )
 
-edge_lengths = geometry.primal_measures(1)
-triangle_areas = geometry.primal_measures(2)
-dual_edge_lengths = geometry.dual_measures(1)
-```
-
-`Geometry[K]` preserves the exact complex identity and supports any intrinsic dimension representable in its runtime ambient dimension. Both measure methods use the associated primal degree and canonical primal simplex indices: `primal_measures(k)[i]` is $|\sigma_i^k|$, while `dual_measures(k)[i]` is the signed circumcentric $|\star\sigma_i^k|$ of runtime dimension $n-k$. The dual computation is pure and uncached; no measure-only dual owner or duplicated dual complex exists. Triangle normals, corner angles, and cotangents remain separate constrained computations.
-
-## Topological exterior derivative
-
-```python
-from polygeo import exterior_derivative
-
-zero_space = raw.cochain_space(0)
-one_space = raw.cochain_space(1)
-d0 = exterior_derivative(zero_space, one_space)
-
-zero_form = zero_space.form(
-    np.arange(zero_space.size, dtype=np.float64),
-    ORDINARY_FORM,
+surface = (
+    Complex.from_maximal_simplices(faces)
+    .triangle_manifold()
+    .oriented()
+    .with_boundary()
+    .connected()
 )
-one_form = d0.apply(zero_form)
+geometry = Geometry.from_positions(surface, positions)
+curvature = gaussian_curvature_measure(geometry)
 
-two_space = raw.cochain_space(2)
-d1 = exterior_derivative(one_space, two_space)
-zero_map = d1.compose(d0)
-assert zero_map.matrix().nnz == 0
+assert math.isclose(
+    math.fsum(curvature.coefficients()),
+    2.0 * math.pi,
+    rel_tol=0.0,
+    abs_tol=1e-12,
+)
+print(curvature.coefficients())
 ```
 
-`Form[Space, Semantics]` and `LinearMap[SourceSpace, TargetSpace]` retain exact coefficient-space identity. `Form.coefficients()` and `LinearMap.matrix()` return caller-owned representations. Map application preserves field semantics, while composition statically unifies the intermediate space and checks its exact runtime identity. The exterior derivative still accepts explicit adjacent `CochainSpace` values because Python cannot calculate `SourceDegree + 1` at the type level; the chain boundary remains `Complex.boundary_matrix(k)` and the cochain derivative uses its transpose. `hodge_star(geometry, source)` derives a subordinate `DualCochainSpace` that references the exact geometry and primal space without duplicating a `DualComplex`.
+Save it as `quick_start.py` and run `uv run python quick_start.py`.
 
-## Documentation
+## Implemented capabilities
 
-1. [`docs/architecture.md`](docs/architecture.md) — target concepts, API shape, Python 3.14 type model, invariants, and forbidden structures.
-2. [`docs/roadmap.md`](docs/roadmap.md) — type-system spikes, test-first implementation tasks, review firewall, and verification gates.
+| Group | Current implementation |
+|---|---|
+| Topology and cochains | Arbitrary-dimensional canonical simplex bases, oriented boundary matrices, subsets and topological boundary extraction, regular/triangle-manifold/oriented/boundary/connected refinements, cochain spaces and subspaces, forms, restriction, and zero extension. |
+| Geometry and metric DEC | Complete Euclidean geometry, scale-safe primal measures, signed circumcentric dual measures, exterior derivative, Hodge star, weighted pairing, codifferential, Hodge Laplacian, and represented-positive Hodge metric admission. |
+| Assembly and numerics | Typed assembled systems, canonical-boundary Dirichlet elimination and reconstruction, prepared sparse direct solves, prepared full-column-rank least squares, and residual evidence. |
+| General algorithms | Exact real homology representatives and periods, scalar Poisson assembly, compatible mean-zero Poisson solving, all-degree Hodge decomposition, and harmonic extension from canonical boundary values. |
+| Triangle surfaces | Disk admission, face and vertex normal constructions, area and volume gradients, mean-curvature vectors, integrated Gaussian curvature, one frozen-metric implicit flow step, deterministic face frames, geometry-bound SO(2) connection transport, exact integral dual generators, local/global holonomy evidence, factory-only integrability, and ambient face direction fields. |
+| Optional boundaries | Root Trimesh surface input plus Plotly output for geometry, cochains, surface vectors, and retained homology cycles. |
 
-## Toolchain
+## Examples
 
-The declared environment uses Python 3.14, `uv`, NumPy, SciPy, pytest, Ruff, and Ty.
+The executable Marimo studies in [`examples/`](examples/) cover curvature, Poisson, harmonic extension, mean-curvature flow, homology and periods, Hodge decomposition, and connection and holonomy. See the [examples guide](examples/README.md).
+
+```bash
+uv run --extra mesh --extra plot marimo edit examples/curvature.py
+uv run --extra mesh --extra plot marimo check --strict examples/*.py
+```
+
+## Architecture
+
+See [docs/architecture.md](docs/architecture.md) for current component ownership, data flow, invariants, optional boundaries, and limitations.
+
+## Development checks
 
 ```bash
 uv run ruff format --check .
@@ -108,4 +100,4 @@ uv build
 
 ## License
 
-MIT
+PolyGeo is licensed under the MIT License.

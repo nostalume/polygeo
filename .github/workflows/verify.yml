@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.14"
           enable-cache: true
-      - run: uv sync --locked --all-groups
+      - run: uv sync --locked --all-groups --extra mesh --extra plot
       - run: uv run python -W error::DeprecationWarning -W error::FutureWarning -m pytest -q
 
   release-evidence:
@@ -28,16 +28,43 @@ jobs:
         with:
           python-version: "3.14"
           enable-cache: true
-      - run: uv sync --locked --all-groups
+      - run: uv sync --locked --all-groups --extra mesh --extra plot
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run ty check --error-on-warning .
-      - run: uv run marimo check examples/sphere_curvature.py examples/poisson_flow.py examples/parameterization.py examples/hodge_fields.py
+      - name: Strict Marimo checks
+        run: >-
+          uv run marimo check --strict
+          examples/curvature.py
+          examples/poisson.py
+          examples/harmonic_extension.py
+          examples/mean_curvature_flow.py
+          examples/homology_and_periods.py
+          examples/hodge_decomposition.py
+          examples/connection_and_holonomy.py
       - run: uv run pytest -m slow -q
       - run: uv build
-      - run: uv venv wheel-venv --python 3.14
-      - run: uv pip install --python wheel-venv dist/*.whl
-      - run: wheel-venv/bin/python -I tests/installed_distribution.py
-      - run: uv venv sdist-venv --python 3.14
-      - run: uv pip install --python sdist-venv dist/*.tar.gz
-      - run: sdist-venv/bin/python -I tests/installed_distribution.py
+      - name: Verify wheel without and with optional boundaries
+        shell: bash
+        run: |
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          uv venv wheel-venv --python 3.14
+          uv pip install --python wheel-venv "$wheel"
+          wheel-venv/bin/python -I tests/installed_distribution.py
+          wheel-venv/bin/python -I tests/installed_mesh.py without-extra
+          wheel-venv/bin/python -I tests/installed_plotting.py without-extra
+          uv pip install --python wheel-venv "${wheel}[mesh,plot]"
+          wheel-venv/bin/python -I tests/installed_mesh.py with-extra
+          wheel-venv/bin/python -I tests/installed_plotting.py with-extra
+      - name: Verify sdist without and with optional boundaries
+        shell: bash
+        run: |
+          sdist=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
+          uv venv sdist-venv --python 3.14
+          uv pip install --python sdist-venv "$sdist"
+          sdist-venv/bin/python -I tests/installed_distribution.py
+          sdist-venv/bin/python -I tests/installed_mesh.py without-extra
+          sdist-venv/bin/python -I tests/installed_plotting.py without-extra
+          uv pip install --python sdist-venv "${sdist}[mesh,plot]"
+          sdist-venv/bin/python -I tests/installed_mesh.py with-extra
+          sdist-venv/bin/python -I tests/installed_plotting.py with-extra
