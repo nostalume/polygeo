@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
+from scipy.sparse import csgraph
 
 from polygeo import (
     ORDINARY_FORM,
@@ -35,6 +38,33 @@ def _tetrahedron_boundary() -> np.ndarray:
 
 def _disk() -> np.ndarray:
     return np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+
+
+def test_connectivity_uses_scipy_only_at_the_size_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    original = csgraph.connected_components
+
+    def tracked(graph: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append(graph.shape[0])
+        return original(graph, *args, **kwargs)
+
+    monkeypatch.setattr(csgraph, "connected_components", tracked)
+    for vertex_count in (127, 128):
+        vertices = np.arange(vertex_count, dtype=np.int64)
+        edges = np.column_stack((vertices[:-1], vertices[1:]))
+        refined = Complex.from_maximal_simplices(
+            edges, vertex_count=vertex_count
+        ).connected()
+        assert isinstance(refined.connectivity_state, Connected)
+
+    assert calls == [128]
+
+    with pytest.raises(SimplicialError, match="the complex is disconnected"):
+        Complex.from_maximal_simplices(
+            np.arange(128, dtype=np.int64)[:, None]
+        ).connected()
 
 
 def test_construction_owns_source_and_exposed_arrays() -> None:

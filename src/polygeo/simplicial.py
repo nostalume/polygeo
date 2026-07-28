@@ -7,7 +7,7 @@ from typing import Literal, Protocol, Self, overload
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.sparse import csr_array
+from scipy.sparse import csgraph, csr_array
 
 type IndexArray = NDArray[np.int64]
 type SignArray = NDArray[np.int8]
@@ -943,21 +943,36 @@ def _require_boundary_extent[
 def _require_connected[B: BoundaryState, O: OrientationState, T: TopologyState](
     complex_: Complex[B, O, ConnectivityUnknown, T],
 ) -> None:
-    adjacency = [set[int]() for _ in range(complex_.vertex_count)]
-    if complex_.dimension >= 1:
-        for edge in complex_._data._simplices[1]:
-            left, right = (int(edge[0]), int(edge[1]))
-            adjacency[left].add(right)
-            adjacency[right].add(left)
-    pending = [0]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        pending.extend(adjacency[current] - seen)
-    if len(seen) != complex_.vertex_count:
+    vertex_count = complex_.vertex_count
+    if vertex_count >= 128 and complex_.dimension >= 1:
+        edges = complex_._data._simplices[1]
+        directed = np.concatenate((edges, edges[:, ::-1]))
+        adjacency = csr_array(
+            (
+                np.ones(len(directed), dtype=np.bool_),
+                (directed[:, 0], directed[:, 1]),
+            ),
+            shape=(vertex_count, vertex_count),
+        )
+        connected = (
+            csgraph.connected_components(adjacency, directed=False, return_labels=False)
+            == 1
+        )
+    else:
+        adjacency = [set[int]() for _ in range(vertex_count)]
+        if complex_.dimension >= 1:
+            for edge in complex_._data._simplices[1]:
+                left, right = (int(edge[0]), int(edge[1]))
+                adjacency[left].add(right)
+                adjacency[right].add(left)
+        pending, seen = [0], set[int]()
+        while pending:
+            current = pending.pop()
+            if current not in seen:
+                seen.add(current)
+                pending.extend(adjacency[current] - seen)
+        connected = len(seen) == vertex_count
+    if not connected:
         raise SimplicialError("the complex is disconnected")
 
 

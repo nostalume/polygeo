@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from fractions import Fraction
 from itertools import permutations
+from typing import Any
 
 import numpy as np
 import pytest
@@ -533,6 +534,54 @@ def test_public_measures_are_caller_owned() -> None:
     exposed[0] = 99.0
 
     np.testing.assert_allclose(geometry.primal_measures(2), [0.5])
+
+
+def test_primal_measures_batch_healthy_simplices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dimensions: list[int] = []
+    original = np.linalg.qr
+
+    def tracked(values: np.ndarray, *args: Any, **kwargs: Any) -> Any:
+        dimensions.append(values.ndim)
+        return original(values, *args, **kwargs)
+
+    monkeypatch.setattr(np.linalg, "qr", tracked)
+    complex_ = Complex.from_maximal_simplices(
+        np.array([[0, 1, 2], [1, 3, 2]], dtype=np.int64)
+    )
+    geometry = Geometry.from_positions(
+        complex_,
+        np.array(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            dtype=np.float64,
+        ),
+    )
+
+    np.testing.assert_array_equal(geometry.primal_measures(2), [0.5, 0.5])
+    assert 3 in dimensions
+
+
+def test_primal_measure_batch_preserves_exception_order_and_context() -> None:
+    complex_ = Complex.from_maximal_simplices(
+        np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
+    )
+    positions = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 0.0],
+            [1e308, 0.0],
+            [0.0, 1e308],
+        ],
+        dtype=np.float64,
+    )
+
+    with pytest.raises(GeometryError, match="simplex is degenerate") as captured:
+        Geometry.from_positions(complex_, positions)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
 
 
 @pytest.mark.parametrize(

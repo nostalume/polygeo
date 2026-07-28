@@ -329,24 +329,45 @@ def hodge_laplacian[
             "Laplacian geometry and space belong to different complexes"
         )
     degree = space.degree
-    current_weights = _hodge_weights(geometry, degree)
+    return _hodge_laplacian_from_weights(
+        space,
+        previous=(_hodge_weights(geometry, degree - 1) if degree > 0 else None),
+        current=_hodge_weights(geometry, degree),
+        following=(
+            _hodge_weights(geometry, degree + 1)
+            if degree < space.complex.dimension
+            else None
+        ),
+    )
+
+
+def _hodge_laplacian_from_weights[
+    K: _MetricOperatorDomain,
+    Degree: int,
+](
+    space: CochainSpace[K, Degree],
+    *,
+    previous: NDArray[np.float64] | None,
+    current: NDArray[np.float64],
+    following: NDArray[np.float64] | None,
+) -> LinearMap[
+    CochainSpace[K, Degree],
+    CochainSpace[K, Degree],
+]:
+    degree = space.degree
     terms: list[csr_array] = []
     if degree > 0:
+        if previous is None:
+            raise OperatorError("Laplacian is missing previous-degree Hodge weights")
         lower = space.complex.boundary_matrix(degree).transpose().tocsr()
-        delta = _codifferential_matrix(
-            lower,
-            _hodge_weights(geometry, degree - 1),
-            current_weights,
-        )
+        delta = _codifferential_matrix(lower, previous, current)
         with np.errstate(all="ignore"):
             terms.append((lower @ delta).tocsr())
     if degree < space.complex.dimension:
+        if following is None:
+            raise OperatorError("Laplacian is missing following-degree Hodge weights")
         upper = space.complex.boundary_matrix(degree + 1).transpose().tocsr()
-        delta = _codifferential_matrix(
-            upper,
-            current_weights,
-            _hodge_weights(geometry, degree + 1),
-        )
+        delta = _codifferential_matrix(upper, current, following)
         with np.errstate(all="ignore"):
             terms.append((delta @ upper).tocsr())
     if not terms:
@@ -368,6 +389,13 @@ def _hodge_weights[K: _GeometryDomain](
         dual = geometry.dual_measures(degree)
     except GeometryError as error:
         raise OperatorError("Hodge measures are not representable") from error
+    return _hodge_weights_from_measures(dual, primal)
+
+
+def _hodge_weights_from_measures(
+    dual: NDArray[np.float64],
+    primal: NDArray[np.float64],
+) -> NDArray[np.float64]:
     with np.errstate(all="ignore"):
         weights = np.divide(dual, primal)
     if not np.all(np.isfinite(weights)) or np.any((dual != 0.0) & (weights == 0.0)):

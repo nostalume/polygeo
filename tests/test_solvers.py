@@ -14,9 +14,11 @@ from polygeo import (
     FieldSemantics,
     LinearMap,
     LinearSolution,
+    LeastSquaresSolution,
     NumericalError,
     eliminate_dirichlet,
     prepare_direct,
+    prepare_least_squares,
 )
 
 
@@ -24,6 +26,136 @@ def _disk():
     return Complex.from_maximal_simplices(
         np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
     ).codimension_one_regular()
+
+
+def _rectangular_operator():
+    target = _disk().cochain_space(0)
+    source = CochainSubspace(target, np.array([0, 1], dtype=np.int64))
+    matrix = csr_array(
+        np.array(
+            [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, -1.0]],
+            dtype=np.float64,
+        )
+    )
+    return source, target, LinearMap(source, target, matrix)
+
+
+def test_prepared_least_squares_certifies_normal_equations_not_ax_equals_b() -> None:
+    source, target, operator = _rectangular_operator()
+    rhs = target.form(np.array([2.0, -1.0, 4.0, 5.0]), ORDINARY_FORM)
+
+    solution = prepare_least_squares(operator)(rhs)
+    expected, *_ = np.linalg.lstsq(operator.matrix().toarray(), rhs.coefficients())
+
+    assert isinstance(solution, LeastSquaresSolution)
+    assert solution.form.space is source
+    assert solution.equation_space is target
+    assert solution.form.semantics is rhs.semantics
+    np.testing.assert_allclose(solution.form.coefficients(), expected)
+    assert not np.allclose(
+        operator.matrix() @ solution.form.coefficients(), rhs.coefficients()
+    )
+    assert solution.relative_normal_residual <= np.sqrt(np.finfo(np.float64).eps)
+    assert solution.condition_indicator <= solution.condition_limit
+    with pytest.raises(FrozenInstanceError):
+        setattr(solution, "condition_indicator", 0.0)
+
+
+@pytest.mark.parametrize("scale", [1.0e-300, 1.0e300])
+def test_prepare_least_squares_normal_evidence_is_scale_invariant(scale: float) -> None:
+    source, target, operator = _rectangular_operator()
+    scaled = LinearMap(source, target, operator.matrix() * scale)
+    rhs = target.form(scale * np.array([2.0, -1.0, 0.5, 3.0]), ORDINARY_FORM)
+
+    solution = prepare_least_squares(scaled)(rhs)
+    expected, *_ = np.linalg.lstsq(
+        operator.matrix().toarray(), np.array([2.0, -1.0, 0.5, 3.0])
+    )
+
+    np.testing.assert_allclose(
+        solution.form.coefficients(), expected, rtol=1.0e-14, atol=0.0
+    )
+    assert solution.relative_normal_residual <= np.sqrt(np.finfo(np.float64).eps)
+
+
+def test_prepared_least_squares_reuses_qr_and_preserves_semantics(monkeypatch) -> None:
+    import polygeo.solvers as solvers_module
+
+    source, target, operator = _rectangular_operator()
+    calls = 0
+    original = solvers_module.qr
+
+    def tracked(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(solvers_module, "qr", tracked)
+    prepared = prepare_least_squares(operator)
+
+    class AlternateSemantics(FieldSemantics):
+        pass
+
+    first = prepared(target.form(np.arange(4.0), ORDINARY_FORM))
+    alternate = AlternateSemantics()
+    second = prepared(target.form(np.arange(4.0), alternate))
+
+    assert calls == 1
+    assert first.form.semantics is ORDINARY_FORM
+    assert second.form.semantics is alternate
+    assert first.form.space is source
+
+
+def test_prepare_least_squares_rejects_shape_rank_condition_and_foreign_rhs() -> None:
+    source, target, operator = _rectangular_operator()
+    with pytest.raises(NumericalError, match="rows"):
+        prepare_least_squares(
+            LinearMap(target, source, csr_array(np.ones((source.size, target.size))))
+        )
+    with pytest.raises(NumericalError, match="rank"):
+        prepare_least_squares(
+            LinearMap(source, target, csr_array(np.ones((target.size, source.size))))
+        )
+    ill = operator.matrix().toarray()
+    ill[:, 1] = ill[:, 0] + 1.0e-12 * ill[:, 1]
+    with pytest.raises(NumericalError, match="condition"):
+        prepare_least_squares(LinearMap(source, target, csr_array(ill)))
+
+    foreign = _disk().cochain_space(0)
+    prepared = prepare_least_squares(operator)
+    with pytest.raises(NumericalError, match="equation space"):
+        prepared(foreign.form(np.ones(foreign.size), ORDINARY_FORM))
+
+
+def test_prepare_least_squares_empty_source_calls_no_backend(monkeypatch) -> None:
+    target = _disk().cochain_space(0)
+    source = CochainSubspace(target, np.array([], dtype=np.int64))
+    operator = LinearMap(source, target, csr_array((target.size, 0)))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError((args, kwargs))
+
+    monkeypatch.setattr("polygeo.solvers.qr", forbidden)
+    solution = prepare_least_squares(operator)(
+        target.form(np.ones(target.size), ORDINARY_FORM)
+    )
+
+    assert solution.form.coefficients().size == 0
+    assert solution.normal_residual_norm == 0.0
+    assert solution.normal_residual_scale == 0.0
+    assert solution.condition_indicator == 0.0
+
+
+def test_prepare_least_squares_closes_backend_errors(monkeypatch) -> None:
+    _, _, operator = _rectangular_operator()
+
+    def fail(*args, **kwargs):
+        raise ValueError("private backend text")
+
+    monkeypatch.setattr("polygeo.solvers.qr", fail)
+    with pytest.raises(NumericalError, match="least-squares preparation") as caught:
+        prepare_least_squares(operator)
+    assert "private backend text" not in str(caught.value)
 
 
 def test_prepare_direct_solves_and_certifies_exact_endpoint_spaces() -> None:

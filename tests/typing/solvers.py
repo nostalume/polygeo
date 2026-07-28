@@ -17,12 +17,16 @@ from polygeo import (
     Form,
     LinearMap,
     LinearSolution,
+    LeastSquaresSolution,
     OrientationUnknown,
     OrdinaryForm,
     PrepareLinearSolve,
+    PrepareLeastSquares,
     PreparedLinearSolve,
+    PreparedLeastSquares,
     eliminate_dirichlet,
     prepare_direct,
+    prepare_least_squares,
 )
 
 
@@ -71,3 +75,17 @@ assert_type(problem.solve(prepare_direct).equation_space, Reduced)
 
 ordinary = parent.form(np.ones(parent.size), ORDINARY_FORM)
 assert_type(prepared(ordinary), LinearSolution[Parent, Parent, OrdinaryForm])
+
+least_operator = LinearMap(
+    region,
+    parent,
+    csr_array(np.ones((parent.size, region.size))),
+)
+least_preparer: PrepareLeastSquares[Reduced, Parent] = prepare_least_squares
+least_prepared: PreparedLeastSquares[Reduced, Parent] = prepare_least_squares(
+    least_operator
+)
+assert_type(
+    least_prepared(ordinary),
+    LeastSquaresSolution[Reduced, Parent, OrdinaryForm],
+)

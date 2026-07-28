@@ -13,7 +13,7 @@ from .numerics import (
     binary64_sum_product_lattice,
 )
 from .operators import LinearMap
-from .solvers import LinearSolution, PrepareLinearSolve
+from .solvers import LinearSolution, PrepareLinearSolve, _linear_residual_evidence
 from .simplicial import (
     CodimensionOneRegular,
     BoundaryState,
@@ -185,12 +185,15 @@ class DirichletProblem[
         Semantics,
     ]:
         reduced = prepare(self._operator)(self._rhs)
+        norm, scale, relative = _linear_residual_evidence(
+            self._operator, reduced.form, self._rhs
+        )
         return LinearSolution(
             self.reconstruct(reduced.form),
             reduced.equation_space,
-            reduced.residual_norm,
-            reduced.residual_scale,
-            reduced.relative_residual,
+            norm,
+            scale,
+            relative,
         )
 
 

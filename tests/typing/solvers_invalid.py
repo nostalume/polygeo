@@ -1,4 +1,4 @@
-# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, subclass-of-final-class
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, subclass-of-final-class, subclass-of-final-class
 
 import numpy as np
 from scipy.sparse import csr_array
@@ -10,8 +10,10 @@ from polygeo import (
     Complex,
     LinearMap,
     LinearSolution,
+    LeastSquaresSolution,
     eliminate_dirichlet,
     prepare_direct,
+    prepare_least_squares,
 )
 
 
@@ -38,7 +40,16 @@ problem0 = eliminate_dirichlet(
     region0.form(np.zeros(1), ORDINARY_FORM),
 )
 problem0.solve(prepared1)
+least = prepare_least_squares(
+    LinearMap(region0, C0, csr_array(np.ones((C0.size, region0.size))))
+)
+least(rhs1)
+AssembledSystem(identity0, rhs0).solve(prepare_least_squares)
 
 
 class ForgedSolution(LinearSolution):
+    pass
+
+
+class ForgedLeastSquaresSolution(LeastSquaresSolution):
     pass

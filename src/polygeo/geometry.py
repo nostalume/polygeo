@@ -10,6 +10,7 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from .numerics import binary64_lattice
 from .simplicial import (
     BoundaryState,
     Complex,
@@ -136,10 +137,67 @@ def _compute_measures(
     for degree in range(1, complex_.dimension + 1):
         basis = complex_.simplices(degree)
         values = np.empty(len(basis), dtype=np.float64)
-        for index, simplex in enumerate(basis):
-            values[index] = _simplex_measure(positions[simplex], degree)
+        for start in range(0, len(basis), 4096):
+            stop = min(start + 4096, len(basis))
+            batch = _batch_simplex_measures(positions[basis[start:stop]], degree)
+            if batch is not None:
+                values[start:stop] = batch
+                continue
+            for index in range(start, stop):
+                values[index] = _simplex_measure(positions[basis[index]], degree)
         measures.append(values)
     return tuple(measures)
+
+
+def _batch_simplex_measures(points: FloatArray, degree: int) -> FloatArray | None:
+    """Return one healthy QR batch, or defer the whole batch to exact-aware scalars."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        edges = np.swapaxes(points[:, 1:] - points[:, :1], 1, 2)
+    if not np.all(np.isfinite(edges)):
+        return None
+
+    scales = np.max(np.abs(edges), axis=1)
+    if not np.all(np.isfinite(scales)) or np.any(scales == 0.0):
+        return None
+    with np.errstate(all="ignore"):
+        normalized = edges / scales[:, None, :]
+    try:
+        _, triangular = np.linalg.qr(normalized, mode="reduced")
+        with np.errstate(all="ignore"):
+            condition = np.linalg.cond(triangular)
+    except np.linalg.LinAlgError:
+        return None
+
+    diagonal = np.abs(np.diagonal(triangular, axis1=1, axis2=2))
+    suspicion = (
+        np.finfo(np.float64).eps
+        * max(normalized.shape[1:])
+        * np.max(diagonal, axis=1)
+        * 16.0
+    )
+    fallback = (
+        (np.min(diagonal, axis=1) <= suspicion)
+        | ~np.isfinite(condition)
+        | (condition > _FORWARD_CONDITION_LIMIT)
+    )
+    if np.any(fallback):
+        return None
+
+    mantissa = np.ones(len(points), dtype=np.float64)
+    exponent = np.zeros(len(points), dtype=np.int64)
+    for local in range(degree):
+        scale_mantissa, scale_exponent = np.frexp(scales[:, local])
+        factor_mantissa, factor_exponent = np.frexp(diagonal[:, local])
+        mantissa *= scale_mantissa * factor_mantissa
+        mantissa, shift = np.frexp(mantissa)
+        exponent += scale_exponent + factor_exponent + shift
+    for divisor in range(2, degree + 1):
+        mantissa /= divisor
+        mantissa, shift = np.frexp(mantissa)
+        exponent += shift
+    with np.errstate(all="ignore"):
+        candidate = np.ldexp(mantissa, exponent)
+    return candidate if np.all(np.isfinite(candidate) & (candidate > 0.0)) else None
 
 
 def _simplex_measure(points: FloatArray, degree: int) -> float:
@@ -604,6 +662,97 @@ def _sum_incident(
     if not np.all(np.isfinite(values)):
         raise GeometryError("dual measure is not representable")
     return values
+
+
+def _all_dual_measures_with_signs[K: _GeometryDomain](
+    geometry: Geometry[K],
+) -> tuple[tuple[FloatArray, ...], tuple[NDArray[np.int8], ...]]:
+    """Evaluate every represented dual recurrence and certify each rounded-term sign."""
+    complex_ = geometry._complex
+    dimension = complex_.dimension
+    primal = geometry._measures
+    face_indices = _immediate_face_indices(complex_)
+    steps = _circumcentric_steps(complex_, geometry._positions, primal, face_indices)
+    upper = np.ones(complex_.simplex_count(dimension), dtype=np.float64)
+    measures: list[FloatArray | None] = [None] * (dimension + 1)
+    signs: list[NDArray[np.int8] | None] = [None] * (dimension + 1)
+    measures[dimension] = upper.copy()
+    signs[dimension] = np.ones(len(upper), dtype=np.int8)
+    for lower_degree in range(dimension - 1, -1, -1):
+        upper_basis = complex_.simplices(lower_degree + 1)
+        faces_per_upper = lower_degree + 2
+        upper_indices = np.repeat(
+            np.arange(len(upper_basis), dtype=np.int64), faces_per_upper
+        )
+        lower_indices = face_indices[lower_degree + 1].reshape(-1)
+        contributions = _scaled_products(
+            steps[lower_degree + 1].reshape(-1),
+            upper[upper_indices],
+            dimension - lower_degree,
+        )
+        upper, certified_signs = _sum_incident_with_signs(
+            lower_indices,
+            contributions,
+            complex_.simplex_count(lower_degree),
+        )
+        measures[lower_degree] = upper.copy()
+        signs[lower_degree] = certified_signs
+    if any(value is None for value in measures) or any(
+        value is None for value in signs
+    ):
+        raise GeometryError("incomplete dual recurrence")
+    return (
+        tuple(value for value in measures if value is not None),
+        tuple(value for value in signs if value is not None),
+    )
+
+
+def _sum_incident_with_signs(
+    lower_indices: NDArray[np.int64],
+    contributions: FloatArray,
+    lower_count: int,
+) -> tuple[FloatArray, NDArray[np.int8]]:
+    values = np.zeros(lower_count, dtype=np.float64)
+    signs = np.zeros(lower_count, dtype=np.int8)
+    order = np.argsort(lower_indices, kind="stable")
+    rows = lower_indices[order]
+    terms = contributions[order]
+    boundaries = np.flatnonzero(np.concatenate(([True], rows[1:] != rows[:-1], [True])))
+    try:
+        for start, stop in zip(boundaries[:-1], boundaries[1:], strict=True):
+            group = terms[start:stop]
+            value = math.fsum(group)
+            values[rows[start]] = value
+            signs[rows[start]] = _represented_sum_sign(group, value)
+    except OverflowError as error:
+        raise GeometryError("dual measure is not representable") from error
+    if not np.all(np.isfinite(values)):
+        raise GeometryError("dual measure is not representable")
+    return values, signs
+
+
+def _represented_sum_sign(terms: FloatArray, value: float) -> int:
+    if len(terms) == 0:
+        return 0
+    scale = float(np.max(np.abs(terms)))
+    if scale == 0.0:
+        return 0
+    normalized_magnitude = math.nextafter(
+        math.fsum(float(abs(term)) / scale for term in terms), math.inf
+    )
+    error_factor = math.nextafter(len(terms) * np.finfo(np.float64).eps, math.inf)
+    if error_factor < 1.0:
+        try:
+            gamma = error_factor / (1.0 - error_factor)
+            bound = math.nextafter(8.0 * scale * gamma * normalized_magnitude, math.inf)
+        except OverflowError:
+            bound = math.inf
+        if value > bound:
+            return 1
+        if value < -bound:
+            return -1
+    exact = sum(binary64_lattice(float(term)) for term in terms)
+    return (exact > 0) - (exact < 0)
 
 
 __all__ = ["Geometry", "GeometryError"]
