@@ -3,9 +3,14 @@ name: verify
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   platform-tests:
+    name: Platform tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -13,17 +18,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
           enable-cache: true
       - run: uv sync --locked --all-groups --extra mesh --extra plot
+      - run: cargo test --manifest-path rust/Cargo.toml --all-targets --all-features
       - run: uv run python -W error::DeprecationWarning -W error::FutureWarning -m pytest -q
 
-  release-evidence:
+  quality-and-examples:
+    name: Quality and examples
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy,rustfmt
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
@@ -32,39 +43,63 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run ty check --error-on-warning .
-      - name: Strict Marimo checks
-        run: >-
-          uv run marimo check --strict
-          examples/curvature.py
-          examples/poisson.py
-          examples/harmonic_extension.py
-          examples/mean_curvature_flow.py
-          examples/homology_and_periods.py
-          examples/hodge_decomposition.py
-          examples/connection_and_holonomy.py
+      - run: cargo fmt --all --manifest-path rust/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path rust/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: uv run marimo check --strict examples/*.py
       - run: uv run pytest -m slow -q
-      - run: uv build
-      - name: Verify wheel without and with optional boundaries
+      - run: git diff --exit-code
+
+  release-artifacts:
+    name: Release artifacts
+    needs: [platform-tests, quality-and-examples]
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACT_DIR: ${{ runner.temp }}/polygeo-artifacts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - name: Build wheel and source distribution once
+        run: uv build --out-dir "$ARTIFACT_DIR"
+      - name: Inspect artifact contents
         shell: bash
         run: |
-          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
-          uv venv wheel-venv --python 3.14
-          uv pip install --python wheel-venv "$wheel"
-          wheel-venv/bin/python -I tests/installed_distribution.py
-          wheel-venv/bin/python -I tests/installed_mesh.py without-extra
-          wheel-venv/bin/python -I tests/installed_plotting.py without-extra
-          uv pip install --python wheel-venv "${wheel}[mesh,plot]"
-          wheel-venv/bin/python -I tests/installed_mesh.py with-extra
-          wheel-venv/bin/python -I tests/installed_plotting.py with-extra
-      - name: Verify sdist without and with optional boundaries
+          wheel=$(find "$ARTIFACT_DIR" -maxdepth 1 -name '*.whl' -print -quit)
+          sdist=$(find "$ARTIFACT_DIR" -maxdepth 1 -name '*.tar.gz' -print -quit)
+          test -n "$wheel"
+          test -n "$sdist"
+          unzip -Z1 "$wheel" | tee "${RUNNER_TEMP}/wheel-contents.txt"
+          tar -tzf "$sdist" | tee "${RUNNER_TEMP}/sdist-contents.txt"
+          grep -Eq 'polygeo/_polygeo_native.*\.(so|pyd)$' "${RUNNER_TEMP}/wheel-contents.txt"
+          grep -q 'rust/polygeo-py/src/registration.rs' "${RUNNER_TEMP}/sdist-contents.txt"
+          for retired in algorithms geometry operators solvers surface systems; do
+            ! grep -q "polygeo/${retired}.py" "${RUNNER_TEMP}/wheel-contents.txt"
+            ! grep -q "src/polygeo/${retired}.py" "${RUNNER_TEMP}/sdist-contents.txt"
+          done
+      - name: Verify wheel and source distribution
         shell: bash
         run: |
-          sdist=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
-          uv venv sdist-venv --python 3.14
-          uv pip install --python sdist-venv "$sdist"
-          sdist-venv/bin/python -I tests/installed_distribution.py
-          sdist-venv/bin/python -I tests/installed_mesh.py without-extra
-          sdist-venv/bin/python -I tests/installed_plotting.py without-extra
-          uv pip install --python sdist-venv "${sdist}[mesh,plot]"
-          sdist-venv/bin/python -I tests/installed_mesh.py with-extra
-          sdist-venv/bin/python -I tests/installed_plotting.py with-extra
+          wheel=$(find "$ARTIFACT_DIR" -maxdepth 1 -name '*.whl' -print -quit)
+          sdist=$(find "$ARTIFACT_DIR" -maxdepth 1 -name '*.tar.gz' -print -quit)
+          artifacts=("$wheel" "$sdist")
+          labels=(wheel sdist)
+          for index in "${!artifacts[@]}"; do
+            artifact="${artifacts[$index]}"
+            environment="${RUNNER_TEMP}/polygeo-${labels[$index]}-environment"
+            uv venv "$environment" --python 3.14
+            uv pip install --python "$environment" "$artifact"
+            "$environment/bin/python" -I tests/installed_artifact.py base
+            uv pip install --python "$environment" "${artifact}[mesh,plot]"
+            "$environment/bin/python" -I tests/installed_artifact.py extras
+          done
+      - name: Upload verified release distributions
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: polygeo-distributions
+          path: ${{ env.ARTIFACT_DIR }}/*
+          if-no-files-found: error
+          retention-days: 7
