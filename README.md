@@ -6,7 +6,9 @@ PolyGeo requires Python 3.14. Version 0.1.0 is experimental: the implemented pat
 
 ## Install from source
 
-Install the core development environment with [uv](https://docs.astral.sh/uv/):
+Install [Rust 1.97.1](https://www.rust-lang.org/tools/install) and the core
+development environment with [uv](https://docs.astral.sh/uv/). The pinned Rust
+toolchain is used to compile the private native topology core:
 
 ```bash
 git clone https://github.com/nostalume/polygeo.git
@@ -23,8 +25,8 @@ uv sync --extra plot
 uv sync --extra mesh --extra plot
 ```
 
-- `polygeo[mesh]` enables the root `load_surface()` boundary, which uses Trimesh to read one triangular mesh into an unrefined `Geometry`.
-- `polygeo[plot]` enables the root plotting functions, which return ordinary Plotly figures. Importing `polygeo` does not import Plotly.
+- `polygeo[mesh]` enables `polygeo.mesh.load_surface()` (also re-exported at the root), which uses Trimesh to read one triangular mesh into an unrefined `Geometry`.
+- `polygeo[plot]` enables `polygeo.plotting` snapshot functions for realizations, full binary64 forms, selected free homology cycles, and native surface-vector fields (also re-exported at the root). They return ordinary Plotly figures. Importing `polygeo` imports neither optional dependency.
 
 ## Quick start
 
@@ -35,11 +37,16 @@ import math
 
 import numpy as np
 
-from polygeo import Complex, Geometry, gaussian_curvature_measure
+from polygeo import Complex, Geometry, TriangleSurface
 
 faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
 positions = np.array(
-    [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+    [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ],
     dtype=np.float64,
 )
 
@@ -51,15 +58,17 @@ surface = (
     .connected()
 )
 geometry = Geometry.from_positions(surface, positions)
-curvature = gaussian_curvature_measure(geometry)
+triangle_surface = TriangleSurface.admit(geometry)
+curvature = triangle_surface.gaussian_curvature_measure()
+coefficients = curvature.coefficients_numpy_copy()
 
 assert math.isclose(
-    math.fsum(curvature.coefficients()),
+    math.fsum(coefficients),
     2.0 * math.pi,
     rel_tol=0.0,
     abs_tol=1e-12,
 )
-print(curvature.coefficients())
+print(coefficients)
 ```
 
 Save it as `quick_start.py` and run `uv run python quick_start.py`.
@@ -68,35 +77,39 @@ Save it as `quick_start.py` and run `uv run python quick_start.py`.
 
 | Group | Current implementation |
 |---|---|
-| Topology and cochains | Arbitrary-dimensional canonical simplex bases, oriented boundary matrices, subsets and topological boundary extraction, regular/triangle-manifold/oriented/boundary/connected refinements, cochain spaces and subspaces, forms, restriction, and zero extension. |
-| Geometry and metric DEC | Complete Euclidean geometry, scale-safe primal measures, signed circumcentric dual measures, exterior derivative, Hodge star, weighted pairing, codifferential, Hodge Laplacian, and represented-positive Hodge metric admission. |
-| Assembly and numerics | Typed assembled systems, canonical-boundary Dirichlet elimination and reconstruction, prepared sparse direct solves, prepared full-column-rank least squares, and residual evidence. |
-| General algorithms | Exact real homology representatives and periods, scalar Poisson assembly, compatible mean-zero Poisson solving, all-degree Hodge decomposition, and harmonic extension from canonical boundary values. |
+| Topology and binary64 values | Arbitrary-dimensional canonical simplex bases, oriented boundary matrices, subsets and topological boundary extraction, refinements, and one native `Binary64Space`/`Binary64Element`/`LinearOperator` family for full or selected chain and cochain bases. |
+| Exact chain algebra | Direct native owner-bound sparse chains and algebraic-dual cochains over Z and Q, explicit scalar extension, checked map composition and duality, bounded explicit CSR materialization, requested-degree integral homology, and checked owner transport through surface chain isomorphisms. |
+| Combinatorial surfaces | Immutable orientable halfedge owners, material/exterior face separation, an exact integral chain complex, explicit eligible triangle-complex conversion with checked chain isomorphism, and owner-local component/Euler/genus facts. |
+| Geometry and metric DEC | Native `EuclideanRealization` (`Geometry` is the same class), explicit copied projections, primal and signed circumcentric dual measures, exterior derivative, Riesz maps, codifferential, Hodge Laplacian, and positive metric admission. |
+| Problems and numerics | Native problem/preparation/workspace carriers for Dirichlet, compatible mean-zero Poisson, Hodge decomposition, harmonic extension, and frozen mean-curvature flow, with limits, cancellation, and residual evidence. |
 | Triangle surfaces | Disk admission, face and vertex normal constructions, area and volume gradients, mean-curvature vectors, integrated Gaussian curvature, one frozen-metric implicit flow step, deterministic face frames, geometry-bound SO(2) connection transport, exact integral dual generators, local/global holonomy evidence, factory-only integrability, and ambient face direction fields. |
-| Optional boundaries | Root Trimesh surface input plus Plotly output for geometry, cochains, surface vectors, and retained homology cycles. |
+| Optional boundaries | Root Trimesh surface input plus Plotly snapshots for geometry, full forms, free homology-cycle selections, and native surface-vector fields. |
+
+Exact integral homology is prepared explicitly under immutable resource limits.
+Analyses, group views, and representatives retain their native owner; Python,
+NumPy, SciPy, and binary64 compatibility values are explicit owned projections.
 
 ## Examples
 
-The executable Marimo studies in [`examples/`](examples/) cover curvature, Poisson, harmonic extension, mean-curvature flow, homology and periods, Hodge decomposition, and connection and holonomy. See the [examples guide](examples/README.md).
-
-```bash
-uv run --extra mesh --extra plot marimo edit examples/curvature.py
-uv run --extra mesh --extra plot marimo check --strict examples/*.py
-```
+The executable Marimo studies in [`examples/`](examples/) cover curvature,
+Poisson, harmonic extension, mean-curvature flow, homology, Hodge decomposition,
+and connection holonomy. See the [examples guide](examples/README.md).
 
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for current component ownership, data flow, invariants, optional boundaries, and limitations.
 
-## Development checks
+## Current limitations
 
-```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run ty check --error-on-warning .
-uv run pytest -q
-uv build
-```
+- Python 3.14 and the pinned Rust toolchain are required.
+- Mesh input accepts one triangular Trimesh payload.
+- The native executor is currently sequential.
+- No stable-ABI or free-threaded-Python guarantee is made.
+- Surface connections require closed, connected, oriented triangle manifolds
+  embedded in three dimensions.
+
+The [verification workflow](.github/workflows/verify.yml) is the canonical
+platform, quality, example, and installed-artifact command matrix.
 
 ## License
 
