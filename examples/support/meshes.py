@@ -5,21 +5,13 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial import Delaunay
 
-from polygeo import Complex, Geometry, MeshError
+from polygeo import Complex, Geometry
 
 
 def icosphere(subdivisions: int, radius: float = 1.0):
     """Return an oriented closed Trimesh icosphere as complete PolyGeo geometry."""
-    if type(subdivisions) is not int or subdivisions < 0 or subdivisions > 3:
-        raise ValueError("icosphere subdivisions must be an integer from zero to three")
-    if type(radius) is not float or not np.isfinite(radius) or radius <= 0.0:
-        raise ValueError("icosphere radius must be finite and positive")
-    try:
-        import trimesh
-    except ImportError as error:
-        raise MeshError(
-            "study sphere generation requires the optional polygeo[mesh] dependency"
-        ) from error
+    import trimesh
+
     mesh = trimesh.creation.icosphere(subdivisions=subdivisions, radius=radius)
     domain = (
         Complex.from_maximal_simplices(np.asarray(mesh.faces, dtype=np.int64))
@@ -41,8 +33,6 @@ def torus(
     minor_radius: float = 0.7,
 ):
     """Return a consistent-diagonal analytic torus and its minor-angle coordinates."""
-    if major_sections < 3 or minor_sections < 3:
-        raise ValueError("torus sections must be at least three")
     u = 2.0 * np.pi * np.arange(major_sections) / major_sections
     v = 2.0 * np.pi * np.arange(minor_sections) / minor_sections
     positions = np.array(
@@ -74,11 +64,7 @@ def torus(
         .without_boundary()
         .connected()
     )
-    return (
-        domain,
-        Geometry.from_positions(domain, positions),
-        np.tile(v, major_sections),
-    )
+    return domain, Geometry.from_positions(domain, positions)
 
 
 def annulus(
@@ -88,8 +74,6 @@ def annulus(
     outer_radius: float = 3.0,
 ):
     """Return a deterministic positive-Hodge-compatible Delaunay annulus candidate."""
-    if radial_rings < 3 or angular_sections < 8:
-        raise ValueError("annulus resolution is too small")
     points: list[np.ndarray] = []
     for ring, radius in enumerate(
         np.linspace(inner_radius, outer_radius, radial_rings)
@@ -115,6 +99,3 @@ def annulus(
         .connected()
     )
     return domain, Geometry.from_positions(domain, positions)
-
-
-__all__ = ["annulus", "icosphere", "torus"]
