@@ -1,0 +1,21 @@
+[package]
+name = "polygeo-py"
+version = "0.1.0"
+description = "Private PyO3 topology adapter for PolyGeo"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_polygeo_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+num-bigint.workspace = true
+numpy.workspace = true
+polygeo-core = { path = "../polygeo-core" }
+pyo3 = { workspace = true, features = ["extension-module"] }
+
+[lints]
+workspace = true

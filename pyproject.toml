@@ -3,6 +3,8 @@ name = "polygeo"
 version = "0.1.0"
 description = "A reading implementation of discrete differential geometry"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "nostalume", email = "nostalume@gmail.com" }
 ]
@@ -17,8 +19,14 @@ mesh = ["trimesh>=4.12,<5"]
 plot = ["plotly>=6"]
 
 [build-system]
-requires = ["uv_build>=0.11.7,<0.12.0"]
-build-backend = "uv_build"
+requires = ["maturin>=1.14.1,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "rust/polygeo-py/Cargo.toml"
+module-name = "polygeo._polygeo_native"
+python-source = "src"
 
 [dependency-groups]
 dev = [
