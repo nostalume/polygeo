@@ -15,8 +15,12 @@ build/
 dist/
 *.egg-info/
 .eggs/
+/rust/target/
+*.pdb
+*.pyd
 
 # Cache directories
+/.agents/
 .cache/
 .hermes/
 __marimo__/
