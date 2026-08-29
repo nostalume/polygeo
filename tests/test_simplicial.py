@@ -7,20 +7,9 @@ import pytest
 from scipy.sparse import csgraph
 
 from polygeo import (
-    ORDINARY_FORM,
-    BoundaryUnknown,
-    CochainSpace,
+    Binary64ElementError,
     Complex,
-    Connected,
-    ConnectivityUnknown,
-    OrdinaryForm,
-    OrientationUnknown,
-    Oriented,
-    Simplicial,
     SimplicialError,
-    TriangleManifold,
-    WithBoundary,
-    WithoutBoundary,
 )
 
 
@@ -40,7 +29,7 @@ def _disk() -> np.ndarray:
     return np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
 
 
-def test_connectivity_uses_scipy_only_at_the_size_gate(
+def test_connectivity_no_longer_uses_python_scipy_size_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[int] = []
@@ -57,9 +46,9 @@ def test_connectivity_uses_scipy_only_at_the_size_gate(
         refined = Complex.from_maximal_simplices(
             edges, vertex_count=vertex_count
         ).connected()
-        assert isinstance(refined.connectivity_state, Connected)
+        assert refined.require_connected() is None
 
-    assert calls == [128]
+    assert calls == []
 
     with pytest.raises(SimplicialError, match="the complex is disconnected"):
         Complex.from_maximal_simplices(
@@ -208,22 +197,21 @@ def test_subset_rejects_wrong_shapes_and_foreign_comparison() -> None:
             left_empty.is_pure(invalid_degree)
 
 
-def test_refinement_methods_preserve_data_and_strengthen_one_state() -> None:
+def test_refinement_methods_preserve_literal_identity() -> None:
     raw = Complex.from_maximal_simplices(_tetrahedron_boundary())
     triangle = raw.triangle_manifold()
     oriented = triangle.oriented()
     closed = oriented.without_boundary()
     domain = closed.connected()
 
-    assert isinstance(raw.boundary_state, BoundaryUnknown)
-    assert isinstance(raw.orientation_state, OrientationUnknown)
-    assert isinstance(raw.connectivity_state, ConnectivityUnknown)
-    assert isinstance(raw.topology_state, Simplicial)
-
-    assert isinstance(domain.boundary_state, WithoutBoundary)
-    assert isinstance(domain.orientation_state, Oriented)
-    assert isinstance(domain.connectivity_state, Connected)
-    assert isinstance(domain.topology_state, TriangleManifold)
+    assert triangle is raw
+    assert oriented is raw
+    assert closed is raw
+    assert domain is raw
+    domain.require_triangle()
+    domain.require_oriented()
+    domain.require_without_boundary()
+    domain.require_connected()
     assert domain.shares_data_with(raw)
 
 
@@ -253,12 +241,12 @@ def test_oriented_boundary_and_connected_refinements_fail_independently() -> Non
         flipped.oriented()
 
     disk = Complex.from_maximal_simplices(_disk()).triangle_manifold().oriented()
-    assert isinstance(disk.with_boundary().boundary_state, WithBoundary)
+    assert disk.with_boundary() is disk
     with pytest.raises(SimplicialError):
         disk.without_boundary()
 
     sphere = Complex.from_maximal_simplices(_tetrahedron_boundary()).triangle_manifold()
-    assert isinstance(sphere.without_boundary().boundary_state, WithoutBoundary)
+    assert sphere.without_boundary() is sphere
     with pytest.raises(SimplicialError):
         sphere.with_boundary()
 
@@ -266,8 +254,9 @@ def test_oriented_boundary_and_connected_refinements_fail_independently() -> Non
         np.array([[0, 1, 2], [1, 0, 3], [0, 1, 4]], dtype=np.int64)
     )
     assert not hasattr(nonregular, "closed")
-    with pytest.raises(SimplicialError, match="codimension-one regular"):
+    with pytest.raises(SimplicialError) as unknown:
         getattr(nonregular, "without_boundary")()
+    assert unknown.value.reason == "capability_not_admitted"
 
     disconnected = Complex.from_maximal_simplices(
         np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
@@ -279,47 +268,44 @@ def test_oriented_boundary_and_connected_refinements_fail_independently() -> Non
 def test_cochain_spaces_and_forms_own_coefficients() -> None:
     left = Complex.from_maximal_simplices(_disk())
     right = Complex.from_maximal_simplices(_disk())
-    left_space = left.cochain_space(1)
-    right_space = right.cochain_space(1)
+    left_space = left.binary64_cochain_space(1)
+    right_space = right.binary64_cochain_space(1)
     coefficients = np.arange(left_space.size, dtype=np.float64)
 
-    form = left_space.form(coefficients, ORDINARY_FORM)
+    form = left_space.admit_numpy(coefficients)
     coefficients[:] = -1
-    exposed = form.coefficients()
+    exposed = form.coefficients_numpy_copy()
     exposed[:] = -2
 
     np.testing.assert_array_equal(
-        form.coefficients(),
+        form.coefficients_numpy_copy(),
         np.arange(left_space.size, dtype=np.float64),
     )
-    assert isinstance(form.semantics, OrdinaryForm)
-    assert form.space.belongs_to(left)
-    assert not form.space.belongs_to(right)
+    assert form.space.same_space(left.binary64_cochain_space(1))
+    assert not form.space.same_space(right.binary64_cochain_space(1))
     assert not left_space.same_space(right_space)
 
+    with pytest.raises(Binary64ElementError):
+        left_space.admit_numpy(np.zeros(left_space.size + 1))
     with pytest.raises(SimplicialError):
-        left_space.form(np.zeros(left_space.size + 1), ORDINARY_FORM)
-    with pytest.raises(SimplicialError):
-        left.cochain_space(3)
-    with pytest.raises(SimplicialError):
-        CochainSpace(left, 3)
+        left.binary64_cochain_space(3)
 
 
 def test_form_requires_real_finite_coefficients() -> None:
-    space = Complex.from_maximal_simplices(_disk()).cochain_space(0)
+    space = Complex.from_maximal_simplices(_disk()).binary64_cochain_space(0)
     values = np.zeros(space.size)
     values[0] = np.nan
-    with pytest.raises(SimplicialError):
-        space.form(values, ORDINARY_FORM)
+    with pytest.raises(Binary64ElementError):
+        space.admit_numpy(values)
 
     complex_values = np.ones(space.size, dtype=np.complex128) * (1.0 + 2.0j)
-    with pytest.raises(SimplicialError, match="real"):
-        space.form(complex_values, ORDINARY_FORM)
+    with pytest.raises((TypeError, ValueError)):
+        space.admit_numpy(complex_values)
 
     for unsupported in (
         np.full(space.size, "coefficient", dtype=object),
         np.full(space.size, object(), dtype=object),
         np.full(space.size, 1.0 + 2.0j, dtype=object),
     ):
-        with pytest.raises(SimplicialError, match="numeric"):
-            space.form(unsupported, ORDINARY_FORM)
+        with pytest.raises((TypeError, ValueError)):
+            space.admit_numpy(unsupported)

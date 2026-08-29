@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import polygeo.simplicial as _simplicial
 
 from polygeo import (
-    CodimensionOneRegular,
     Complex,
     SimplicialError,
-    TriangleManifold,
-    WithBoundary,
-    WithoutBoundary,
     topological_boundary,
 )
 
@@ -64,6 +59,19 @@ def test_codimension_one_regular_extracts_disk_rim_with_complete_unsigned_closur
     assert boundary.is_pure(1)
 
 
+def test_topological_boundary_copy_is_explicit_and_mutation_isolated() -> None:
+    disk = Complex.from_maximal_simplices(
+        np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+    ).triangle_manifold()
+    boundary = topological_boundary(disk)
+    copied = boundary.owned_copy()
+    exposed = copied.mask(1)
+    exposed[:] = False
+
+    assert boundary.same_members(copied)
+    np.testing.assert_array_equal(copied.mask(1), [True, False, True, True, True])
+
+
 def test_codimension_one_regular_extracts_single_simplex_boundary_in_dimensions_three_and_four() -> (
     None
 ):
@@ -92,8 +100,8 @@ def test_closed_triangle_manifold_is_codimension_one_regular_with_empty_boundary
 
     boundary = topological_boundary(sphere)
 
-    assert isinstance(sphere.topology_state, TriangleManifold)
-    assert isinstance(sphere.topology_state, CodimensionOneRegular)
+    sphere.require_triangle()
+    sphere.require_regular()
     assert all(
         not boundary.mask(degree).any() for degree in range(sphere.dimension + 1)
     )
@@ -117,82 +125,6 @@ def test_codimension_one_regular_rejects_branching_and_nonpure_input() -> None:
     )
     with pytest.raises(SimplicialError, match="pure"):
         isolated_vertex.codimension_one_regular()
-
-
-def test_codimension_one_evidence_cannot_be_forged_or_replaced() -> None:
-    branching = Complex.from_maximal_simplices(
-        np.array([[0, 1, 2], [1, 0, 3], [0, 1, 4]], dtype=np.int64)
-    )
-    empty_masks = tuple(
-        np.zeros(branching.simplex_count(degree), dtype=np.bool_)
-        for degree in range(branching.dimension + 1)
-    )
-    forged_state = object.__new__(CodimensionOneRegular)
-    with pytest.raises(SimplicialError, match="verified topology evidence"):
-        Complex(
-            getattr(branching, "_data"),
-            branching.boundary_state,
-            branching.orientation_state,
-            branching.connectivity_state,
-            forged_state,
-        )
-
-    regular = Complex.from_maximal_simplices(
-        np.array([[0, 1, 2]], dtype=np.int64)
-    ).codimension_one_regular()
-    with pytest.raises(AttributeError):
-        setattr(regular.topology_state, "_boundary_masks", empty_masks)
-    with pytest.raises(AttributeError):
-        setattr(regular, "_topology_state", branching.topology_state)
-
-
-def test_complex_constructor_rejects_forged_evidence_and_boundary_state() -> None:
-    raw = Complex.from_maximal_simplices(
-        np.array([[0, 1, 2], [1, 0, 3], [0, 1, 4]], dtype=np.int64)
-    )
-    empty_masks = tuple(
-        np.zeros(raw.simplex_count(degree), dtype=np.bool_)
-        for degree in range(raw.dimension + 1)
-    )
-
-    class ForgedEvidence(_simplicial._BoundaryEvidence):
-        pass
-
-    forged_evidence = object.__new__(ForgedEvidence)
-    object.__setattr__(forged_evidence, "_data", getattr(raw, "_data"))
-    object.__setattr__(forged_evidence, "_masks", empty_masks)
-    object.__setattr__(forged_evidence, "_sealed", True)
-    with pytest.raises(SimplicialError, match="verified topology evidence"):
-        Complex(
-            getattr(raw, "_data"),
-            raw.boundary_state,
-            raw.orientation_state,
-            raw.connectivity_state,
-            CodimensionOneRegular(),
-            forged_evidence,
-        )
-
-    regular = Complex.from_maximal_simplices(
-        np.array([[0, 1, 2]], dtype=np.int64)
-    ).codimension_one_regular()
-    with pytest.raises(SimplicialError, match="conflicts with topology evidence"):
-        Complex(
-            getattr(regular, "_data"),
-            WithoutBoundary(),
-            regular.orientation_state,
-            regular.connectivity_state,
-            regular.topology_state,
-            getattr(regular, "_boundary_evidence"),
-        )
-
-    with pytest.raises(SimplicialError, match="requires regular topology evidence"):
-        Complex(
-            getattr(raw, "_data"),
-            WithBoundary(),
-            raw.orientation_state,
-            raw.connectivity_state,
-            raw.topology_state,
-        )
 
 
 def test_topological_boundary_closure_does_not_overflow_high_incidence() -> None:
