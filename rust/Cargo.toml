@@ -1,0 +1,27 @@
+[workspace]
+members = ["polygeo-core", "polygeo-py"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+repository = "https://github.com/nostalume/polygeo"
+
+[workspace.dependencies]
+faer = { version = "=0.24.4", default-features = false, features = ["std", "rayon", "sparse-linalg"] }
+num-bigint = "0.5.1"
+num-integer = "0.1.46"
+num-rational = { version = "0.4.2", default-features = false, features = ["std"] }
+num-traits = "0.2.19"
+proptest = "1.11.0"
+pyo3 = "0.29.2"
+numpy = "0.29.0"
+once_cell = "1.21.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"

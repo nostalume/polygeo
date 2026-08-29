@@ -1,0 +1,22 @@
+[package]
+name = "polygeo-core"
+version = "0.1.0"
+description = "Proof-bearing native topology core for PolyGeo"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+faer.workspace = true
+num-bigint.workspace = true
+num-integer.workspace = true
+num-rational.workspace = true
+num-traits.workspace = true
+once_cell.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
