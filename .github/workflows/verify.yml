@@ -53,8 +53,6 @@ jobs:
     name: Release artifacts
     needs: [platform-tests, quality-and-examples]
     runs-on: ubuntu-latest
-    env:
-      ARTIFACT_DIR: ${{ runner.temp }}/polygeo-artifacts
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -62,6 +60,8 @@ jobs:
         with:
           python-version: "3.14"
           enable-cache: true
+      - name: Select temporary artifact directory
+        run: echo "ARTIFACT_DIR=${RUNNER_TEMP}/polygeo-artifacts" >> "$GITHUB_ENV"
       - name: Build wheel and source distribution once
         run: uv build --out-dir "$ARTIFACT_DIR"
       - name: Inspect artifact contents
