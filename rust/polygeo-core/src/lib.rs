@@ -65,8 +65,8 @@ pub use representation::{
     CsrBuildLimit, CsrEstimate, CsrMatrix, CsrPattern, CsrRepresentation, RepresentationError,
 };
 pub use solve::{
-    CancellationToken, NativeExecutor, Prepared, SolveError, SolveExt, SolveWorkspace,
-    SurfaceComputationError,
+    CancellationToken, HarmonicOneFormBasis, NativeExecutor, Prepared, SolveError, SolveExt,
+    SolveWorkspace, SurfaceComputationError,
 };
 pub use subset::{CanonicalSelection, SimplexSubset, SubsetBuilder};
 pub use surface::{

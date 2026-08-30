@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{mem::size_of, sync::Arc};
 
 use polygeo_core::{
     Binary64Cochain, Binary64Element, Binary64Space, CancellationToken, CandidateInput, Cochain,
-    ComplexCore, EuclideanRealization, NativeExecutor, NondegenerateCapability, PairingCapability,
-    PositiveMetric, RealizationLimit, SolveExt, StorageLimit, WorkLimit,
+    ComplexCore, EuclideanRealization, HomologyLimit, IntegralHomology, NativeExecutor,
+    NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit, SolveError,
+    SolveExt, StorageLimit, WorkLimit,
 };
 
 const STORAGE: StorageLimit = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
@@ -49,6 +50,57 @@ fn cycle_metric(vertices: usize) -> PositiveMetric {
         .unwrap()
         .require_positive()
         .unwrap()
+}
+
+fn equilateral_torus() -> (PositiveMetric, IntegralHomology) {
+    equilateral_torus_transformed(1.0, 0.0)
+}
+
+fn equilateral_torus_transformed(
+    scale: f64,
+    translation: f64,
+) -> (PositiveMetric, IntegralHomology) {
+    let major_sections = 3;
+    let minor_sections = 3;
+    let mut faces = Vec::new();
+    for major in 0..major_sections {
+        for minor in 0..minor_sections {
+            let lower = major * minor_sections + minor;
+            let major_next = ((major + 1) % major_sections) * minor_sections + minor;
+            let diagonal =
+                ((major + 1) % major_sections) * minor_sections + (minor + 1) % minor_sections;
+            let minor_next = major * minor_sections + (minor + 1) % minor_sections;
+            faces.extend([[lower, major_next, diagonal], [lower, diagonal, minor_next]]);
+        }
+    }
+    let vertex_count = major_sections * minor_sections;
+    let topology = ComplexCore::admit(
+        CandidateInput::unsigned(
+            faces
+                .iter()
+                .flatten()
+                .map(|value| u64::try_from(*value).unwrap()),
+            faces.len(),
+            3,
+            Some(vertex_count),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut positions = vec![translation; vertex_count * vertex_count];
+    for vertex in 0..vertex_count {
+        positions[vertex * vertex_count + vertex] += scale;
+    }
+    let homology =
+        IntegralHomology::analyze(&topology.chain_complex(), [1], HomologyLimit::DEFAULT).unwrap();
+    let metric =
+        EuclideanRealization::admit(topology, vertex_count, positions, RealizationLimit::DEFAULT)
+            .unwrap()
+            .circumcentric_pairing()
+            .unwrap()
+            .require_positive()
+            .unwrap();
+    (metric, homology)
 }
 
 fn source(metric: &PositiveMetric, degree: usize, values: Vec<f64>) -> Binary64Cochain {
@@ -116,6 +168,189 @@ fn hodge_decomposition_certifies_reconstruction_and_subspace_laws() {
     assert_eq!(result.evidence().coexact_rank(), 3);
     assert!(result.evidence().exact_condition_indicator().is_finite());
     assert!(result.evidence().coexact_condition_indicator().is_finite());
+}
+
+#[test]
+fn harmonic_one_form_basis_is_closed_coclosed_and_period_normalized() {
+    let (metric, homology) = equilateral_torus();
+    let group = homology.group(1).unwrap();
+    let basis = metric
+        .harmonic_one_form_basis(
+            group,
+            &NativeExecutor::sequential(),
+            STORAGE,
+            WORK,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(group.free_rank(), 2);
+    assert_eq!(basis.rank(), group.free_rank());
+    assert_eq!(basis.forms().len(), group.free_rank());
+    for (column, form) in basis.forms().iter().enumerate() {
+        let periods = group.periods_binary64(form).unwrap();
+        for (row, &period) in periods.iter().enumerate() {
+            let expected = f64::from(row == column);
+            assert!((period - expected).abs() <= basis.residual_limit());
+        }
+    }
+    assert!(basis.maximum_closedness_residual() <= basis.residual_limit());
+    assert!(basis.maximum_coclosedness_residual() <= basis.residual_limit());
+    assert!(basis.maximum_identity_period_residual() <= basis.residual_limit());
+}
+
+#[test]
+fn harmonic_basis_empty_case_and_failures_publish_no_partial_basis() {
+    let sphere = tetrahedron_metric();
+    let sphere_homology = IntegralHomology::analyze(
+        &sphere.realization().topology().chain_complex(),
+        [0, 1],
+        HomologyLimit::DEFAULT,
+    )
+    .unwrap();
+    let empty = sphere
+        .harmonic_one_form_basis(
+            sphere_homology.group(1).unwrap(),
+            &NativeExecutor::sequential(),
+            STORAGE,
+            WORK,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(empty.rank(), 0);
+    assert!(empty.forms().is_empty());
+    assert_eq!(empty.maximum_closedness_residual().to_bits(), 0);
+    assert_eq!(empty.maximum_coclosedness_residual().to_bits(), 0);
+    assert_eq!(empty.maximum_identity_period_residual().to_bits(), 0);
+    assert_eq!(empty.residual_limit().to_bits(), 0);
+
+    assert_harmonic_basis_failures(&sphere, &sphere_homology);
+}
+
+fn assert_harmonic_basis_failures(sphere: &PositiveMetric, sphere_homology: &IntegralHomology) {
+    assert_eq!(
+        sphere
+            .harmonic_one_form_basis(
+                sphere_homology.group(0).unwrap(),
+                &NativeExecutor::sequential(),
+                STORAGE,
+                WORK,
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ProblemMismatch)
+    );
+
+    let (metric, homology) = equilateral_torus();
+    let final_basis_bytes = u64::try_from(
+        homology.group(1).unwrap().free_rank()
+            * metric
+                .realization()
+                .topology()
+                .basis(1)
+                .unwrap()
+                .row_count()
+            * size_of::<f64>(),
+    )
+    .unwrap();
+    assert_eq!(
+        metric
+            .harmonic_one_form_basis(
+                homology.group(1).unwrap(),
+                &NativeExecutor::sequential(),
+                StorageLimit::new(final_basis_bytes, u64::MAX).unwrap(),
+                WORK,
+                &CancellationToken::new(),
+            )
+            .unwrap()
+            .rank(),
+        2
+    );
+    assert_eq!(
+        sphere
+            .harmonic_one_form_basis(
+                homology.group(1).unwrap(),
+                &NativeExecutor::sequential(),
+                STORAGE,
+                WORK,
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ProblemMismatch)
+    );
+    assert_eq!(
+        metric
+            .harmonic_one_form_basis(
+                homology.group(1).unwrap(),
+                &NativeExecutor::sequential(),
+                StorageLimit::new(0, 0).unwrap(),
+                WORK,
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ResourceLimit)
+    );
+    assert_eq!(
+        metric
+            .harmonic_one_form_basis(
+                homology.group(1).unwrap(),
+                &NativeExecutor::sequential(),
+                STORAGE,
+                WorkLimit::new(0),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ResourceLimit)
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(
+        metric
+            .harmonic_one_form_basis(
+                homology.group(1).unwrap(),
+                &NativeExecutor::sequential(),
+                STORAGE,
+                WORK,
+                &cancelled,
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::Cancelled)
+    );
+}
+
+#[test]
+fn harmonic_basis_is_rigid_motion_and_uniform_scale_invariant() {
+    let (first_metric, first_homology) = equilateral_torus_transformed(1.0, 0.0);
+    let (second_metric, second_homology) = equilateral_torus_transformed(7.0, -13.0);
+    let first = first_metric
+        .harmonic_one_form_basis(
+            first_homology.group(1).unwrap(),
+            &NativeExecutor::sequential(),
+            STORAGE,
+            WORK,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let second = second_metric
+        .harmonic_one_form_basis(
+            second_homology.group(1).unwrap(),
+            &NativeExecutor::sequential(),
+            STORAGE,
+            WORK,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    for (left, right) in first.forms().iter().zip(second.forms()) {
+        for (&left, &right) in left.coefficients().iter().zip(right.coefficients()) {
+            assert!((left - right).abs() <= 1.0e-13);
+        }
+    }
 }
 
 #[test]

@@ -1925,6 +1925,10 @@ pub struct HomologyGroup<'a> {
 }
 
 impl<'a> HomologyGroup<'a> {
+    pub(crate) const fn chain_complex(self) -> &'a IntegralChainComplex {
+        self.chain
+    }
+
     #[must_use]
     pub const fn degree(self) -> usize {
         self.degree

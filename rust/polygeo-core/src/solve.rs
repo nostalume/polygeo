@@ -30,12 +30,13 @@ use num_traits::ToPrimitive;
 use crate::incidence::{IncidenceAxis, independent_incidence};
 use crate::problem::{adaptive_product_sign, adaptive_product_sum, adaptive_product_value};
 use crate::{
-    Binary64Cochain, Binary64Element, CanonicalSelection, Cochain, DirichletEvidence,
-    DirichletProblem, DirichletSolution, EuclideanRealization, FlowEvidence, FlowStep,
-    HarmonicExtension, HeatProblem, HeatSolution, HodgeDecomposition, HodgeProblem,
-    LeastSquaresConformalMapEvidence, LeastSquaresConformalMapSolution, LinearOperator,
-    MeanZeroPoisson, NondegenerateCapability, PairingCapability, PoissonSolution, Problem,
-    RealizationError, RealizationLimit, StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
+    Binary64Cochain, Binary64Element, Binary64Space, CanonicalSelection, Cochain,
+    DirichletEvidence, DirichletProblem, DirichletSolution, EuclideanRealization, FlowEvidence,
+    FlowStep, HarmonicExtension, HeatProblem, HeatSolution, HodgeDecomposition, HodgeProblem,
+    HomologyGroup, IntegralDualCycleBasis, LeastSquaresConformalMapEvidence,
+    LeastSquaresConformalMapSolution, LinearOperator, MeanZeroPoisson, NondegenerateCapability,
+    PairingCapability, PoissonSolution, PositiveMetric, Problem, RealizationError,
+    RealizationLimit, StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
 };
 
 type EdgeEndpoints = [(usize, i64); 2];
@@ -122,6 +123,48 @@ impl std::error::Error for SolveError {}
 pub enum SurfaceComputationError {
     Surface(SurfaceError),
     Solve(SolveError),
+}
+
+/// Period-normalized harmonic degree-one cochains over one positive metric.
+#[derive(Clone, Debug)]
+pub struct HarmonicOneFormBasis {
+    forms: Box<[Binary64Cochain]>,
+    maximum_closedness_residual: f64,
+    maximum_coclosedness_residual: f64,
+    maximum_identity_period_residual: f64,
+    residual_limit: f64,
+}
+
+impl HarmonicOneFormBasis {
+    #[must_use]
+    pub const fn rank(&self) -> usize {
+        self.forms.len()
+    }
+
+    #[must_use]
+    pub const fn forms(&self) -> &[Binary64Cochain] {
+        &self.forms
+    }
+
+    #[must_use]
+    pub const fn maximum_closedness_residual(&self) -> f64 {
+        self.maximum_closedness_residual
+    }
+
+    #[must_use]
+    pub const fn maximum_coclosedness_residual(&self) -> f64 {
+        self.maximum_coclosedness_residual
+    }
+
+    #[must_use]
+    pub const fn maximum_identity_period_residual(&self) -> f64 {
+        self.maximum_identity_period_residual
+    }
+
+    #[must_use]
+    pub const fn residual_limit(&self) -> f64 {
+        self.residual_limit
+    }
 }
 
 impl SurfaceComputationError {
@@ -697,6 +740,49 @@ impl Prepared<HeatProblem> {
 }
 
 impl crate::PositiveMetric {
+    /// Construct harmonic degree-one cochains dual to exact free homology cycles.
+    ///
+    /// # Errors
+    /// Rejects a foreign or non-degree-one homology group, an unsuitable surface
+    /// topology, exhausted resources, cancellation, or failed numerical
+    /// certification.
+    pub fn harmonic_one_form_basis(
+        &self,
+        group: HomologyGroup<'_>,
+        executor: &NativeExecutor,
+        storage: StorageLimit,
+        work: WorkLimit,
+        cancellation: &CancellationToken,
+    ) -> Result<HarmonicOneFormBasis, SurfaceComputationError> {
+        let topology = self.realization().topology();
+        if group.degree() != 1 || !group.chain_complex().same_owner(&topology.chain_complex()) {
+            return Err(SolveError::ProblemMismatch.into());
+        }
+        if !group.torsion_orders().is_empty() {
+            return Err(SolveError::ProblemMismatch.into());
+        }
+        let edge_count = topology.basis(1).map_err(SurfaceError::from)?.row_count();
+        let face_count = topology.basis(2).map_err(SurfaceError::from)?.row_count();
+        require_harmonic_basis_resources(
+            topology.vertex_count(),
+            edge_count,
+            face_count,
+            group.free_rank(),
+            storage,
+            work,
+        )
+        .map_err(SurfaceComputationError::Solve)?;
+        check_cancelled(cancellation).map_err(SurfaceComputationError::Solve)?;
+        let seeds = topology
+            .integral_dual_cycle_basis()
+            .map_err(SurfaceError::from)?;
+        if seeds.rank() != group.free_rank() {
+            return Err(SolveError::ProblemMismatch.into());
+        }
+        harmonic_one_form_basis(self, group, &seeds, *executor, storage, work, cancellation)
+            .map_err(SurfaceComputationError::Solve)
+    }
+
     /// Compute and atomically publish one frozen-metric mean-curvature-flow step.
     ///
     /// # Errors
@@ -723,6 +809,299 @@ impl crate::PositiveMetric {
         )
         .map_err(SurfaceComputationError::Solve)
     }
+}
+
+fn harmonic_one_form_basis(
+    metric: &PositiveMetric,
+    group: HomologyGroup<'_>,
+    seeds: &IntegralDualCycleBasis,
+    executor: NativeExecutor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<HarmonicOneFormBasis, SolveError> {
+    check_cancelled(cancellation)?;
+    let rank = seeds.rank();
+    let topology = metric.realization().topology();
+    if rank == 0 {
+        return Ok(empty_harmonic_one_form_basis());
+    }
+    let edge_space = Binary64Space::<Cochain>::full(Arc::clone(topology), 1)
+        .map_err(|_| SolveError::Numerical)?;
+    let harmonic_seeds = project_harmonic_seeds(
+        metric,
+        seeds,
+        &edge_space,
+        executor,
+        storage,
+        work,
+        cancellation,
+    )?;
+    let forms =
+        normalize_harmonic_periods(group, &edge_space, &harmonic_seeds, executor, cancellation)?;
+    certify_harmonic_one_form_basis(metric, group, forms)
+}
+
+fn require_harmonic_basis_resources(
+    vertex_count: usize,
+    edge_count: usize,
+    face_count: usize,
+    rank: usize,
+    storage: StorageLimit,
+    work: WorkLimit,
+) -> Result<(), SolveError> {
+    let retained_cells = rank
+        .checked_mul(edge_count)
+        .ok_or(SolveError::ResourceLimit)?;
+    let retained = logical_bytes(retained_cells, size_of::<f64>())?;
+    let exact_seed_width = size_of::<usize>()
+        .checked_add(size_of::<num_bigint::BigInt>())
+        .ok_or(SolveError::ResourceLimit)?;
+    let exact_seeds = logical_bytes(retained_cells, exact_seed_width)?;
+    let edge_tree_cells = edge_count.checked_mul(8).ok_or(SolveError::ResourceLimit)?;
+    let tree_cells = vertex_count
+        .checked_add(face_count.saturating_mul(4))
+        .and_then(|value| value.checked_add(edge_tree_cells))
+        .ok_or(SolveError::ResourceLimit)?;
+    let tree_workspace = logical_bytes(tree_cells, size_of::<usize>())?;
+    let cochain_temporaries = retained.checked_mul(3).ok_or(SolveError::ResourceLimit)?;
+    let poisson_factor = matrix_bytes(vertex_count.saturating_sub(1))?;
+    let period_matrices = matrix_bytes(rank)?
+        .checked_mul(3)
+        .ok_or(SolveError::ResourceLimit)?;
+    let peak = retained
+        .checked_add(cochain_temporaries)
+        .and_then(|value| value.checked_add(exact_seeds))
+        .and_then(|value| value.checked_add(tree_workspace))
+        .and_then(|value| value.checked_add(poisson_factor.saturating_mul(2)))
+        .and_then(|value| value.checked_add(period_matrices))
+        .ok_or(SolveError::ResourceLimit)?;
+    require_storage(storage, retained, peak)?;
+    let solve_steps = vertex_count
+        .saturating_sub(1)
+        .checked_mul(vertex_count.saturating_sub(1))
+        .and_then(|value| value.checked_mul(rank))
+        .and_then(|value| value.checked_add(retained_cells.saturating_mul(rank.max(1))))
+        .ok_or(SolveError::ResourceLimit)?;
+    let required_work = cubic_work(vertex_count.saturating_sub(1))?
+        .checked_add(cubic_work(rank)?)
+        .and_then(|value| value.checked_add(u64::try_from(solve_steps).ok()?))
+        .and_then(|value| value.checked_add(u64::try_from(tree_cells).ok()?))
+        .ok_or(SolveError::ResourceLimit)?;
+    require_work(work, required_work)
+}
+
+fn empty_harmonic_one_form_basis() -> HarmonicOneFormBasis {
+    HarmonicOneFormBasis {
+        forms: Box::new([]),
+        maximum_closedness_residual: 0.0,
+        maximum_coclosedness_residual: 0.0,
+        maximum_identity_period_residual: 0.0,
+        residual_limit: 0.0,
+    }
+}
+
+fn project_harmonic_seeds(
+    metric: &PositiveMetric,
+    seeds: &IntegralDualCycleBasis,
+    edge_space: &Binary64Space<Cochain>,
+    executor: NativeExecutor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<Vec<Binary64Cochain>, SolveError> {
+    let rank = seeds.rank();
+    let internal_storage = StorageLimit::new(
+        storage.peak_live_logical_bytes(),
+        storage.peak_live_logical_bytes(),
+    )
+    .ok_or(SolveError::ResourceLimit)?;
+    let codifferential = metric
+        .codifferential(1)
+        .map_err(|_| SolveError::Numerical)?;
+    let vertex_riesz = metric.riesz(0).map_err(|_| SolveError::Numerical)?;
+    let mut seed_values = Vec::new();
+    seed_values
+        .try_reserve_exact(rank)
+        .map_err(|_| SolveError::Allocation)?;
+    let mut problems = Vec::new();
+    problems
+        .try_reserve_exact(rank)
+        .map_err(|_| SolveError::Allocation)?;
+    for index in 0..rank {
+        let exact = seeds.cocycle(index).ok_or(SolveError::Numerical)?;
+        let seed = Binary64Element::realize_integral(edge_space.clone(), exact)
+            .map_err(|_| SolveError::Numerical)?;
+        let rhs = codifferential
+            .apply(&seed)
+            .map_err(|_| SolveError::Numerical)?;
+        let load = vertex_riesz
+            .apply(&rhs)
+            .map_err(|_| SolveError::Numerical)?;
+        let problem = metric
+            .mean_zero_poisson_load(load)
+            .map_err(|_| SolveError::Numerical)?;
+        seed_values.push(seed);
+        problems.push(problem);
+    }
+    let prepared =
+        problems[0].prepare_with_cancellation(&executor, internal_storage, work, cancellation)?;
+    let mut harmonic_seeds = Vec::new();
+    harmonic_seeds
+        .try_reserve_exact(rank)
+        .map_err(|_| SolveError::Allocation)?;
+    for (seed, problem) in seed_values.iter().zip(&problems) {
+        check_cancelled(cancellation)?;
+        let mut workspace = prepared.workspace_for(problem, internal_storage)?;
+        let solution = prepared.solve_cancellable(problem, &mut workspace, work, cancellation)?;
+        let exact = solution
+            .potential()
+            .exterior_derivative()
+            .map_err(|_| SolveError::Numerical)?;
+        let coefficients = seed
+            .coefficients()
+            .iter()
+            .zip(exact.coefficients())
+            .map(|(&seed, &exact)| seed - exact)
+            .collect::<Vec<_>>();
+        harmonic_seeds.push(
+            Binary64Element::admit(edge_space.clone(), coefficients)
+                .map_err(|_| SolveError::Numerical)?,
+        );
+    }
+    Ok(harmonic_seeds)
+}
+
+fn normalize_harmonic_periods(
+    group: HomologyGroup<'_>,
+    edge_space: &Binary64Space<Cochain>,
+    harmonic_seeds: &[Binary64Cochain],
+    executor: NativeExecutor,
+    cancellation: &CancellationToken,
+) -> Result<Vec<Binary64Cochain>, SolveError> {
+    let rank = harmonic_seeds.len();
+    let edge_count = edge_space.size();
+    let mut periods = Mat::<f64>::zeros(rank, rank);
+    for (column, harmonic) in harmonic_seeds.iter().enumerate() {
+        for (row, &period) in group
+            .periods_binary64(harmonic)
+            .map_err(|_| SolveError::ProblemMismatch)?
+            .iter()
+            .enumerate()
+        {
+            periods[(row, column)] = period;
+        }
+    }
+    let factor = factor_dense_square(periods, executor, cancellation)?;
+    require_stable_dense_lu(&factor)?;
+    let requirement = factor_solve_requirement(&factor, executor, rank);
+    let mut buffer = MemBuffer::try_new(requirement).map_err(|_| SolveError::Allocation)?;
+    let scale = factor_scale(&factor);
+    let mut coordinates = Mat::<f64>::zeros(rank, rank);
+    for index in 0..rank {
+        coordinates[(index, index)] = 1.0 / scale;
+    }
+    solve_factor(
+        &factor,
+        coordinates.as_mut(),
+        executor,
+        MemStack::new(&mut buffer),
+    );
+    check_cancelled(cancellation)?;
+
+    let mut forms = Vec::new();
+    forms
+        .try_reserve_exact(rank)
+        .map_err(|_| SolveError::Allocation)?;
+    for column in 0..rank {
+        let mut coefficients = Vec::new();
+        coefficients
+            .try_reserve_exact(edge_count)
+            .map_err(|_| SolveError::Allocation)?;
+        for edge in 0..edge_count {
+            let (value, _) = adaptive_product_value(
+                harmonic_seeds
+                    .iter()
+                    .enumerate()
+                    .map(|(row, form)| (form.coefficients()[edge], coordinates[(row, column)])),
+            )
+            .ok_or(SolveError::Numerical)?;
+            coefficients.push(value);
+        }
+        forms.push(
+            Binary64Element::admit(edge_space.clone(), coefficients)
+                .map_err(|_| SolveError::Numerical)?,
+        );
+    }
+    Ok(forms)
+}
+
+fn certify_harmonic_one_form_basis(
+    metric: &PositiveMetric,
+    group: HomologyGroup<'_>,
+    forms: Vec<Binary64Cochain>,
+) -> Result<HarmonicOneFormBasis, SolveError> {
+    let codifferential = metric
+        .codifferential(1)
+        .map_err(|_| SolveError::Numerical)?;
+    let mut closedness = 0.0_f64;
+    let mut coclosedness = 0.0_f64;
+    let mut identity_period = 0.0_f64;
+    for (column, form) in forms.iter().enumerate() {
+        let derivative = form
+            .exterior_derivative()
+            .map_err(|_| SolveError::Numerical)?;
+        closedness = closedness.max(maximum_absolute(derivative.coefficients())?);
+        let codifferential = codifferential
+            .apply(form)
+            .map_err(|_| SolveError::Numerical)?;
+        coclosedness = coclosedness.max(maximum_absolute(codifferential.coefficients())?);
+        for (row, &period) in group
+            .periods_binary64(form)
+            .map_err(|_| SolveError::ProblemMismatch)?
+            .iter()
+            .enumerate()
+        {
+            identity_period = identity_period.max((period - f64::from(row == column)).abs());
+        }
+    }
+    let operation_count = forms
+        .len()
+        .saturating_add(metric.realization().topology().vertex_count())
+        .saturating_add(
+            metric
+                .realization()
+                .topology()
+                .basis(1)
+                .map_err(|_| SolveError::Numerical)?
+                .row_count(),
+        );
+    let residual_limit = 4096.0
+        * f64::EPSILON
+        * f64::from(u32::try_from(operation_count.max(1)).unwrap_or(u32::MAX));
+    if !residual_limit.is_finite()
+        || closedness > residual_limit
+        || coclosedness > residual_limit
+        || identity_period > residual_limit
+    {
+        return Err(SolveError::Numerical);
+    }
+    Ok(HarmonicOneFormBasis {
+        forms: forms.into_boxed_slice(),
+        maximum_closedness_residual: closedness,
+        maximum_coclosedness_residual: coclosedness,
+        maximum_identity_period_residual: identity_period,
+        residual_limit,
+    })
+}
+
+fn maximum_absolute(values: &[f64]) -> Result<f64, SolveError> {
+    values.iter().try_fold(0.0_f64, |maximum, &value| {
+        value
+            .is_finite()
+            .then_some(maximum.max(value.abs()))
+            .ok_or(SolveError::Numerical)
+    })
 }
 
 impl TriangleSurface {
@@ -2071,6 +2450,17 @@ fn factor_general(
             matrix[(row, column)] = output[target];
         }
     }
+    factor_dense_square(matrix, executor, cancellation)
+}
+
+fn factor_dense_square(
+    mut matrix: Mat<f64>,
+    executor: NativeExecutor,
+    cancellation: &CancellationToken,
+) -> Result<Factor, SolveError> {
+    if matrix.nrows() == 0 || matrix.nrows() != matrix.ncols() {
+        return Err(SolveError::Factorization);
+    }
     let mut scale = 0.0_f64;
     for column in 0..matrix.ncols() {
         for row in 0..matrix.nrows() {
@@ -2085,14 +2475,11 @@ fn factor_general(
             matrix[(row, column)] /= scale;
         }
     }
-    let mut permutation = vec![0_usize; free.len()];
-    let mut inverse_permutation = vec![0_usize; free.len()];
-    let requirement = lu_factor::lu_in_place_scratch::<usize, f64>(
-        free.len(),
-        free.len(),
-        executor.par(),
-        Spec::default(),
-    );
+    let rank = matrix.nrows();
+    let mut permutation = vec![0_usize; rank];
+    let mut inverse_permutation = vec![0_usize; rank];
+    let requirement =
+        lu_factor::lu_in_place_scratch::<usize, f64>(rank, rank, executor.par(), Spec::default());
     let mut buffer = MemBuffer::try_new(requirement).map_err(|_| SolveError::Allocation)?;
     lu_factor::lu_in_place(
         matrix.as_mut(),
@@ -2102,7 +2489,7 @@ fn factor_general(
         MemStack::new(&mut buffer),
         Spec::default(),
     );
-    if (0..free.len()).any(|index| {
+    if (0..rank).any(|index| {
         let pivot = matrix[(index, index)];
         pivot == 0.0 || !pivot.is_finite()
     }) {
@@ -2115,6 +2502,24 @@ fn factor_general(
         inverse_permutation: inverse_permutation.into_boxed_slice(),
         scale,
     })
+}
+
+fn require_stable_dense_lu(factor: &Factor) -> Result<(), SolveError> {
+    let Factor::DenseLu { factor, .. } = factor else {
+        return Err(SolveError::ProblemMismatch);
+    };
+    let diagonal = (0..factor.nrows()).map(|index| factor[(index, index)].abs());
+    let maximum = diagonal.clone().fold(0.0_f64, f64::max);
+    let minimum = diagonal.fold(f64::INFINITY, f64::min);
+    if !maximum.is_finite()
+        || !minimum.is_finite()
+        || maximum == 0.0
+        || minimum <= f64::EPSILON.sqrt() * maximum
+    {
+        Err(SolveError::Factorization)
+    } else {
+        Ok(())
+    }
 }
 
 fn boundary_workspace(
