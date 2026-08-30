@@ -20,8 +20,8 @@ input arrays or optional mesh
 Mathematical and computational roles are separate semantic layers, not
 parallel data structures. Full and selected bases are both `Binary64Space`;
 chain/cochain values are both `Binary64Element`; every represented binary64
-map is `LinearOperator`. Runtime names such as `Form`, `Binary64Chain`, and
-`Binary64Cochain` are aliases of the same element class.
+map is `LinearOperator`. Runtime names `Binary64Chain` and `Binary64Cochain` are
+aliases of the same element class.
 
 ## Ownership
 
