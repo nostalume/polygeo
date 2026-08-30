@@ -3,7 +3,7 @@ use std::{marker::PhantomData, sync::Arc};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
-use crate::chain::{BasedDegree, ChainDomain};
+use crate::chain::{BasedDegree, ChainDomain, visit_wedge_face_pairs, wedge_normalization};
 use crate::{
     BigIntEncoding, CanonicalSelection, Chain, Cochain, CoefficientSystem, ComplexCore, Element,
     IntegerRing, Space, TopologyError, Variance,
@@ -17,6 +17,7 @@ pub enum Binary64ElementError {
     SpaceMismatch,
     ScalarConversion,
     Allocation,
+    Topology(TopologyError),
 }
 
 impl Binary64ElementError {
@@ -28,23 +29,37 @@ impl Binary64ElementError {
             Self::SpaceMismatch => "space_mismatch",
             Self::ScalarConversion => "scalar_conversion",
             Self::Allocation => "allocation",
+            Self::Topology(error) => error.reason(),
         }
     }
 }
 
 impl std::fmt::Display for Binary64ElementError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::CoefficientCount => "coefficients do not align with the binary64 space",
-            Self::NonFinite => "coefficients must be finite binary64 values",
-            Self::SpaceMismatch => "element belongs to a different based space",
-            Self::ScalarConversion => "exact coefficients cannot be realized as binary64",
-            Self::Allocation => "binary64 output allocation failed",
-        })
+        match self {
+            Self::CoefficientCount => {
+                formatter.write_str("coefficients do not align with the binary64 space")
+            }
+            Self::NonFinite => formatter.write_str("coefficients must be finite binary64 values"),
+            Self::SpaceMismatch => {
+                formatter.write_str("element belongs to a different based space")
+            }
+            Self::ScalarConversion => {
+                formatter.write_str("exact coefficients cannot be realized as binary64")
+            }
+            Self::Allocation => formatter.write_str("binary64 output allocation failed"),
+            Self::Topology(error) => std::fmt::Display::fmt(error, formatter),
+        }
     }
 }
 
 impl std::error::Error for Binary64ElementError {}
+
+impl From<TopologyError> for Binary64ElementError {
+    fn from(error: TopologyError) -> Self {
+        Self::Topology(error)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum Binary64Basis {
@@ -223,7 +238,6 @@ pub type Binary64ChainSpace = Binary64Space<Chain>;
 pub type Binary64CochainSpace = Binary64Space<Cochain>;
 pub type Binary64Chain = Binary64Element<Chain>;
 pub type Binary64Cochain = Binary64Element<Cochain>;
-pub type Form = Binary64Cochain;
 
 impl<K: Variance> Binary64Element<K> {
     /// Admit one owned contiguous coefficient buffer.
@@ -280,6 +294,20 @@ impl<K: Variance> Binary64Element<K> {
         &self.coefficients
     }
 
+    /// Return the additive inverse in the same binary64 space.
+    #[must_use]
+    pub fn negated(&self) -> Self {
+        Self {
+            space: self.space.clone(),
+            coefficients: self
+                .coefficients
+                .iter()
+                .map(|value| -*value)
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+
     pub(crate) fn from_shared(space: Binary64Space<K>, coefficients: Arc<[f64]>) -> Self {
         Self {
             space,
@@ -289,6 +317,92 @@ impl<K: Variance> Binary64Element<K> {
 
     pub(crate) const fn shared_coefficients(&self) -> &Arc<[f64]> {
         &self.coefficients
+    }
+}
+
+impl Binary64Element<Cochain> {
+    /// Form the antisymmetrized simplicial wedge product in binary64 arithmetic.
+    ///
+    /// # Errors
+    ///
+    /// Rejects selected bases, foreign owners, invalid topology, allocation
+    /// failure, degree overflow, or a non-finite result.
+    pub fn wedge(&self, other: &Self) -> Result<Self, Binary64ElementError> {
+        let left = self
+            .space
+            .full_basis()
+            .ok_or(Binary64ElementError::SpaceMismatch)?;
+        let right = other
+            .space
+            .full_basis()
+            .ok_or(Binary64ElementError::SpaceMismatch)?;
+        if !left.domain.same_owner(&right.domain) {
+            return Err(Binary64ElementError::SpaceMismatch);
+        }
+        let owner = left
+            .domain
+            .simplicial_owner()
+            .ok_or(Binary64ElementError::SpaceMismatch)?;
+        let left_degree = usize::try_from(left.degree).map_err(|_| TopologyError::CountOverflow)?;
+        let right_degree =
+            usize::try_from(right.degree).map_err(|_| TopologyError::CountOverflow)?;
+        let target_degree = left_degree
+            .checked_add(right_degree)
+            .ok_or(TopologyError::CountOverflow)?;
+        let target = if target_degree <= owner.dimension() {
+            Binary64Space::full(Arc::clone(owner), target_degree)?
+        } else {
+            Binary64Space::zero(Arc::clone(owner), target_degree)?
+        };
+        if self.coefficients.is_empty() || other.coefficients.is_empty() || target.size() == 0 {
+            return Self::admit(target, Vec::new());
+        }
+
+        let normalization = wedge_normalization(left_degree, right_degree)?
+            .to_f64()
+            .ok_or(Binary64ElementError::ScalarConversion)?;
+        let mut sums = Vec::new();
+        let mut corrections = Vec::new();
+        sums.try_reserve_exact(target.size())
+            .map_err(|_| Binary64ElementError::Allocation)?;
+        corrections
+            .try_reserve_exact(target.size())
+            .map_err(|_| Binary64ElementError::Allocation)?;
+        sums.resize(target.size(), 0.0_f64);
+        corrections.resize(target.size(), 0.0_f64);
+        let mut finite = true;
+        visit_wedge_face_pairs(owner, left_degree, right_degree, |target_index, pair| {
+            let left = self.coefficients[pair.left];
+            let right = other.coefficients[pair.right];
+            let mut term = if left.abs() >= right.abs() {
+                (left / normalization) * right
+            } else {
+                left * (right / normalization)
+            };
+            if pair.sign < 0 {
+                term = -term;
+            }
+            let sum = sums[target_index];
+            let next = sum + term;
+            let correction = if sum.abs() >= term.abs() {
+                (sum - next) + term
+            } else {
+                (term - next) + sum
+            };
+            sums[target_index] = next;
+            corrections[target_index] += correction;
+            finite &= term.is_finite() && next.is_finite() && corrections[target_index].is_finite();
+        })?;
+        if !finite {
+            return Err(Binary64ElementError::NonFinite);
+        }
+        for (sum, correction) in sums.iter_mut().zip(corrections) {
+            *sum += correction;
+            if !sum.is_finite() {
+                return Err(Binary64ElementError::NonFinite);
+            }
+        }
+        Self::admit(target, sums)
     }
 }
 

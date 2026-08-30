@@ -22,7 +22,7 @@ fn projective_plane() -> Arc<ComplexCore> {
 fn free_cycles_project_explicitly_and_periods_use_the_canonical_pairing() {
     let owner = circle();
     let chain = owner.chain_complex();
-    let homology = IntegralHomology::prepare(&chain, [1], HomologyLimit::DEFAULT).unwrap();
+    let homology = IntegralHomology::analyze(&chain, [1], HomologyLimit::DEFAULT).unwrap();
     let group = homology.group(1).unwrap();
 
     let cycles = group.realize_free_cycles_binary64().unwrap();
@@ -97,7 +97,7 @@ fn integral_realization_rejects_rounding_an_exact_coefficient() {
 fn periods_reject_foreign_spaces_and_exact_overflow() {
     let owner = circle();
     let chain = owner.chain_complex();
-    let homology = IntegralHomology::prepare(&chain, [1], HomologyLimit::DEFAULT).unwrap();
+    let homology = IntegralHomology::analyze(&chain, [1], HomologyLimit::DEFAULT).unwrap();
     let group = homology.group(1).unwrap();
 
     let foreign = circle();
@@ -145,7 +145,7 @@ fn periods_reject_foreign_spaces_and_exact_overflow() {
 fn torsion_remains_exact_and_is_not_projected_as_a_zero_generator() {
     let owner = projective_plane();
     let chain = owner.chain_complex();
-    let homology = IntegralHomology::prepare(&chain, [1], HomologyLimit::DEFAULT).unwrap();
+    let homology = IntegralHomology::analyze(&chain, [1], HomologyLimit::DEFAULT).unwrap();
     let group = homology.group(1).unwrap();
     assert_eq!(group.torsion_orders(), &[BigInt::from(2)]);
     assert!(group.realize_free_cycles_binary64().unwrap().is_empty());

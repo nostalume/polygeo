@@ -4,10 +4,11 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 use once_cell::sync::OnceCell;
 
+use crate::problem::adaptive_product_value;
 use crate::{
-    Binary64Cochain, Binary64CochainSpace, Binary64Element, CanonicalBoundary, ComplexCore,
-    EuclideanRealization, IntegralDualCycleBasis, NondegenerateCapability, PairingCapability,
-    PositiveMetric, RealizationLimit, TopologyError,
+    Binary64Chain, Binary64ChainSpace, Binary64Cochain, Binary64CochainSpace, Binary64Element,
+    CanonicalBoundary, ComplexCore, EuclideanRealization, IntegralDualCycleBasis,
+    NondegenerateCapability, PairingCapability, PositiveMetric, TopologyError,
 };
 
 fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
@@ -57,6 +58,9 @@ fn triangle_angle(left: [f64; 3], right: [f64; 3]) -> Option<f64> {
     let angle = sine.atan2(cosine);
     angle.is_finite().then_some(angle)
 }
+
+type LocalDifferentialRows = ([usize; 3], [[f64; 3]; 3], f64, f64);
+pub(crate) type LocalConformalCoefficients = ([usize; 3], [[f64; 2]; 3]);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Support {
@@ -178,6 +182,8 @@ pub enum SurfaceError {
     Overflow,
     Unrepresentable,
     TimeStep,
+    CoincidentAnchor,
+    AnchorNotBoundary,
 }
 
 impl fmt::Display for SurfaceError {
@@ -195,6 +201,8 @@ impl fmt::Display for SurfaceError {
             Self::Overflow => "surface size arithmetic overflowed",
             Self::Unrepresentable => "surface result is not representable",
             Self::TimeStep => "flow time step must be positive and finite",
+            Self::CoincidentAnchor => "surface anchors must be distinct vertices",
+            Self::AnchorNotBoundary => "surface anchor must lie on the disk boundary",
         })
     }
 }
@@ -204,29 +212,6 @@ impl std::error::Error for SurfaceError {}
 impl From<TopologyError> for SurfaceError {
     fn from(error: TopologyError) -> Self {
         Self::Topology(error)
-    }
-}
-
-/// Solver-free frozen-metric mean-curvature flow problem.
-#[derive(Clone, Debug)]
-pub struct FlowProblem {
-    metric: PositiveMetric,
-    time_step: f64,
-    realization_limit: RealizationLimit,
-}
-
-impl FlowProblem {
-    pub(crate) const fn metric(&self) -> &PositiveMetric {
-        &self.metric
-    }
-
-    #[must_use]
-    pub const fn time_step(&self) -> f64 {
-        self.time_step
-    }
-
-    pub(crate) const fn realization_limit(&self) -> RealizationLimit {
-        self.realization_limit
     }
 }
 
@@ -279,6 +264,90 @@ pub struct FlowStep {
     evidence: FlowEvidence,
 }
 
+/// Certified diagnostics for one least-squares conformal parameterization.
+#[derive(Clone, Copy, Debug)]
+pub struct LeastSquaresConformalMapEvidence {
+    required_rank: usize,
+    observed_rank: usize,
+    condition_indicator: f64,
+    residual_bound: f64,
+    minimum_normalized_signed_twice_area: f64,
+    exact_fallback_faces: usize,
+}
+
+impl LeastSquaresConformalMapEvidence {
+    #[must_use]
+    pub const fn required_rank(self) -> usize {
+        self.required_rank
+    }
+    #[must_use]
+    pub const fn observed_rank(self) -> usize {
+        self.observed_rank
+    }
+    #[must_use]
+    pub const fn condition_indicator(self) -> f64 {
+        self.condition_indicator
+    }
+    #[must_use]
+    pub const fn residual_bound(self) -> f64 {
+        self.residual_bound
+    }
+    #[must_use]
+    pub const fn minimum_normalized_signed_twice_area(self) -> f64 {
+        self.minimum_normalized_signed_twice_area
+    }
+    #[must_use]
+    pub const fn exact_fallback_faces(self) -> usize {
+        self.exact_fallback_faces
+    }
+
+    pub(crate) const fn new(
+        required_rank: usize,
+        observed_rank: usize,
+        condition_indicator: f64,
+        residual_bound: f64,
+        minimum_normalized_signed_twice_area: f64,
+        exact_fallback_faces: usize,
+    ) -> Self {
+        Self {
+            required_rank,
+            observed_rank,
+            condition_indicator,
+            residual_bound,
+            minimum_normalized_signed_twice_area,
+            exact_fallback_faces,
+        }
+    }
+}
+
+/// One admitted planar realization and its LSCM computation evidence.
+#[derive(Clone, Debug)]
+pub struct LeastSquaresConformalMapSolution {
+    realization: Arc<EuclideanRealization>,
+    evidence: LeastSquaresConformalMapEvidence,
+}
+
+impl LeastSquaresConformalMapSolution {
+    #[must_use]
+    pub const fn realization(&self) -> &Arc<EuclideanRealization> {
+        &self.realization
+    }
+    #[must_use]
+    pub const fn evidence(&self) -> LeastSquaresConformalMapEvidence {
+        self.evidence
+    }
+
+    pub(crate) const fn new(
+        realization: Arc<EuclideanRealization>,
+        evidence: LeastSquaresConformalMapEvidence,
+    ) -> Self {
+        Self {
+            realization,
+            evidence,
+        }
+    }
+}
+
 impl FlowStep {
     #[must_use]
     pub const fn target(&self) -> &Arc<EuclideanRealization> {
@@ -291,47 +360,6 @@ impl FlowStep {
 
     pub(crate) const fn new(target: Arc<EuclideanRealization>, evidence: FlowEvidence) -> Self {
         Self { target, evidence }
-    }
-}
-
-impl PositiveMetric {
-    /// Admit one closed connected triangle-surface frozen-metric flow problem.
-    ///
-    /// # Errors
-    /// Rejects invalid time, dimension, topology, boundary, or connectivity.
-    pub fn frozen_mean_curvature_flow(&self, time_step: f64) -> Result<FlowProblem, SurfaceError> {
-        self.frozen_mean_curvature_flow_with_limit(time_step, RealizationLimit::DEFAULT)
-    }
-
-    /// Admit a flow problem with an explicit target-realization budget.
-    ///
-    /// # Errors
-    /// Rejects invalid time, dimension, topology, boundary, or connectivity.
-    pub fn frozen_mean_curvature_flow_with_limit(
-        &self,
-        time_step: f64,
-        realization_limit: RealizationLimit,
-    ) -> Result<FlowProblem, SurfaceError> {
-        if !time_step.is_finite() || time_step <= 0.0 {
-            return Err(SurfaceError::TimeStep);
-        }
-        let realization = self.realization();
-        if realization.ambient_dimension() != 3 {
-            return Err(SurfaceError::AmbientDimension);
-        }
-        realization.topology().refine_triangle()?;
-        realization.topology().refine_oriented()?;
-        realization
-            .topology()
-            .refine_regular()?
-            .without_boundary()
-            .map_err(|_| SurfaceError::BoundaryPresent)?;
-        realization.topology().refine_connected()?;
-        Ok(FlowProblem {
-            metric: self.clone(),
-            time_step,
-            realization_limit,
-        })
     }
 }
 
@@ -412,6 +440,78 @@ impl TriangleSurface {
     /// Rejects a shape mismatch or nonfinite coefficient.
     pub fn face_vectors(&self, values: Vec<f64>) -> Result<FaceVectors, SurfaceError> {
         EntityVectors::admit(Arc::clone(&self.realization), Support::Face, values)
+    }
+
+    /// Compute the constant piecewise-affine scalar gradient on every face.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign, selected, or non-vertex cochain and unrepresentable arithmetic.
+    pub fn gradient(&self, source: &Binary64Cochain) -> Result<FaceVectors, SurfaceError> {
+        let expected = Binary64CochainSpace::full(Arc::clone(self.realization.topology()), 0)?;
+        if !expected.same_space(source.space()) {
+            return Err(SurfaceError::OwnerMismatch);
+        }
+        let mut values = Vec::with_capacity(3 * self.face_count());
+        for face in 0..self.face_count() {
+            let (vertices, rows, twice_area, scale) = self.local_differential_rows(face)?;
+            let base = source.coefficients()[vertices[0]];
+            let first = difference(source.coefficients()[vertices[1]], base)?;
+            let second = difference(source.coefficients()[vertices[2]], base)?;
+            for (&first_row, &second_row) in rows[1].iter().zip(&rows[2]) {
+                let first_gradient = first_row / twice_area / scale;
+                let second_gradient = second_row / twice_area / scale;
+                if !first_gradient.is_finite() || !second_gradient.is_finite() {
+                    return Err(SurfaceError::Unrepresentable);
+                }
+                values.push(product_sum([
+                    (first, first_gradient),
+                    (second, second_gradient),
+                ])?);
+            }
+        }
+        EntityVectors::admit(Arc::clone(&self.realization), Support::Face, values)
+    }
+
+    /// Compute the weak divergence load of one face-supported ambient vector field.
+    ///
+    /// The returned degree-zero chain is the negative adjoint of [`Self::gradient`].
+    /// On a surface with boundary this selects the natural no-flux boundary law.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a foreign or vertex-supported field and unrepresentable arithmetic.
+    pub fn divergence(&self, field: &FaceVectors) -> Result<Binary64Chain, SurfaceError> {
+        if !Arc::ptr_eq(field.realization(), &self.realization) {
+            return Err(SurfaceError::OwnerMismatch);
+        }
+        if !field.is_face_supported() {
+            return Err(SurfaceError::FieldShape);
+        }
+        let vertex_count = self.realization.topology().vertex_count();
+        let mut sums = vec![0.0; vertex_count];
+        let mut corrections = vec![0.0; vertex_count];
+        for face in 0..self.face_count() {
+            let (vertices, rows, _, scale) = self.local_differential_rows(face)?;
+            let vector = row3(field.values(), face)?;
+            for (vertex, row) in vertices.into_iter().zip(rows) {
+                let weighted = row.map(|value| 0.5 * scale * value);
+                if weighted.into_iter().any(|value| !value.is_finite()) {
+                    return Err(SurfaceError::Unrepresentable);
+                }
+                let contribution = -product_sum([
+                    (weighted[0], vector[0]),
+                    (weighted[1], vector[1]),
+                    (weighted[2], vector[2]),
+                ])?;
+                compensated_add(&mut sums[vertex], &mut corrections[vertex], contribution)?;
+            }
+        }
+        for (sum, correction) in sums.iter_mut().zip(corrections) {
+            *sum = product_sum([(*sum, 1.0), (correction, 1.0)])?;
+        }
+        let space = Binary64ChainSpace::full(Arc::clone(self.realization.topology()), 0)?;
+        Binary64Element::admit(space, sums).map_err(|_| SurfaceError::Unrepresentable)
     }
 
     /// Borrow the first canonical tangent axis for every face.
@@ -782,6 +882,134 @@ impl TriangleSurface {
     fn point(&self, vertex: usize) -> Result<[f64; 3], SurfaceError> {
         row3(self.realization.positions(), vertex)
     }
+
+    fn local_differential_rows(&self, face: usize) -> Result<LocalDifferentialRows, SurfaceError> {
+        let vertices: [usize; 3] = self
+            .realization
+            .topology()
+            .basis(2)?
+            .row(face)
+            .and_then(|row| row.try_into().ok())
+            .ok_or(SurfaceError::IndexOutside)?;
+        let points = self.face_points(face)?;
+        let first = subtract(points[1], points[0]);
+        let second = subtract(points[2], points[0]);
+        let scale = first
+            .into_iter()
+            .chain(second)
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max);
+        if scale == 0.0 || !scale.is_finite() {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        let first = first.map(|value| value / scale);
+        let second = second.map(|value| value / scale);
+        let area_vector = cross(first, second);
+        let twice_area = norm(area_vector);
+        if twice_area == 0.0 || !twice_area.is_finite() {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        let normal = area_vector.map(|value| value / twice_area);
+        let rows = [
+            cross(normal, subtract(second, first)),
+            cross(normal, second.map(|value| -value)),
+            cross(normal, first),
+        ];
+        Ok((vertices, rows, twice_area, scale))
+    }
+
+    /// Construct the dimensionless complex LSCM row in the admitted face orientation.
+    pub(crate) fn oriented_local_conformal_coefficients(
+        &self,
+        face: usize,
+    ) -> Result<LocalConformalCoefficients, SurfaceError> {
+        let canonical: [usize; 3] = self
+            .realization
+            .topology()
+            .basis(2)?
+            .row(face)
+            .and_then(|row| row.try_into().ok())
+            .ok_or(SurfaceError::IndexOutside)?;
+        let orientation = *self
+            .realization
+            .topology()
+            .orientation(2)?
+            .get(face)
+            .ok_or(SurfaceError::IndexOutside)?;
+        let vertices = if orientation < 0 {
+            [canonical[0], canonical[2], canonical[1]]
+        } else {
+            canonical
+        };
+        let points = [
+            self.point(vertices[0])?,
+            self.point(vertices[1])?,
+            self.point(vertices[2])?,
+        ];
+        let first = subtract(points[1], points[0]);
+        let second = subtract(points[2], points[0]);
+        let scale = first
+            .into_iter()
+            .chain(second)
+            .map(f64::abs)
+            .fold(0.0_f64, f64::max);
+        if scale == 0.0 || !scale.is_finite() {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        let first = first.map(|value| value / scale);
+        let second = second.map(|value| value / scale);
+        let first_length = norm(first);
+        let twice_area = norm(cross(first, second));
+        if first_length == 0.0
+            || twice_area == 0.0
+            || !first_length.is_finite()
+            || !twice_area.is_finite()
+        {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        let x2 = dot(first, second) / first_length;
+        let y2 = twice_area / first_length;
+        let divisor = twice_area.sqrt();
+        let coefficients = [
+            [(x2 - first_length) / divisor, y2 / divisor],
+            [-x2 / divisor, -y2 / divisor],
+            [first_length / divisor, 0.0],
+        ];
+        coefficients
+            .into_iter()
+            .flatten()
+            .all(f64::is_finite)
+            .then_some((vertices, coefficients))
+            .ok_or(SurfaceError::Unrepresentable)
+    }
+}
+
+fn difference(left: f64, right: f64) -> Result<f64, SurfaceError> {
+    product_sum([(left, 1.0), (right, -1.0)])
+}
+
+fn product_sum<const N: usize>(terms: [(f64, f64); N]) -> Result<f64, SurfaceError> {
+    adaptive_product_value(terms.into_iter())
+        .map(|(value, _)| value)
+        .ok_or(SurfaceError::Unrepresentable)
+}
+
+fn compensated_add(sum: &mut f64, correction: &mut f64, value: f64) -> Result<(), SurfaceError> {
+    let combined = *sum + value;
+    if !combined.is_finite() {
+        return Err(SurfaceError::Unrepresentable);
+    }
+    let error = if sum.abs() >= value.abs() {
+        (*sum - combined) + value
+    } else {
+        (value - combined) + *sum
+    };
+    *correction += error;
+    if !correction.is_finite() {
+        return Err(SurfaceError::Unrepresentable);
+    }
+    *sum = combined;
+    Ok(())
 }
 
 fn add_row(values: &mut [f64], row: usize, contribution: [f64; 3]) -> Result<(), SurfaceError> {

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use num_bigint::BigInt;
 
 use crate::coefficient::{
-    BigIntEncoding, CoefficientSystem, ExactRational, IntegerRing, RationalField,
-    ReducedFractionEncoding, Ring, RingMorphism, ValueEncoding,
+    BigIntEncoding, CoefficientSystem, CommutativeRing, ExactRational, Field, IntegerRing,
+    RationalField, ReducedFractionEncoding, Ring, RingMorphism, ValueEncoding,
 };
 use crate::correspondence::SignedPermutation;
 use crate::incidence::{DisjointSet, try_filled};
@@ -115,7 +115,7 @@ impl ChainDomain {
         }
     }
 
-    const fn simplicial_owner(&self) -> Option<&Arc<ComplexCore>> {
+    pub(crate) const fn simplicial_owner(&self) -> Option<&Arc<ComplexCore>> {
         match self {
             Self::Simplicial(owner) => Some(owner),
             Self::Halfedge(_) => None,
@@ -713,6 +713,12 @@ pub enum ChainError {
     BasisIndexOutside { index: usize, bound: usize },
     /// Values do not inhabit the same owner-, degree-, and coefficient-bound module.
     SpaceMismatch,
+    /// An operation requiring canonical simplices received another chain domain.
+    NotSimplicial,
+    /// An operation requiring division received coefficients that form only a ring.
+    CoefficientFieldRequired,
+    /// The wedge averaging factor is not invertible in the coefficient field.
+    NormalizationNotInvertible,
     /// A retained topology recipe became unavailable after admission.
     Topology(TopologyError),
 }
@@ -724,6 +730,9 @@ impl ChainError {
         match self {
             Self::BasisIndexOutside { .. } => "basis_index_outside",
             Self::SpaceMismatch => "space_mismatch",
+            Self::NotSimplicial => "not_simplicial",
+            Self::CoefficientFieldRequired => "coefficient_field_required",
+            Self::NormalizationNotInvertible => "normalization_not_invertible",
             Self::Topology(error) => error.reason(),
         }
     }
@@ -733,7 +742,11 @@ impl ChainError {
     pub const fn index(self) -> Option<usize> {
         match self {
             Self::BasisIndexOutside { index, .. } => Some(index),
-            Self::SpaceMismatch | Self::Topology(_) => None,
+            Self::SpaceMismatch
+            | Self::NotSimplicial
+            | Self::CoefficientFieldRequired
+            | Self::NormalizationNotInvertible
+            | Self::Topology(_) => None,
         }
     }
 
@@ -742,7 +755,11 @@ impl ChainError {
     pub const fn bound(self) -> Option<usize> {
         match self {
             Self::BasisIndexOutside { bound, .. } => Some(bound),
-            Self::SpaceMismatch | Self::Topology(_) => None,
+            Self::SpaceMismatch
+            | Self::NotSimplicial
+            | Self::CoefficientFieldRequired
+            | Self::NormalizationNotInvertible
+            | Self::Topology(_) => None,
         }
     }
 }
@@ -754,6 +771,15 @@ impl std::fmt::Display for ChainError {
                 write!(formatter, "basis index {index} is outside rank {bound}")
             }
             Self::SpaceMismatch => formatter.write_str("values belong to different exact spaces"),
+            Self::NotSimplicial => {
+                formatter.write_str("operation requires a canonical simplicial complex")
+            }
+            Self::CoefficientFieldRequired => {
+                formatter.write_str("operation requires field coefficients")
+            }
+            Self::NormalizationNotInvertible => {
+                formatter.write_str("wedge normalization is not invertible in this field")
+            }
             Self::Topology(error) => std::fmt::Display::fmt(error, formatter),
         }
     }
@@ -2262,6 +2288,343 @@ where
             }
         }
         Ok(result)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OrientedFacePair {
+    pub(crate) left: usize,
+    pub(crate) right: usize,
+    pub(crate) sign: i8,
+}
+
+fn cup_face_pair(
+    owner: &ComplexCore,
+    left_degree: usize,
+    target_degree: usize,
+    target_index: usize,
+) -> Result<OrientedFacePair, TopologyError> {
+    let target_basis = owner.basis(target_degree)?;
+    let simplex = target_basis
+        .row(target_index)
+        .ok_or(TopologyError::InternalInvariant)?;
+    let left = owner
+        .basis(left_degree)?
+        .binary_search(&simplex[..=left_degree])?;
+    let right_degree = target_degree
+        .checked_sub(left_degree)
+        .ok_or(TopologyError::InternalInvariant)?;
+    let right = owner
+        .basis(right_degree)?
+        .binary_search(&simplex[left_degree..])?;
+    let sign = owner.orientation(target_degree)?[target_index]
+        * owner.orientation(left_degree)?[left]
+        * owner.orientation(right_degree)?[right];
+    Ok(OrientedFacePair { left, right, sign })
+}
+
+fn visit_combinations(
+    values: &[usize],
+    choose: usize,
+    start: usize,
+    chosen: &mut Vec<usize>,
+    visit: &mut impl FnMut(&[usize]) -> Result<(), TopologyError>,
+) -> Result<(), TopologyError> {
+    if chosen.len() == choose {
+        return visit(chosen);
+    }
+    let needed = choose - chosen.len();
+    let final_start = values
+        .len()
+        .checked_sub(needed)
+        .ok_or(TopologyError::InternalInvariant)?;
+    for position in start..=final_start {
+        chosen.push(values[position]);
+        visit_combinations(values, choose, position + 1, chosen, visit)?;
+        chosen.pop();
+    }
+    Ok(())
+}
+
+pub(crate) fn wedge_normalization(
+    left_degree: usize,
+    right_degree: usize,
+) -> Result<i64, TopologyError> {
+    let target_degree = left_degree
+        .checked_add(right_degree)
+        .ok_or(TopologyError::CountOverflow)?;
+    let mut binomial = 1_u128;
+    let choose = left_degree.min(right_degree);
+    for step in 0..choose {
+        binomial = binomial
+            .checked_mul(
+                u128::try_from(target_degree - step).map_err(|_| TopologyError::CountOverflow)?,
+            )
+            .ok_or(TopologyError::CountOverflow)?
+            / u128::try_from(step + 1).map_err(|_| TopologyError::CountOverflow)?;
+    }
+    let count = u128::try_from(target_degree + 1)
+        .map_err(|_| TopologyError::CountOverflow)?
+        .checked_mul(binomial)
+        .ok_or(TopologyError::CountOverflow)?;
+    i64::try_from(count).map_err(|_| TopologyError::CountOverflow)
+}
+
+pub(crate) fn visit_wedge_face_pairs(
+    owner: &ComplexCore,
+    left_degree: usize,
+    right_degree: usize,
+    mut visit: impl FnMut(usize, OrientedFacePair),
+) -> Result<(), TopologyError> {
+    let target_degree = left_degree
+        .checked_add(right_degree)
+        .ok_or(TopologyError::CountOverflow)?;
+    let target_basis = owner.basis(target_degree)?;
+    let left_basis = owner.basis(left_degree)?;
+    let right_basis = owner.basis(right_degree)?;
+    let target_orientations = owner.orientation(target_degree)?;
+    let left_orientations = owner.orientation(left_degree)?;
+    let right_orientations = owner.orientation(right_degree)?;
+    let mut remaining = Vec::new();
+    let mut chosen = Vec::new();
+    let mut left_vertices = Vec::new();
+    let mut right_vertices = Vec::new();
+    let mut in_left = Vec::new();
+    remaining
+        .try_reserve_exact(target_degree)
+        .map_err(|_| TopologyError::Allocation)?;
+    chosen
+        .try_reserve_exact(left_degree)
+        .map_err(|_| TopologyError::Allocation)?;
+    left_vertices
+        .try_reserve_exact(left_degree + 1)
+        .map_err(|_| TopologyError::Allocation)?;
+    right_vertices
+        .try_reserve_exact(right_degree + 1)
+        .map_err(|_| TopologyError::Allocation)?;
+    in_left
+        .try_reserve_exact(target_degree + 1)
+        .map_err(|_| TopologyError::Allocation)?;
+    in_left.resize(target_degree + 1, false);
+
+    for (target_index, &target_orientation) in target_orientations.iter().enumerate() {
+        let simplex = target_basis
+            .row(target_index)
+            .ok_or(TopologyError::InternalInvariant)?;
+        for shared in 0..=target_degree {
+            remaining.clear();
+            remaining.extend((0..=target_degree).filter(|&position| position != shared));
+            chosen.clear();
+            visit_combinations(
+                &remaining,
+                left_degree,
+                0,
+                &mut chosen,
+                &mut |left_positions| {
+                    in_left.fill(false);
+                    in_left[shared] = true;
+                    for &position in left_positions {
+                        in_left[position] = true;
+                    }
+                    left_vertices.clear();
+                    right_vertices.clear();
+                    for (position, &vertex) in simplex.iter().enumerate() {
+                        if in_left[position] {
+                            left_vertices.push(vertex);
+                        }
+                        if position == shared || !in_left[position] {
+                            right_vertices.push(vertex);
+                        }
+                    }
+                    let left = left_basis.binary_search(&left_vertices)?;
+                    let right = right_basis.binary_search(&right_vertices)?;
+                    let inversions = left_positions
+                        .iter()
+                        .map(|&left_position| {
+                            remaining
+                                .iter()
+                                .filter(|&&right_position| {
+                                    !in_left[right_position] && left_position > right_position
+                                })
+                                .count()
+                        })
+                        .sum::<usize>();
+                    let shuffle_sign = if inversions % 2 == 0 { 1 } else { -1 };
+                    visit(
+                        target_index,
+                        OrientedFacePair {
+                            left,
+                            right,
+                            sign: target_orientation
+                                * left_orientations[left]
+                                * right_orientations[right]
+                                * shuffle_sign,
+                        },
+                    );
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+impl<A, E> Element<A, Cochain, E>
+where
+    A: CommutativeRing,
+    E: ValueEncoding<A>,
+{
+    /// Form the exact Alexander--Whitney cup product on canonical simplices.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign coefficient/topology owners, nonsimplicial domains,
+    /// unavailable retained topology, allocation failure, or degree overflow.
+    pub fn cup(&self, other: &Self) -> Result<Self, ChainError> {
+        if !self.space.complex.same_owner(&other.space.complex) {
+            return Err(ChainError::SpaceMismatch);
+        }
+        let complex = &self.space.complex;
+        let owner = complex
+            .domain
+            .simplicial_owner()
+            .ok_or(ChainError::NotSimplicial)?;
+        let target_degree = self
+            .degree()
+            .checked_add(other.degree())
+            .ok_or(TopologyError::CountOverflow)?;
+        let target = match usize::try_from(target_degree) {
+            Ok(degree) if degree <= complex.dimension() => Space::derive(complex, degree)?,
+            _ => Space::zero(complex, target_degree),
+        };
+        if self.basis_size() == 0 || other.basis_size() == 0 || target.basis_size() == 0 {
+            return Ok(Self::empty(&target));
+        }
+
+        let left_degree =
+            usize::try_from(self.degree()).map_err(|_| TopologyError::CountOverflow)?;
+        let target_degree =
+            usize::try_from(target_degree).map_err(|_| TopologyError::CountOverflow)?;
+        let target_basis = owner.basis(target_degree)?;
+        let mut indices = Vec::new();
+        let mut coefficients = Vec::new();
+        indices
+            .try_reserve_exact(target_basis.row_count())
+            .map_err(|_| TopologyError::Allocation)?;
+        coefficients
+            .try_reserve_exact(target_basis.row_count())
+            .map_err(|_| TopologyError::Allocation)?;
+        let algebra = complex.coefficient_system();
+
+        for target_index in 0..target_basis.row_count() {
+            let pair = cup_face_pair(owner, left_degree, target_degree, target_index)?;
+            let Ok(left_position) = self.indices().binary_search(&pair.left) else {
+                continue;
+            };
+            let Ok(right_position) = other.indices().binary_search(&pair.right) else {
+                continue;
+            };
+            let mut product = algebra.multiply(
+                E::element(&self.coefficients()[left_position]),
+                E::element(&other.coefficients()[right_position]),
+            );
+            if pair.sign < 0 {
+                product = algebra.negate(&product);
+            }
+            if !algebra.is_zero(&product) {
+                indices.push(target_index);
+                coefficients.push(E::encode(product));
+            }
+        }
+        Ok(Self::from_canonical(&target, indices, coefficients))
+    }
+}
+
+impl<A, E> Element<A, Cochain, E>
+where
+    A: Field,
+    E: ValueEncoding<A>,
+{
+    /// Form the exact antisymmetrized simplicial wedge product.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign owners, nonsimplicial domains, unavailable topology,
+    /// degree overflow, allocation failure, or a noninvertible averaging factor.
+    pub fn wedge(&self, other: &Self) -> Result<Self, ChainError> {
+        if !self.space.complex.same_owner(&other.space.complex) {
+            return Err(ChainError::SpaceMismatch);
+        }
+        let complex = &self.space.complex;
+        let owner = complex
+            .domain
+            .simplicial_owner()
+            .ok_or(ChainError::NotSimplicial)?;
+        let target_degree = self
+            .degree()
+            .checked_add(other.degree())
+            .ok_or(TopologyError::CountOverflow)?;
+        let target = match usize::try_from(target_degree) {
+            Ok(degree) if degree <= complex.dimension() => Space::derive(complex, degree)?,
+            _ => Space::zero(complex, target_degree),
+        };
+        if self.basis_size() == 0 || other.basis_size() == 0 || target.basis_size() == 0 {
+            return Ok(Self::empty(&target));
+        }
+
+        let left_degree =
+            usize::try_from(self.degree()).map_err(|_| TopologyError::CountOverflow)?;
+        let right_degree =
+            usize::try_from(other.degree()).map_err(|_| TopologyError::CountOverflow)?;
+        let normalization = wedge_normalization(left_degree, right_degree)?;
+        let algebra = complex.coefficient_system();
+        let inverse = algebra
+            .inverse(&algebra.lift_i64(normalization))
+            .ok_or(ChainError::NormalizationNotInvertible)?;
+        let mut indices = Vec::new();
+        let mut coefficients = Vec::new();
+        indices
+            .try_reserve_exact(target.basis_size())
+            .map_err(|_| TopologyError::Allocation)?;
+        coefficients
+            .try_reserve_exact(target.basis_size())
+            .map_err(|_| TopologyError::Allocation)?;
+        let mut current_target = None;
+        let mut sum = algebra.zero();
+        let mut finish = |target_index: usize, sum: &A::Element| {
+            let value = algebra.multiply(sum, &inverse);
+            if !algebra.is_zero(&value) {
+                indices.push(target_index);
+                coefficients.push(E::encode(value));
+            }
+        };
+        visit_wedge_face_pairs(owner, left_degree, right_degree, |target_index, pair| {
+            if current_target != Some(target_index) {
+                if let Some(previous) = current_target {
+                    finish(previous, &sum);
+                }
+                current_target = Some(target_index);
+                sum = algebra.zero();
+            }
+            let Ok(left_position) = self.indices().binary_search(&pair.left) else {
+                return;
+            };
+            let Ok(right_position) = other.indices().binary_search(&pair.right) else {
+                return;
+            };
+            let mut product = algebra.multiply(
+                E::element(&self.coefficients()[left_position]),
+                E::element(&other.coefficients()[right_position]),
+            );
+            if pair.sign < 0 {
+                product = algebra.negate(&product);
+            }
+            algebra.add_assign(&mut sum, &product);
+        })?;
+        if let Some(last) = current_target {
+            finish(last, &sum);
+        }
+        Ok(Self::from_canonical(&target, indices, coefficients))
     }
 }
 

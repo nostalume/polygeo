@@ -27,7 +27,7 @@ fn analyze(
     degrees: impl IntoIterator<Item = usize>,
 ) -> (IntegralChainComplex, IntegralHomology) {
     let chain = owner.chain_complex();
-    let homology = IntegralHomology::prepare(&chain, degrees, HomologyLimit::DEFAULT).unwrap();
+    let homology = IntegralHomology::analyze(&chain, degrees, HomologyLimit::DEFAULT).unwrap();
     (chain, homology)
 }
 
@@ -152,7 +152,7 @@ fn sphere_and_projective_plane_preserve_exact_representative_relations() {
 #[test]
 fn invalid_degree_and_each_semantic_ceiling_fail_before_publication() {
     let chain = complex(&[&[0, 1], &[1, 2], &[0, 2]]).chain_complex();
-    let invalid = IntegralHomology::prepare(&chain, [2], HomologyLimit::DEFAULT).unwrap_err();
+    let invalid = IntegralHomology::analyze(&chain, [2], HomologyLimit::DEFAULT).unwrap_err();
     assert_eq!(invalid.reason(), "degree_outside");
 
     let defaults = HomologyLimit::DEFAULT;
@@ -174,7 +174,7 @@ fn invalid_degree_and_each_semantic_ceiling_fail_before_publication() {
         (defaults.with_coefficient_bits(0), "coefficient_bits"),
         (defaults.with_smith_steps(WorkLimit::new(0)), "smith_steps"),
     ] {
-        let error = IntegralHomology::prepare(&chain, [0, 1], limit).unwrap_err();
+        let error = IntegralHomology::analyze(&chain, [0, 1], limit).unwrap_err();
         assert_eq!(error.reason(), "resource_limit");
         let (actual_axis, required, admitted) = error.resource_limit().unwrap();
         assert_eq!(actual_axis, axis);
@@ -198,10 +198,10 @@ fn representatives_remain_bound_to_the_analyzed_owner() {
 }
 
 #[test]
-fn prepared_rows_are_stable_and_transport_across_checked_correspondences() {
+fn analysis_rows_are_stable_and_transport_across_checked_correspondences() {
     let source = tetrahedron();
     let source_chain = source.chain_complex();
-    let analysis = IntegralHomology::prepare(&source_chain, 0..=2, HomologyLimit::DEFAULT).unwrap();
+    let analysis = IntegralHomology::analyze(&source_chain, 0..=2, HomologyLimit::DEFAULT).unwrap();
     assert!(std::ptr::eq(
         analysis.group(2).unwrap().free_cycle(0).unwrap(),
         analysis.group(2).unwrap().free_cycle(0).unwrap(),
@@ -249,7 +249,7 @@ fn transport_rejects_foreign_sources_and_exhausted_smith_steps() {
     let (surface, relation) = HalfedgeSurfaceCore::from_complex(&source).unwrap();
     let source_chain = source.chain_complex();
     let analysis =
-        IntegralHomology::prepare(&source_chain, [0, 1, 2], HomologyLimit::DEFAULT).unwrap();
+        IntegralHomology::analyze(&source_chain, [0, 1, 2], HomologyLimit::DEFAULT).unwrap();
 
     let foreign = tetrahedron();
     let (_, foreign_relation) = HalfedgeSurfaceCore::from_complex(&foreign).unwrap();

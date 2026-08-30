@@ -9,13 +9,64 @@ use polygeo_core::ExactRational;
 use polygeo_core::{
     BigIntEncoding, CandidateInput, CoefficientSlice, CoefficientSystem, ComplexCore,
     CsrBuildLimit, CsrRepresentation, EuclideanDomain, Field, FractionField, FractionFieldOf,
-    HalfedgeSurfaceCore, IntegerRing, PresentationError, RationalField, ReducedFractionEncoding,
-    Ring, RingMorphism, WorkLimit, compose,
+    HalfedgeSurfaceCore, IntegerRing, IntegralChainComplex, IntegralCochain, PresentationError,
+    RationalField, ReducedFractionEncoding, Ring, RingMorphism, WorkLimit, compose,
 };
 
 fn triangle() -> Arc<ComplexCore> {
     let candidate = CandidateInput::signed([0_i64, 1, 2], 1, 3, Some(3)).unwrap();
     ComplexCore::admit(candidate).unwrap()
+}
+
+fn reversed_triangle() -> Arc<ComplexCore> {
+    let candidate = CandidateInput::signed([0_i64, 2, 1], 1, 3, Some(3)).unwrap();
+    ComplexCore::admit(candidate).unwrap()
+}
+
+fn integral_cochain(
+    complex: &IntegralChainComplex,
+    degree: usize,
+    entries: impl IntoIterator<Item = (usize, i64)>,
+) -> IntegralCochain {
+    complex
+        .dual()
+        .space(degree)
+        .unwrap()
+        .element(
+            entries
+                .into_iter()
+                .map(|(index, value)| (index, BigInt::from(value))),
+        )
+        .unwrap()
+}
+
+fn add_integral(
+    left: &IntegralCochain,
+    right: &IntegralCochain,
+    right_sign: i64,
+) -> IntegralCochain {
+    assert!(left.space().same_based_space(right.space()));
+    left.space()
+        .element(
+            left.indices()
+                .iter()
+                .copied()
+                .zip(left.coefficients().iter().cloned())
+                .chain(
+                    right
+                        .indices()
+                        .iter()
+                        .copied()
+                        .zip(right.coefficients().iter().map(|value| {
+                            if right_sign < 0 {
+                                -value
+                            } else {
+                                value.clone()
+                            }
+                        })),
+                ),
+        )
+        .unwrap()
 }
 
 fn simplex(dimension: usize) -> Arc<ComplexCore> {
@@ -474,6 +525,179 @@ fn algebraic_dual_reverses_arrows_and_satisfies_the_pairing_law() {
     assert_eq!(above_top.degree(), 3);
     assert_eq!(above_top.basis_size(), 0);
     assert!(above_top.indices().is_empty());
+}
+
+#[test]
+fn simplicial_cup_product_uses_canonical_front_and_back_faces() {
+    let complex = triangle().chain_complex();
+    let alpha = integral_cochain(&complex, 1, [(0, 2)]);
+    let beta = integral_cochain(&complex, 1, [(2, 3)]);
+
+    let product = alpha.cup(&beta).unwrap();
+
+    assert_eq!(product.degree(), 2);
+    assert_eq!(product.indices(), &[0]);
+    assert_eq!(product.coefficients(), &[BigInt::from(6)]);
+    assert!(beta.cup(&alpha).unwrap().indices().is_empty());
+}
+
+#[test]
+fn rational_wedge_averages_oriented_face_pairs() {
+    let complex = triangle().chain_complex();
+    let rationals = RationalField::new(IntegerRing);
+    let function = integral_cochain(&complex, 0, [(0, 2), (1, 4)]).over(rationals);
+    let one_form = integral_cochain(&complex, 1, [(0, 3)]).over(rationals);
+
+    let product = function.wedge(&one_form).unwrap();
+
+    assert_eq!(product.degree(), 1);
+    assert_eq!(product.indices(), &[0]);
+    assert_eq!(
+        product.coefficients(),
+        &[ExactRational::from_integer(9.into())]
+    );
+}
+
+#[test]
+fn cup_product_respects_orientation_units_associativity_and_bilinearity() {
+    let reversed = reversed_triangle().chain_complex();
+    let alpha = integral_cochain(&reversed, 1, [(0, 2)]);
+    let beta = integral_cochain(&reversed, 1, [(2, 3)]);
+    assert_eq!(
+        alpha.cup(&beta).unwrap().coefficients(),
+        &[BigInt::from(-6)]
+    );
+    let unit = integral_cochain(&reversed, 0, (0..3).map(|index| (index, 1)));
+    let top = integral_cochain(&reversed, 2, [(0, 7)]);
+    assert_eq!(
+        unit.cup(&alpha).unwrap().coefficients(),
+        alpha.coefficients()
+    );
+    assert_eq!(
+        alpha.cup(&unit).unwrap().coefficients(),
+        alpha.coefficients()
+    );
+    assert_eq!(unit.cup(&top).unwrap().coefficients(), top.coefficients());
+    assert_eq!(top.cup(&unit).unwrap().coefficients(), top.coefficients());
+
+    let tetrahedron = simplex(3).chain_complex();
+    let first = integral_cochain(&tetrahedron, 1, [(0, 2)]);
+    let second = integral_cochain(&tetrahedron, 1, [(3, 3)]);
+    let third = integral_cochain(&tetrahedron, 1, [(5, 5)]);
+    let associated_left = first.cup(&second).unwrap().cup(&third).unwrap();
+    let associated_right = first.cup(&second.cup(&third).unwrap()).unwrap();
+    assert_eq!(associated_left.indices(), associated_right.indices());
+    assert_eq!(associated_left.coefficients(), &[BigInt::from(30)]);
+    assert_eq!(
+        associated_left.coefficients(),
+        associated_right.coefficients()
+    );
+
+    let first_extra = integral_cochain(&tetrahedron, 1, [(1, 11)]);
+    let sum = add_integral(&first, &first_extra, 1);
+    let distributed_left = sum.cup(&second).unwrap();
+    let distributed_right = add_integral(
+        &first.cup(&second).unwrap(),
+        &first_extra.cup(&second).unwrap(),
+        1,
+    );
+    assert_eq!(distributed_left.indices(), distributed_right.indices());
+    assert_eq!(
+        distributed_left.coefficients(),
+        distributed_right.coefficients()
+    );
+
+    let second_extra = integral_cochain(&tetrahedron, 1, [(4, 13)]);
+    let right_sum = add_integral(&second, &second_extra, 1);
+    let right_distributed_left = first.cup(&right_sum).unwrap();
+    let right_distributed_right = add_integral(
+        &first.cup(&second).unwrap(),
+        &first.cup(&second_extra).unwrap(),
+        1,
+    );
+    assert_eq!(
+        right_distributed_left.indices(),
+        right_distributed_right.indices()
+    );
+    assert_eq!(
+        right_distributed_left.coefficients(),
+        right_distributed_right.coefficients()
+    );
+}
+
+#[test]
+fn cup_product_satisfies_leibniz_and_exact_rational_arithmetic() {
+    let complex = triangle().chain_complex();
+    let cochains = complex.dual();
+    let alpha = integral_cochain(&complex, 1, [(0, 2), (1, -5)]);
+    let beta = integral_cochain(&complex, 0, [(0, 3), (2, 7)]);
+    let left = cochains
+        .coboundary(1)
+        .unwrap()
+        .apply(&alpha.cup(&beta).unwrap())
+        .unwrap();
+    let right_first = cochains
+        .coboundary(1)
+        .unwrap()
+        .apply(&alpha)
+        .unwrap()
+        .cup(&beta)
+        .unwrap();
+    let right_second = alpha
+        .cup(&cochains.coboundary(0).unwrap().apply(&beta).unwrap())
+        .unwrap();
+    let right = add_integral(&right_first, &right_second, -1);
+    assert_eq!(left.indices(), right.indices());
+    assert_eq!(left.coefficients(), right.coefficients());
+
+    let rationals = RationalField::new(IntegerRing);
+    let rational_alpha = alpha.over(rationals);
+    let rational_beta = integral_cochain(&complex, 1, [(2, 3)]).over(rationals);
+    let rational_product = rational_alpha.cup(&rational_beta).unwrap();
+    assert_eq!(
+        rational_product.coefficients(),
+        &[ExactRational::from_integer(BigInt::from(6))]
+    );
+}
+
+#[test]
+fn cup_product_preserves_endpoint_spaces_and_rejects_wrong_owners() {
+    let complex = triangle().chain_complex();
+    let cochains = complex.dual();
+    let top = integral_cochain(&complex, 2, [(0, 1)]);
+    let above = cochains.coboundary(2).unwrap().apply(&top).unwrap();
+    let vertex = integral_cochain(&complex, 0, [(0, 1)]);
+    let above_product = above.cup(&vertex).unwrap();
+    assert_eq!(above_product.degree(), 3);
+    assert_eq!(above_product.basis_size(), 0);
+    assert!(above_product.indices().is_empty());
+
+    let below_space = complex.boundary(0).unwrap().dual().source().clone();
+    let below = below_space.element(std::iter::empty()).unwrap();
+    let edge = integral_cochain(&complex, 1, [(0, 1)]);
+    let below_product = below.cup(&edge).unwrap();
+    assert_eq!(below_product.degree(), 0);
+    assert_eq!(below_product.basis_size(), 3);
+    assert!(below_product.indices().is_empty());
+
+    let foreign = triangle().chain_complex();
+    let foreign_edge = integral_cochain(&foreign, 1, [(0, 1)]);
+    assert_eq!(
+        edge.cup(&foreign_edge).unwrap_err().reason(),
+        "space_mismatch"
+    );
+
+    let halfedge = HalfedgeSurfaceCore::admit(common::polygon_disk(3))
+        .unwrap()
+        .chain_complex();
+    let halfedge_cochain = integral_cochain(&halfedge, 1, [(0, 1)]);
+    assert_eq!(
+        halfedge_cochain
+            .cup(&halfedge_cochain)
+            .unwrap_err()
+            .reason(),
+        "not_simplicial"
+    );
 }
 
 #[test]

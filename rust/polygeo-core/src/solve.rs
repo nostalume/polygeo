@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering as CmpOrdering,
     marker::PhantomData,
     mem::size_of,
     num::NonZeroUsize,
@@ -14,7 +15,7 @@ use faer::{
     linalg::cholesky::llt::{self, factor::LltRegularization},
     linalg::householder,
     linalg::lu::partial_pivoting::{factor as lu_factor, solve as lu_solve},
-    linalg::qr::col_pivoting::factor as qr_factor,
+    linalg::qr::col_pivoting::{factor as qr_factor, solve as qr_solve},
     perm::PermRef,
     sparse::{
         CreationError, FaerError, SparseColMat, Triplet,
@@ -27,12 +28,14 @@ use faer::{
 use num_traits::ToPrimitive;
 
 use crate::incidence::{IncidenceAxis, independent_incidence};
-use crate::problem::adaptive_product_value;
+use crate::problem::{adaptive_product_sign, adaptive_product_sum, adaptive_product_value};
 use crate::{
     Binary64Cochain, Binary64Element, CanonicalSelection, Cochain, DirichletEvidence,
-    DirichletProblem, DirichletSolution, FlowEvidence, FlowProblem, FlowStep, HarmonicExtension,
-    HodgeDecomposition, HodgeProblem, LinearOperator, MeanZeroPoisson, NondegenerateCapability,
-    PairingCapability, PoissonSolution, Problem, StorageLimit, WorkLimit,
+    DirichletProblem, DirichletSolution, EuclideanRealization, FlowEvidence, FlowStep,
+    HarmonicExtension, HeatProblem, HeatSolution, HodgeDecomposition, HodgeProblem,
+    LeastSquaresConformalMapEvidence, LeastSquaresConformalMapSolution, LinearOperator,
+    MeanZeroPoisson, NondegenerateCapability, PairingCapability, PoissonSolution, Problem,
+    RealizationError, RealizationLimit, StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
 };
 
 type EdgeEndpoints = [(usize, i64); 2];
@@ -113,6 +116,55 @@ impl std::fmt::Display for SolveError {
 }
 impl std::error::Error for SolveError {}
 
+/// Failure while admitting or executing one direct surface computation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SurfaceComputationError {
+    Surface(SurfaceError),
+    Solve(SolveError),
+}
+
+impl SurfaceComputationError {
+    #[must_use]
+    pub const fn surface(self) -> Option<SurfaceError> {
+        match self {
+            Self::Surface(error) => Some(error),
+            Self::Solve(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn solve(self) -> Option<SolveError> {
+        match self {
+            Self::Surface(_) => None,
+            Self::Solve(error) => Some(error),
+        }
+    }
+}
+
+impl std::fmt::Display for SurfaceComputationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Surface(error) => error.fmt(formatter),
+            Self::Solve(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for SurfaceComputationError {}
+
+impl From<SurfaceError> for SurfaceComputationError {
+    fn from(error: SurfaceError) -> Self {
+        Self::Surface(error)
+    }
+}
+
+impl From<SolveError> for SurfaceComputationError {
+    fn from(error: SolveError) -> Self {
+        Self::Solve(error)
+    }
+}
+
 #[derive(Debug)]
 enum Factor {
     Analytic,
@@ -177,7 +229,7 @@ enum ReuseKey {
         owner: Arc<crate::EuclideanRealization>,
         degree: usize,
     },
-    Flow {
+    Parabolic {
         owner: Arc<crate::EuclideanRealization>,
         time_step_bits: u64,
     },
@@ -188,7 +240,7 @@ enum SystemRef<'a> {
     PositiveSquare {
         metric: &'a crate::PositiveMetric,
     },
-    Flow {
+    Parabolic {
         metric: &'a crate::PositiveMetric,
         time_step: f64,
     },
@@ -197,14 +249,14 @@ enum SystemRef<'a> {
 impl<'a> SystemRef<'a> {
     const fn metric(self) -> &'a crate::PositiveMetric {
         match self {
-            Self::PositiveSquare { metric } | Self::Flow { metric, .. } => metric,
+            Self::PositiveSquare { metric } | Self::Parabolic { metric, .. } => metric,
         }
     }
 
     fn mass_and_stiffness_scale(self) -> Result<(Option<&'a [f64]>, f64), SolveError> {
         match self {
             Self::PositiveSquare { .. } => Ok((None, 1.0)),
-            Self::Flow { metric, time_step } => Ok((
+            Self::Parabolic { metric, time_step } => Ok((
                 Some(
                     metric
                         .hodge_coefficients_slice(0)
@@ -381,7 +433,7 @@ impl Prepared<MeanZeroPoisson> {
         if !stack.can_hold(requirement) {
             return Err(SolveError::ResourceLimit);
         }
-        let n = problem.density().coefficients().len();
+        let n = problem.len();
         require_work(work, solve_work(problem)?)?;
         let weights = problem
             .metric()
@@ -393,7 +445,10 @@ impl Prepared<MeanZeroPoisson> {
         let (mut rhs_storage, stack) = stack.make_with(reduced, |_| 0.0_f64);
         let mut rhs = MatMut::from_column_major_slice_mut(&mut rhs_storage, reduced, 1);
         for index in 1..n {
-            rhs[(index - 1, 0)] = weights[index] * problem.density().coefficients()[index] / scale;
+            rhs[(index - 1, 0)] = problem
+                .weak_value(index, weights)
+                .ok_or(SolveError::Numerical)?
+                / scale;
         }
         solve_factor(factor, rhs.as_mut(), self.executor, stack);
         if cancellation.is_cancelled() {
@@ -413,8 +468,13 @@ impl Prepared<MeanZeroPoisson> {
         for value in &mut values {
             *value -= mean;
         }
-        let potential = Binary64Element::admit(problem.density().space().clone(), values)
-            .map_err(|_| SolveError::Numerical)?;
+        let potential_space = crate::Binary64Space::<Cochain>::full(
+            Arc::clone(problem.metric().realization().topology()),
+            0,
+        )
+        .map_err(|_| SolveError::Numerical)?;
+        let potential =
+            Binary64Element::admit(potential_space, values).map_err(|_| SolveError::Numerical)?;
         drop(rhs_storage);
         check_cancelled(cancellation)?;
         let solution = problem
@@ -436,7 +496,7 @@ impl Prepared<MeanZeroPoisson> {
     }
 
     fn solve_requirement(&self, problem: &MeanZeroPoisson) -> Result<StackReq, SolveError> {
-        let reduced = problem.density().coefficients().len().saturating_sub(1);
+        let reduced = problem.len().saturating_sub(1);
         let backend = factor_solve_requirement(one_factor(&self.factors)?, self.executor, 1);
         let solve = StackReq::new::<f64>(reduced).and(backend);
         let certification = certification_requirement(problem)?;
@@ -444,7 +504,7 @@ impl Prepared<MeanZeroPoisson> {
     }
 }
 
-impl SolveExt for FlowProblem {
+impl SolveExt for HeatProblem {
     fn prepare_with(
         &self,
         executor: &NativeExecutor,
@@ -462,23 +522,27 @@ impl SolveExt for FlowProblem {
         cancellation: &CancellationToken,
     ) -> Result<Prepared<Self>, SolveError> {
         check_cancelled(cancellation)?;
-        let n = self.metric().realization().topology().vertex_count();
-        let bytes = matrix_bytes(n)?;
-        require_storage(storage, bytes, bytes.saturating_mul(2))?;
-        require_work(work, cubic_work(n)?)?;
-        let free = (0..n).collect::<Vec<_>>();
-        let factor = factor_stiffness(
-            SystemRef::Flow {
-                metric: self.metric(),
-                time_step: self.time_step(),
-            },
-            &free,
-            *executor,
-            cancellation,
-        )?;
+        let n = self.source().coefficients().len();
+        let factor = if self.metric().realization().topology().dimension() == 0 {
+            Factor::Analytic
+        } else {
+            let bytes = matrix_bytes(n)?;
+            require_storage(storage, bytes, bytes.saturating_mul(2))?;
+            require_work(work, cubic_work(n)?)?;
+            let free = (0..n).collect::<Vec<_>>();
+            factor_stiffness(
+                SystemRef::Parabolic {
+                    metric: self.metric(),
+                    time_step: self.time_step(),
+                },
+                &free,
+                *executor,
+                cancellation,
+            )?
+        };
         check_cancelled(cancellation)?;
         Ok(Prepared {
-            key: ReuseKey::Flow {
+            key: ReuseKey::Parabolic {
                 owner: Arc::clone(self.metric().realization()),
                 time_step_bits: self.time_step().to_bits(),
             },
@@ -489,14 +553,14 @@ impl SolveExt for FlowProblem {
     }
 }
 
-impl Prepared<FlowProblem> {
-    /// Allocate the one-call batched solve scratch.
+impl Prepared<HeatProblem> {
+    /// Allocate one scalar right-hand side and backend scratch.
     ///
     /// # Errors
-    /// Rejects a foreign preparation or insufficient logical storage.
+    /// Rejects a mismatched problem or insufficient logical storage.
     pub fn workspace_for(
         &self,
-        problem: &FlowProblem,
+        problem: &HeatProblem,
         storage: StorageLimit,
     ) -> Result<SolveWorkspace, SolveError> {
         self.require_problem(problem)?;
@@ -509,133 +573,104 @@ impl Prepared<FlowProblem> {
         })
     }
 
-    /// Solve and atomically admit one deformation.
+    /// Solve and certify one compatible scalar source.
     ///
     /// # Errors
-    /// Rejects mismatch, resource exhaustion, or failed certification/admission.
+    /// Rejects mismatch, resource exhaustion, cancellation, or failed certification.
     pub fn solve(
         &self,
-        problem: &FlowProblem,
+        problem: &HeatProblem,
         workspace: &mut SolveWorkspace,
         work: WorkLimit,
-    ) -> Result<FlowStep, SolveError> {
+    ) -> Result<HeatSolution, SolveError> {
         self.solve_cancellable(problem, workspace, work, &CancellationToken::new())
     }
 
-    /// Solve with cooperative checks before result publication.
+    /// Solve with cooperative cancellation before result publication.
     ///
     /// # Errors
-    /// Also rejects cancellation around the backend and admission boundaries.
+    /// Rejects mismatch, resource exhaustion, cancellation, or failed certification.
     pub fn solve_cancellable(
         &self,
-        problem: &FlowProblem,
+        problem: &HeatProblem,
         workspace: &mut SolveWorkspace,
         work: WorkLimit,
         cancellation: &CancellationToken,
-    ) -> Result<FlowStep, SolveError> {
+    ) -> Result<HeatSolution, SolveError> {
         self.require_problem(problem)?;
         check_cancelled(cancellation)?;
-        let metric = problem.metric();
-        let source = metric.realization();
-        let n = source.topology().vertex_count();
-        let dimension = source.ambient_dimension();
-        let cells = n.checked_mul(dimension).ok_or(SolveError::ResourceLimit)?;
-        let quadratic = n
+        let n = problem.source().coefficients().len();
+        if problem.metric().realization().topology().dimension() == 0 {
+            return Ok(HeatSolution::new(
+                problem.source().clone(),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+            ));
+        }
+        let steps = n
             .checked_mul(n)
-            .and_then(|v| v.checked_mul(dimension))
+            .map(|value| value.max(n.saturating_mul(8)))
+            .and_then(|value| u64::try_from(value).ok())
             .ok_or(SolveError::ResourceLimit)?;
-        require_work(
-            work,
-            u64::try_from(quadratic.max(cells.saturating_mul(8)))
-                .map_err(|_| SolveError::ResourceLimit)?,
-        )?;
+        require_work(work, steps)?;
         let requirement = self.solve_requirement(problem)?;
         let stack = MemStack::new(&mut workspace.buffer);
         if !stack.can_hold(requirement) {
             return Err(SolveError::ResourceLimit);
         }
-        let masses = metric
+        let masses = problem
+            .metric()
             .hodge_coefficients_slice(0)
             .map_err(|_| SolveError::Numerical)?;
-        let total_mass = masses.iter().sum::<f64>();
-        if !total_mass.is_finite() || total_mass <= 0.0 {
-            return Err(SolveError::Numerical);
-        }
-        let mut centroid = vec![0.0; dimension];
-        for (vertex, row) in source.positions().chunks_exact(dimension).enumerate() {
-            let normalized_mass = masses[vertex] / total_mass;
-            for axis in 0..dimension {
-                centroid[axis] += normalized_mass * row[axis];
-            }
-        }
+        let mean = weighted_centroid(masses, problem.source().coefficients(), 1)?[0];
         let factor = one_factor(&self.factors)?;
         let scale = factor_scale(factor);
-        let (mut rhs_storage, stack) = stack.make_with(cells, |_| 0.0_f64);
-        {
-            let mut rhs = MatMut::from_column_major_slice_mut(&mut rhs_storage, n, dimension);
-            for vertex in 0..n {
-                for axis in 0..dimension {
-                    rhs[(vertex, axis)] = masses[vertex]
-                        * (source.positions()[vertex * dimension + axis] - centroid[axis])
-                        / scale;
-                }
-            }
-            solve_factor(factor, rhs.as_mut(), self.executor, stack);
-        }
+        let (mut rhs_storage, stack) = stack.make_with(n, |_| 0.0_f64);
+        let mut rhs = MatMut::from_column_major_slice_mut(&mut rhs_storage, n, 1);
+        fill_centered_mass_rhs(
+            masses,
+            problem.source().coefficients(),
+            &[mean],
+            scale,
+            rhs.as_mut(),
+        )?;
+        solve_factor(factor, rhs.as_mut(), self.executor, stack);
         check_cancelled(cancellation)?;
-
-        let (_, endpoints) = stiffness_endpoints(metric)?;
-        let residual_bound = flow_residual(problem, &rhs_storage, &centroid, &endpoints)?;
-        let mut positions = vec![0.0; cells];
-        for vertex in 0..n {
-            for axis in 0..dimension {
-                let value = rhs_storage[axis * n + vertex];
-                positions[vertex * dimension + axis] = value + centroid[axis];
-            }
-        }
-        drop(rhs_storage);
-        let target_centroid = weighted_centroid(masses, &positions, dimension)?;
-        let centroid_scale = positions
+        let values = rhs_storage
             .iter()
-            .chain(&centroid)
-            .map(|value| value.abs())
-            .fold(1.0_f64, f64::max);
-        let centroid_residual_bound = target_centroid
-            .iter()
-            .zip(&centroid)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f64, f64::max)
-            / centroid_scale;
-        let energy_before = flow_energy(metric, source.positions(), dimension, &endpoints)?;
-        let energy_after = flow_energy(metric, &positions, dimension, &endpoints)?;
+            .map(|value| value + mean)
+            .collect::<Vec<_>>();
+        let (_, endpoints) = stiffness_endpoints(problem.metric())?;
+        let (residual_bound, mass_residual_bound, energy_before, energy_after, exact_fallback_rows) =
+            heat_evidence(problem, &values, &endpoints)?;
         if !residual_bound.is_finite()
-            || !centroid_residual_bound.is_finite()
+            || !mass_residual_bound.is_finite()
             || !energy_before.is_finite()
             || !energy_after.is_finite()
             || residual_bound > 1.0e-10
-            || centroid_residual_bound > 1.0e-12
+            || mass_residual_bound > 1.0e-12
             || energy_after > energy_before + 128.0 * f64::EPSILON * energy_before.max(1.0)
         {
             return Err(SolveError::Numerical);
         }
-        check_cancelled(cancellation)?;
-        let target = source
-            .deform(positions, problem.realization_limit())
+        let value = Binary64Element::admit(problem.source().space().clone(), values)
             .map_err(|_| SolveError::Numerical)?;
         check_cancelled(cancellation)?;
-        Ok(FlowStep::new(
-            target,
-            FlowEvidence::new(
-                energy_before,
-                energy_after,
-                residual_bound,
-                centroid_residual_bound,
-            ),
+        Ok(HeatSolution::new(
+            value,
+            residual_bound,
+            mass_residual_bound,
+            energy_before,
+            energy_after,
+            exact_fallback_rows,
         ))
     }
 
-    fn require_problem(&self, problem: &FlowProblem) -> Result<(), SolveError> {
-        let ReuseKey::Flow {
+    fn require_problem(&self, problem: &HeatProblem) -> Result<(), SolveError> {
+        let ReuseKey::Parabolic {
             owner,
             time_step_bits,
         } = &self.key
@@ -648,20 +683,671 @@ impl Prepared<FlowProblem> {
         .ok_or(SolveError::ProblemMismatch)
     }
 
-    fn solve_requirement(&self, problem: &FlowProblem) -> Result<StackReq, SolveError> {
-        let owner = problem.metric().realization();
-        let columns = owner.ambient_dimension();
-        let cells = owner
-            .topology()
-            .vertex_count()
-            .checked_mul(columns)
-            .ok_or(SolveError::ResourceLimit)?;
-        Ok(StackReq::new::<f64>(cells).and(factor_solve_requirement(
+    fn solve_requirement(&self, problem: &HeatProblem) -> Result<StackReq, SolveError> {
+        if problem.metric().realization().topology().dimension() == 0 {
+            return Ok(StackReq::EMPTY);
+        }
+        let n = problem.source().coefficients().len();
+        Ok(StackReq::new::<f64>(n).and(factor_solve_requirement(
             one_factor(&self.factors)?,
             self.executor,
-            columns,
+            1,
         )))
     }
+}
+
+impl crate::PositiveMetric {
+    /// Compute and atomically publish one frozen-metric mean-curvature-flow step.
+    ///
+    /// # Errors
+    /// Rejects an unsuitable surface, invalid time, exhausted resources,
+    /// cancellation, failed factorization, or failed numerical certification.
+    pub fn frozen_mean_curvature_flow(
+        &self,
+        time_step: f64,
+        realization_limit: RealizationLimit,
+        executor: &NativeExecutor,
+        storage: StorageLimit,
+        work: WorkLimit,
+        cancellation: &CancellationToken,
+    ) -> Result<FlowStep, SurfaceComputationError> {
+        require_frozen_flow_domain(self, time_step)?;
+        frozen_flow_step(
+            self,
+            time_step,
+            realization_limit,
+            *executor,
+            storage,
+            work,
+            cancellation,
+        )
+        .map_err(SurfaceComputationError::Solve)
+    }
+}
+
+impl TriangleSurface {
+    /// Compute one bounded least-squares conformal parameterization of an oriented disk.
+    ///
+    /// The two distinct boundary anchors map to `(0, 0)` and `(1, 0)` in caller order.
+    ///
+    /// # Errors
+    /// Rejects a non-disk domain, invalid anchors, exhausted resources, cancellation,
+    /// numerical rank loss, or a target face without positive admitted orientation.
+    pub fn least_squares_conformal_map(
+        &self,
+        anchors: [usize; 2],
+        realization_limit: RealizationLimit,
+        executor: &NativeExecutor,
+        storage: StorageLimit,
+        work: WorkLimit,
+        cancellation: &CancellationToken,
+    ) -> Result<LeastSquaresConformalMapSolution, SurfaceComputationError> {
+        let disk = self
+            .realization()
+            .topology()
+            .refine_disk()
+            .map_err(SurfaceError::from)?;
+        let boundary = disk.boundary_vertices().map_err(SurfaceError::from)?;
+        let vertex_count = self.realization().topology().vertex_count();
+        if anchors[0] == anchors[1] {
+            return Err(SurfaceError::CoincidentAnchor.into());
+        }
+        for &anchor in &anchors {
+            if anchor >= vertex_count {
+                return Err(SurfaceError::IndexOutside.into());
+            }
+            if !boundary.contains(&anchor) {
+                return Err(SurfaceError::AnchorNotBoundary.into());
+            }
+        }
+        least_squares_conformal_map(
+            self,
+            anchors,
+            realization_limit,
+            *executor,
+            storage,
+            work,
+            cancellation,
+        )
+        .map_err(SurfaceComputationError::Solve)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ScaledNorm {
+    scale: f64,
+    sum_squares: f64,
+}
+
+impl ScaledNorm {
+    fn add(&mut self, value: f64) -> Result<(), SolveError> {
+        let value = value.abs();
+        if !value.is_finite() {
+            return Err(SolveError::Numerical);
+        }
+        if value == 0.0 {
+            return Ok(());
+        }
+        if self.scale < value {
+            let ratio = self.scale / value;
+            self.sum_squares = 1.0 + self.sum_squares * ratio * ratio;
+            self.scale = value;
+        } else {
+            let ratio = value / self.scale;
+            self.sum_squares += ratio * ratio;
+        }
+        self.sum_squares
+            .is_finite()
+            .then_some(())
+            .ok_or(SolveError::Numerical)
+    }
+
+    fn value(self) -> f64 {
+        self.scale * self.sum_squares.sqrt()
+    }
+}
+
+fn least_squares_conformal_map(
+    surface: &TriangleSurface,
+    anchors: [usize; 2],
+    realization_limit: RealizationLimit,
+    executor: NativeExecutor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<LeastSquaresConformalMapSolution, SolveError> {
+    check_cancelled(cancellation)?;
+    let vertex_count = surface.realization().topology().vertex_count();
+    let face_count = surface.face_count();
+    let (rows, columns, block, scratch) = require_least_squares_conformal_resources(
+        vertex_count,
+        face_count,
+        executor,
+        storage,
+        work,
+    )?;
+    let mut system =
+        assemble_least_squares_conformal_system(surface, anchors, rows, columns, cancellation)?;
+    let (observed_rank, condition_indicator) =
+        solve_least_squares_conformal_system(&mut system, block, scratch, executor, cancellation)?;
+    let positions = least_squares_conformal_positions(vertex_count, anchors, &system)?;
+    let residual_bound = least_squares_conformal_residual(surface, &positions, &system)?;
+    let (minimum_area, exact_fallback_faces) =
+        least_squares_conformal_orientation(surface, &positions)?;
+    check_cancelled(cancellation)?;
+    let target = EuclideanRealization::admit(
+        Arc::clone(surface.realization().topology()),
+        2,
+        positions,
+        realization_limit,
+    )
+    .map_err(realization_solve_error)?;
+    check_cancelled(cancellation)?;
+    Ok(LeastSquaresConformalMapSolution::new(
+        target,
+        LeastSquaresConformalMapEvidence::new(
+            columns,
+            observed_rank,
+            condition_indicator,
+            residual_bound,
+            minimum_area,
+            exact_fallback_faces,
+        ),
+    ))
+}
+
+struct LeastSquaresConformalSystem {
+    matrix: Mat<f64>,
+    right_hand_side: Vec<f64>,
+    free_position: Vec<usize>,
+    matrix_norm: f64,
+    right_hand_side_norm: f64,
+}
+
+fn require_least_squares_conformal_resources(
+    vertex_count: usize,
+    face_count: usize,
+    executor: NativeExecutor,
+    storage: StorageLimit,
+    work: WorkLimit,
+) -> Result<(usize, usize, usize, StackReq), SolveError> {
+    let rows = face_count.checked_mul(2).ok_or(SolveError::ResourceLimit)?;
+    let columns = vertex_count
+        .checked_sub(2)
+        .and_then(|value| value.checked_mul(2))
+        .ok_or(SolveError::ResourceLimit)?;
+    if rows < columns || columns == 0 {
+        return Err(SolveError::Factorization);
+    }
+    let block = qr_factor::recommended_block_size::<f64>(rows, columns).max(1);
+    let factor = qr_factor::qr_in_place_scratch::<usize, f64>(
+        rows,
+        columns,
+        block,
+        executor.par(),
+        Spec::default(),
+    );
+    let solve = qr_solve::solve_lstsq_in_place_scratch::<usize, f64>(
+        rows,
+        columns,
+        block,
+        1,
+        executor.par(),
+    );
+    let scratch = StackReq::any_of(&[factor, solve]);
+    let matrix_cells = rows.checked_mul(columns).ok_or(SolveError::ResourceLimit)?;
+    let f64_cells = matrix_cells
+        .checked_add(
+            block
+                .checked_mul(columns)
+                .ok_or(SolveError::ResourceLimit)?,
+        )
+        .and_then(|value| value.checked_add(rows))
+        .and_then(|value| value.checked_add(vertex_count.checked_mul(2)?))
+        .ok_or(SolveError::ResourceLimit)?;
+    let usize_cells = columns
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(vertex_count))
+        .ok_or(SolveError::ResourceLimit)?;
+    let peak = logical_bytes(f64_cells, size_of::<f64>())?
+        .checked_add(logical_bytes(usize_cells, size_of::<usize>())?)
+        .and_then(|value| value.checked_add(u64::try_from(scratch.size_bytes()).ok()?))
+        .ok_or(SolveError::ResourceLimit)?;
+    require_storage(storage, 0, peak)?;
+    let factor_work = checked_work_product(matrix_cells, columns)?;
+    let remaining = checked_work_product(matrix_cells, 8)?
+        .checked_add(checked_work_product(face_count, 64)?)
+        .ok_or(SolveError::ResourceLimit)?;
+    require_work(
+        work,
+        factor_work
+            .checked_add(remaining)
+            .ok_or(SolveError::ResourceLimit)?,
+    )?;
+    Ok((rows, columns, block, scratch))
+}
+
+fn assemble_least_squares_conformal_system(
+    surface: &TriangleSurface,
+    anchors: [usize; 2],
+    rows: usize,
+    columns: usize,
+    cancellation: &CancellationToken,
+) -> Result<LeastSquaresConformalSystem, SolveError> {
+    let vertex_count = surface.realization().topology().vertex_count();
+    let mut free_position = vec![usize::MAX; vertex_count];
+    for (position, vertex) in (0..vertex_count)
+        .filter(|vertex| !anchors.contains(vertex))
+        .enumerate()
+    {
+        free_position[vertex] = position;
+    }
+    let mut matrix = Mat::zeros(rows, columns);
+    let mut right_hand_side = vec![0.0; rows];
+    let mut matrix_norm = ScaledNorm::default();
+    for face in 0..surface.face_count() {
+        check_cancelled(cancellation)?;
+        let (vertices, coefficients) = surface
+            .oriented_local_conformal_coefficients(face)
+            .map_err(|_| SolveError::Numerical)?;
+        for (vertex, coefficient) in vertices.into_iter().zip(coefficients) {
+            add_conformal_corner(
+                &mut matrix,
+                &mut right_hand_side,
+                &mut matrix_norm,
+                &free_position,
+                anchors[1],
+                face,
+                vertex,
+                coefficient,
+            )?;
+        }
+    }
+    let right_hand_side_norm = scaled_norm(&right_hand_side)?;
+    let matrix_norm = matrix_norm.value();
+    if matrix_norm == 0.0 || right_hand_side_norm == 0.0 {
+        return Err(SolveError::Factorization);
+    }
+    Ok(LeastSquaresConformalSystem {
+        matrix,
+        right_hand_side,
+        free_position,
+        matrix_norm,
+        right_hand_side_norm,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one face-corner row contribution"
+)]
+fn add_conformal_corner(
+    matrix: &mut Mat<f64>,
+    right_hand_side: &mut [f64],
+    matrix_norm: &mut ScaledNorm,
+    free_position: &[usize],
+    nonzero_anchor: usize,
+    face: usize,
+    vertex: usize,
+    [real, imaginary]: [f64; 2],
+) -> Result<(), SolveError> {
+    let real_row = 2 * face;
+    let imaginary_row = real_row + 1;
+    let position = free_position[vertex];
+    if position == usize::MAX {
+        if vertex == nonzero_anchor {
+            right_hand_side[real_row] -= real;
+            right_hand_side[imaginary_row] -= imaginary;
+        }
+        return Ok(());
+    }
+    let real_column = 2 * position;
+    let imaginary_column = real_column + 1;
+    let values = [real, -imaginary, imaginary, real];
+    matrix[(real_row, real_column)] = values[0];
+    matrix[(real_row, imaginary_column)] = values[1];
+    matrix[(imaginary_row, real_column)] = values[2];
+    matrix[(imaginary_row, imaginary_column)] = values[3];
+    values
+        .into_iter()
+        .try_for_each(|value| matrix_norm.add(value))
+}
+
+fn solve_least_squares_conformal_system(
+    system: &mut LeastSquaresConformalSystem,
+    block: usize,
+    scratch: StackReq,
+    executor: NativeExecutor,
+    cancellation: &CancellationToken,
+) -> Result<(usize, f64), SolveError> {
+    let rows = system.matrix.nrows();
+    let columns = system.matrix.ncols();
+    let mut householder = Mat::zeros(block, columns);
+    let mut permutation = vec![0_usize; columns];
+    let mut inverse_permutation = vec![0_usize; columns];
+    let mut memory = MemBuffer::try_new(scratch).map_err(|_| SolveError::Allocation)?;
+    check_cancelled(cancellation)?;
+    qr_factor::qr_in_place(
+        system.matrix.as_mut(),
+        householder.as_mut(),
+        &mut permutation,
+        &mut inverse_permutation,
+        executor.par(),
+        MemStack::new(&mut memory),
+        Spec::default(),
+    );
+    check_cancelled(cancellation)?;
+    let diagonal = (0..columns).map(|index| system.matrix[(index, index)].abs());
+    let maximum = diagonal.clone().fold(0.0_f64, f64::max);
+    let threshold = f64::EPSILON.sqrt() * maximum;
+    let rank = diagonal.clone().filter(|value| *value > threshold).count();
+    let minimum = diagonal.fold(f64::INFINITY, f64::min);
+    let condition = maximum / minimum;
+    if rank != columns || !condition.is_finite() {
+        return Err(SolveError::Factorization);
+    }
+    let mut rhs = MatMut::from_column_major_slice_mut(&mut system.right_hand_side, rows, 1);
+    let stack = MemStack::new(&mut memory);
+    qr_solve::solve_lstsq_in_place(
+        system.matrix.as_ref(),
+        householder.as_ref(),
+        system.matrix.as_ref(),
+        PermRef::new_checked(&permutation, &inverse_permutation, columns),
+        rhs.as_mut(),
+        executor.par(),
+        stack,
+    );
+    check_cancelled(cancellation)?;
+    system.right_hand_side[..columns]
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some((rank, condition))
+        .ok_or(SolveError::Numerical)
+}
+
+fn least_squares_conformal_positions(
+    vertex_count: usize,
+    anchors: [usize; 2],
+    system: &LeastSquaresConformalSystem,
+) -> Result<Vec<f64>, SolveError> {
+    let mut positions = vec![0.0; 2 * vertex_count];
+    positions[2 * anchors[1]] = 1.0;
+    for (vertex, &position) in system.free_position.iter().enumerate() {
+        if position != usize::MAX {
+            positions[2 * vertex] = system.right_hand_side[2 * position];
+            positions[2 * vertex + 1] = system.right_hand_side[2 * position + 1];
+        }
+    }
+    positions
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(positions)
+        .ok_or(SolveError::Numerical)
+}
+
+fn least_squares_conformal_residual(
+    surface: &TriangleSurface,
+    positions: &[f64],
+    system: &LeastSquaresConformalSystem,
+) -> Result<f64, SolveError> {
+    let columns = system.matrix.ncols();
+    let solution_norm = scaled_norm(&system.right_hand_side[..columns])?;
+    let mut residual_norm = ScaledNorm::default();
+    for face in 0..surface.face_count() {
+        let (vertices, coefficients) = surface
+            .oriented_local_conformal_coefficients(face)
+            .map_err(|_| SolveError::Numerical)?;
+        for imaginary_part in [false, true] {
+            let value = conformal_row_value(vertices, coefficients, positions, imaginary_part)?;
+            residual_norm.add(value)?;
+        }
+    }
+    let denominator = system.matrix_norm * solution_norm + system.right_hand_side_norm;
+    let residual = residual_norm.value() / denominator;
+    residual
+        .is_finite()
+        .then_some(residual)
+        .ok_or(SolveError::Numerical)
+}
+
+fn conformal_row_value(
+    vertices: [usize; 3],
+    coefficients: [[f64; 2]; 3],
+    positions: &[f64],
+    imaginary_part: bool,
+) -> Result<f64, SolveError> {
+    adaptive_product_value(vertices.into_iter().zip(coefficients).flat_map(
+        |(vertex, [real, imaginary])| {
+            if imaginary_part {
+                [
+                    (imaginary, positions[2 * vertex]),
+                    (real, positions[2 * vertex + 1]),
+                ]
+            } else {
+                [
+                    (real, positions[2 * vertex]),
+                    (-imaginary, positions[2 * vertex + 1]),
+                ]
+            }
+        },
+    ))
+    .map(|(value, _)| value)
+    .ok_or(SolveError::Numerical)
+}
+
+fn least_squares_conformal_orientation(
+    surface: &TriangleSurface,
+    positions: &[f64],
+) -> Result<(f64, usize), SolveError> {
+    let mut minimum = f64::INFINITY;
+    let mut exact_fallback_faces = 0_usize;
+    for face in 0..surface.face_count() {
+        let (vertices, _) = surface
+            .oriented_local_conformal_coefficients(face)
+            .map_err(|_| SolveError::Numerical)?;
+        let terms = normalized_signed_area_terms(vertices, positions)?;
+        let (sign, exact_fallback) =
+            adaptive_product_sign(terms.into_iter()).ok_or(SolveError::Numerical)?;
+        if sign != CmpOrdering::Greater {
+            return Err(SolveError::Numerical);
+        }
+        exact_fallback_faces += usize::from(exact_fallback);
+        let area = adaptive_product_value(terms.into_iter())
+            .ok_or(SolveError::Numerical)?
+            .0;
+        if area <= 0.0 || !area.is_finite() {
+            return Err(SolveError::Numerical);
+        }
+        minimum = minimum.min(area);
+    }
+    Ok((minimum, exact_fallback_faces))
+}
+
+fn normalized_signed_area_terms(
+    vertices: [usize; 3],
+    positions: &[f64],
+) -> Result<[(f64, f64); 2], SolveError> {
+    let point = |vertex| [positions[2 * vertex], positions[2 * vertex + 1]];
+    let [p0, p1, p2] = vertices.map(point);
+    let first = [p1[0] - p0[0], p1[1] - p0[1]];
+    let second = [p2[0] - p0[0], p2[1] - p0[1]];
+    let scale = first
+        .into_iter()
+        .chain(second)
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 || !scale.is_finite() {
+        return Err(SolveError::Numerical);
+    }
+    Ok([
+        (first[0] / scale, second[1] / scale),
+        (-first[1] / scale, second[0] / scale),
+    ])
+}
+
+fn scaled_norm(values: &[f64]) -> Result<f64, SolveError> {
+    let mut norm = ScaledNorm::default();
+    values.iter().try_for_each(|&value| norm.add(value))?;
+    Ok(norm.value())
+}
+
+fn logical_bytes(count: usize, width: usize) -> Result<u64, SolveError> {
+    u64::try_from(count)
+        .ok()
+        .and_then(|value| value.checked_mul(u64::try_from(width).ok()?))
+        .ok_or(SolveError::ResourceLimit)
+}
+
+fn checked_work_product(left: usize, right: usize) -> Result<u64, SolveError> {
+    u64::try_from(left)
+        .ok()
+        .and_then(|value| value.checked_mul(u64::try_from(right).ok()?))
+        .ok_or(SolveError::ResourceLimit)
+}
+
+fn realization_solve_error(error: RealizationError) -> SolveError {
+    if error.resource_limit().is_some() {
+        SolveError::ResourceLimit
+    } else if error == RealizationError::Allocation {
+        SolveError::Allocation
+    } else {
+        SolveError::Numerical
+    }
+}
+
+fn require_frozen_flow_domain(
+    metric: &crate::PositiveMetric,
+    time_step: f64,
+) -> Result<(), SurfaceError> {
+    if !time_step.is_finite() || time_step <= 0.0 {
+        return Err(SurfaceError::TimeStep);
+    }
+    let realization = metric.realization();
+    if realization.ambient_dimension() != 3 {
+        return Err(SurfaceError::AmbientDimension);
+    }
+    realization.topology().refine_triangle()?;
+    realization.topology().refine_oriented()?;
+    realization
+        .topology()
+        .refine_regular()?
+        .without_boundary()
+        .map_err(|_| SurfaceError::BoundaryPresent)?;
+    realization.topology().refine_connected()?;
+    Ok(())
+}
+
+fn frozen_flow_step(
+    metric: &crate::PositiveMetric,
+    time_step: f64,
+    realization_limit: RealizationLimit,
+    executor: NativeExecutor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<FlowStep, SolveError> {
+    check_cancelled(cancellation)?;
+    let source = metric.realization();
+    let n = source.topology().vertex_count();
+    let dimension = source.ambient_dimension();
+    let cells = n.checked_mul(dimension).ok_or(SolveError::ResourceLimit)?;
+    let quadratic = n
+        .checked_mul(n)
+        .and_then(|value| value.checked_mul(dimension))
+        .ok_or(SolveError::ResourceLimit)?;
+    let solve_work = u64::try_from(quadratic.max(cells.saturating_mul(8)))
+        .map_err(|_| SolveError::ResourceLimit)?;
+    let total_work = cubic_work(n)?
+        .checked_add(solve_work)
+        .ok_or(SolveError::ResourceLimit)?;
+    require_work(work, total_work)?;
+
+    let factor_bytes = matrix_bytes(n)?;
+    require_storage(storage, 0, factor_bytes.saturating_mul(2))?;
+    let free = (0..n).collect::<Vec<_>>();
+    let factor = factor_stiffness(
+        SystemRef::Parabolic { metric, time_step },
+        &free,
+        executor,
+        cancellation,
+    )?;
+    check_cancelled(cancellation)?;
+
+    let requirement =
+        StackReq::new::<f64>(cells).and(factor_solve_requirement(&factor, executor, dimension));
+    let workspace_bytes =
+        u64::try_from(requirement.size_bytes()).map_err(|_| SolveError::ResourceLimit)?;
+    let peak = factor_bytes
+        .saturating_mul(2)
+        .checked_add(workspace_bytes)
+        .ok_or(SolveError::ResourceLimit)?;
+    require_storage(storage, 0, peak)?;
+    let mut buffer = MemBuffer::try_new(requirement).map_err(|_| SolveError::Allocation)?;
+    let stack = MemStack::new(&mut buffer);
+    if !stack.can_hold(requirement) {
+        return Err(SolveError::ResourceLimit);
+    }
+
+    let masses = metric
+        .hodge_coefficients_slice(0)
+        .map_err(|_| SolveError::Numerical)?;
+    let centroid = weighted_centroid(masses, source.positions(), dimension)?;
+    let scale = factor_scale(&factor);
+    let (mut rhs_storage, stack) = stack.make_with(cells, |_| 0.0_f64);
+    {
+        let mut rhs = MatMut::from_column_major_slice_mut(&mut rhs_storage, n, dimension);
+        fill_centered_mass_rhs(masses, source.positions(), &centroid, scale, rhs.as_mut())?;
+        solve_factor(&factor, rhs.as_mut(), executor, stack);
+    }
+    check_cancelled(cancellation)?;
+
+    let (_, endpoints) = stiffness_endpoints(metric)?;
+    let residual_bound = flow_residual(metric, time_step, &rhs_storage, &centroid, &endpoints)?;
+    let mut positions = vec![0.0; cells];
+    for vertex in 0..n {
+        for axis in 0..dimension {
+            positions[vertex * dimension + axis] = rhs_storage[axis * n + vertex] + centroid[axis];
+        }
+    }
+    drop(rhs_storage);
+    let target_centroid = weighted_centroid(masses, &positions, dimension)?;
+    let centroid_scale = positions
+        .iter()
+        .chain(&centroid)
+        .map(|value| value.abs())
+        .fold(1.0_f64, f64::max);
+    let centroid_residual_bound = target_centroid
+        .iter()
+        .zip(&centroid)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0_f64, f64::max)
+        / centroid_scale;
+    let energy_before = dirichlet_energy(metric, source.positions(), dimension, &endpoints)?;
+    let energy_after = dirichlet_energy(metric, &positions, dimension, &endpoints)?;
+    if !residual_bound.is_finite()
+        || !centroid_residual_bound.is_finite()
+        || !energy_before.is_finite()
+        || !energy_after.is_finite()
+        || residual_bound > 1.0e-10
+        || centroid_residual_bound > 1.0e-12
+        || energy_after > energy_before + 128.0 * f64::EPSILON * energy_before.max(1.0)
+    {
+        return Err(SolveError::Numerical);
+    }
+    check_cancelled(cancellation)?;
+    let target = source
+        .deform(positions, realization_limit)
+        .map_err(|_| SolveError::Numerical)?;
+    check_cancelled(cancellation)?;
+    Ok(FlowStep::new(
+        target,
+        FlowEvidence::new(
+            energy_before,
+            energy_after,
+            residual_bound,
+            centroid_residual_bound,
+        ),
+    ))
 }
 
 impl SolveExt for DirichletProblem {
@@ -2100,16 +2786,27 @@ fn weighted_centroid(
     positions: &[f64],
     dimension: usize,
 ) -> Result<Vec<f64>, SolveError> {
-    let total = masses.iter().sum::<f64>();
+    if positions.len() != masses.len().saturating_mul(dimension) {
+        return Err(SolveError::Numerical);
+    }
+    let (total, _) = adaptive_product_value(masses.iter().copied().map(|mass| (mass, 1.0)))
+        .ok_or(SolveError::Numerical)?;
     if !total.is_finite() || total <= 0.0 {
         return Err(SolveError::Numerical);
     }
-    let mut centroid = vec![0.0; dimension];
-    for (vertex, row) in positions.chunks_exact(dimension).enumerate() {
-        let weight = masses[vertex] / total;
-        for axis in 0..dimension {
-            centroid[axis] += weight * row[axis];
-        }
+    let mut centroid = Vec::new();
+    centroid
+        .try_reserve_exact(dimension)
+        .map_err(|_| SolveError::Allocation)?;
+    for axis in 0..dimension {
+        let (sum, _) = adaptive_product_value(
+            masses
+                .iter()
+                .copied()
+                .zip(positions.iter().skip(axis).step_by(dimension).copied()),
+        )
+        .ok_or(SolveError::Numerical)?;
+        centroid.push(sum / total);
     }
     centroid
         .iter()
@@ -2118,7 +2815,32 @@ fn weighted_centroid(
         .ok_or(SolveError::Numerical)
 }
 
-fn flow_energy(
+fn fill_centered_mass_rhs(
+    masses: &[f64],
+    values: &[f64],
+    means: &[f64],
+    scale: f64,
+    mut rhs: MatMut<'_, f64>,
+) -> Result<(), SolveError> {
+    let columns = means.len();
+    if rhs.nrows() != masses.len()
+        || rhs.ncols() != columns
+        || values.len() != masses.len().saturating_mul(columns)
+        || !scale.is_finite()
+        || scale == 0.0
+    {
+        return Err(SolveError::Numerical);
+    }
+    for vertex in 0..masses.len() {
+        for axis in 0..columns {
+            rhs[(vertex, axis)] =
+                masses[vertex] * (values[vertex * columns + axis] - means[axis]) / scale;
+        }
+    }
+    Ok(())
+}
+
+fn dirichlet_energy(
     metric: &crate::PositiveMetric,
     positions: &[f64],
     dimension: usize,
@@ -2144,12 +2866,12 @@ fn flow_energy(
 }
 
 fn flow_residual(
-    problem: &FlowProblem,
+    metric: &crate::PositiveMetric,
+    time_step: f64,
     target_column_major: &[f64],
     source_centroid: &[f64],
     endpoints: &[[(usize, i64); 2]],
 ) -> Result<f64, SolveError> {
-    let metric = problem.metric();
     let source = metric.realization();
     let dimension = source.ambient_dimension();
     let masses = metric
@@ -2170,7 +2892,7 @@ fn flow_residual(
             for &(column, column_sign) in endpoints {
                 let sign = if row_sign == column_sign { 1.0 } else { -1.0 };
                 for axis in 0..dimension {
-                    action[axis * masses.len() + row] += problem.time_step()
+                    action[axis * masses.len() + row] += time_step
                         * weight
                         * sign
                         * target_column_major[axis * masses.len() + column];
@@ -2200,6 +2922,86 @@ fn flow_residual(
         .ok_or(SolveError::Numerical)
 }
 
+fn heat_evidence(
+    problem: &HeatProblem,
+    target: &[f64],
+    endpoints: &[[(usize, i64); 2]],
+) -> Result<(f64, f64, f64, f64, usize), SolveError> {
+    let metric = problem.metric();
+    let masses = metric
+        .hodge_coefficients_slice(0)
+        .map_err(|_| SolveError::Numerical)?;
+    let weights = metric
+        .hodge_coefficients_slice(1)
+        .map_err(|_| SolveError::Numerical)?;
+    let boundary = metric
+        .realization()
+        .topology()
+        .chain_view()
+        .boundary(1)
+        .map_err(|_| SolveError::Numerical)?;
+    let mut residual_bound = 0.0_f64;
+    let mut exact_fallback_rows = 0_usize;
+    for row in 0..masses.len() {
+        let terms = std::iter::once((masses[row], target[row]))
+            .chain(
+                boundary.indices()[boundary.indptr()[row]..boundary.indptr()[row + 1]]
+                    .iter()
+                    .flat_map(|&edge| {
+                        let entries = endpoints[edge];
+                        let row_sign = if entries[0].0 == row {
+                            entries[0].1
+                        } else {
+                            entries[1].1
+                        };
+                        entries.into_iter().map(move |(column, column_sign)| {
+                            let sign = if row_sign == column_sign { 1.0 } else { -1.0 };
+                            (problem.time_step() * weights[edge] * sign, target[column])
+                        })
+                    }),
+            )
+            .chain(std::iter::once((
+                -masses[row],
+                problem.source().coefficients()[row],
+            )));
+        let scale = terms
+            .clone()
+            .map(|(left, right)| (left * right).abs())
+            .sum::<f64>()
+            .max(1.0);
+        let verdict = adaptive_product_sum(terms, 256.0 * f64::EPSILON * scale);
+        if !verdict.accepted {
+            return Err(SolveError::Numerical);
+        }
+        exact_fallback_rows += usize::from(verdict.exact_fallback);
+        residual_bound = residual_bound.max(verdict.bound / scale);
+    }
+    let mass_terms = masses
+        .iter()
+        .copied()
+        .zip(target.iter().copied())
+        .zip(problem.source().coefficients().iter().copied())
+        .flat_map(|((mass, target), source)| [(mass, target), (-mass, source)]);
+    let mass_scale = mass_terms
+        .clone()
+        .map(|(left, right)| (left * right).abs())
+        .sum::<f64>()
+        .max(1.0);
+    let mass = adaptive_product_sum(mass_terms, 256.0 * f64::EPSILON * mass_scale);
+    if !mass.accepted {
+        return Err(SolveError::Numerical);
+    }
+    let energy_before = dirichlet_energy(metric, problem.source().coefficients(), 1, endpoints)?;
+    let energy_after = dirichlet_energy(metric, target, 1, endpoints)?;
+    Ok((
+        residual_bound,
+        mass.bound / mass_scale,
+        energy_before,
+        energy_after,
+        exact_fallback_rows,
+    ))
+}
+
 fn matrix_bytes(n: usize) -> Result<u64, SolveError> {
     let bytes = n
         .checked_mul(n)
@@ -2217,7 +3019,7 @@ fn cubic_work(n: usize) -> Result<u64, SolveError> {
 }
 
 fn solve_work(problem: &MeanZeroPoisson) -> Result<u64, SolveError> {
-    let n = problem.density().coefficients().len();
+    let n = problem.len();
     let reduced = n.saturating_sub(1);
     let matrix = reduced
         .checked_mul(reduced)
@@ -2243,7 +3045,7 @@ fn solve_work(problem: &MeanZeroPoisson) -> Result<u64, SolveError> {
 }
 
 fn certification_requirement(problem: &MeanZeroPoisson) -> Result<StackReq, SolveError> {
-    if problem.density().coefficients().len() == 1 {
+    if problem.len() == 1 {
         return Ok(StackReq::EMPTY);
     }
     let edges = problem
@@ -2282,42 +3084,5 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<(), SolveError> {
         Err(SolveError::Cancelled)
     } else {
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{CandidateInput, ComplexCore, EuclideanRealization, RealizationLimit};
-
-    #[test]
-    fn flow_preparation_retains_exactly_one_factor_for_all_ambient_columns() {
-        let topology = ComplexCore::admit(
-            CandidateInput::signed([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3], 4, 3, None).unwrap(),
-        )
-        .unwrap();
-        let realization = EuclideanRealization::admit(
-            topology,
-            3,
-            vec![
-                1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0,
-            ],
-            RealizationLimit::DEFAULT,
-        )
-        .unwrap();
-        let metric = realization
-            .circumcentric_pairing()
-            .unwrap()
-            .require_positive()
-            .unwrap();
-        let problem = metric.frozen_mean_curvature_flow(0.1).unwrap();
-        let prepared = problem
-            .prepare_with(
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-            )
-            .unwrap();
-        assert_eq!(prepared.factors.len(), 1);
     }
 }

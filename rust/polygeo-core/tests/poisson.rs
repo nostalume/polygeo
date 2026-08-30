@@ -1,9 +1,10 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use polygeo_core::{
-    Binary64Cochain, Binary64Element, Binary64Space, CancellationToken, CandidateInput, Cochain,
-    ComplexCore, EuclideanRealization, NativeExecutor, NondegenerateCapability, PairingCapability,
-    PositiveMetric, RealizationLimit, SolveExt, StorageLimit, WorkLimit,
+    Binary64Chain, Binary64Cochain, Binary64Element, Binary64Space, CancellationToken,
+    CandidateInput, Chain, Cochain, ComplexCore, EuclideanRealization, NativeExecutor,
+    NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit, SolveExt,
+    StorageLimit, TriangleSurface, WorkLimit,
 };
 
 fn sphere_metric() -> PositiveMetric {
@@ -25,6 +26,12 @@ fn sphere_metric() -> PositiveMetric {
 fn density(metric: &PositiveMetric, coefficients: Vec<f64>) -> Binary64Cochain {
     let space =
         Binary64Space::<Cochain>::full(Arc::clone(metric.realization().topology()), 0).unwrap();
+    Binary64Element::admit(space, coefficients).unwrap()
+}
+
+fn load(metric: &PositiveMetric, coefficients: Vec<f64>) -> Binary64Chain {
+    let space =
+        Binary64Space::<Chain>::full(Arc::clone(metric.realization().topology()), 0).unwrap();
     Binary64Element::admit(space, coefficients).unwrap()
 }
 
@@ -74,7 +81,7 @@ fn point_metric() -> PositiveMetric {
 fn mean_zero_poisson_solves_weak_equation_and_gauge() {
     let metric = sphere_metric();
     let rho = compatible_density(&metric, 0, 1);
-    let problem = metric.mean_zero_poisson(rho.clone()).unwrap();
+    let problem = metric.mean_zero_poisson_density(rho.clone()).unwrap();
     let executor = NativeExecutor::parallel(NonZeroUsize::new(2).unwrap());
     let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
     let work = WorkLimit::new(u64::MAX);
@@ -102,10 +109,10 @@ fn mean_zero_poisson_solves_weak_equation_and_gauge() {
 fn preparation_reuses_factors_across_compatible_rhs_and_rejects_foreign_owner() {
     let metric = sphere_metric();
     let first = metric
-        .mean_zero_poisson(compatible_density(&metric, 0, 1))
+        .mean_zero_poisson_density(compatible_density(&metric, 0, 1))
         .unwrap();
     let second = metric
-        .mean_zero_poisson(compatible_density(&metric, 1, 2))
+        .mean_zero_poisson_density(compatible_density(&metric, 1, 2))
         .unwrap();
     let executor = NativeExecutor::sequential();
     let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
@@ -116,7 +123,7 @@ fn preparation_reuses_factors_across_compatible_rhs_and_rejects_foreign_owner() 
 
     let foreign_metric = sphere_metric();
     let foreign = foreign_metric
-        .mean_zero_poisson(compatible_density(&foreign_metric, 0, 1))
+        .mean_zero_poisson_density(compatible_density(&foreign_metric, 0, 1))
         .unwrap();
     assert_eq!(
         prepared
@@ -131,7 +138,7 @@ fn preparation_reuses_factors_across_compatible_rhs_and_rejects_foreign_owner() 
 fn admission_rejects_incompatible_density() {
     let metric = sphere_metric();
     let error = metric
-        .mean_zero_poisson(density(&metric, vec![1.0, 0.0, 0.0, 0.0]))
+        .mean_zero_poisson_density(density(&metric, vec![1.0, 0.0, 0.0, 0.0]))
         .unwrap_err();
     assert_eq!(error.reason(), "incompatible_rhs");
 }
@@ -140,7 +147,7 @@ fn admission_rejects_incompatible_density() {
 fn point_has_the_canonical_analytic_zero_solution() {
     let metric = point_metric();
     let problem = metric
-        .mean_zero_poisson(density(&metric, vec![0.0]))
+        .mean_zero_poisson_density(density(&metric, vec![0.0]))
         .unwrap();
     let executor = NativeExecutor::sequential();
     let storage = StorageLimit::new(0, 0).unwrap();
@@ -155,7 +162,7 @@ fn point_has_the_canonical_analytic_zero_solution() {
 fn resource_and_cancellation_fail_before_publication() {
     let metric = sphere_metric();
     let problem = metric
-        .mean_zero_poisson(compatible_density(&metric, 0, 1))
+        .mean_zero_poisson_density(compatible_density(&metric, 0, 1))
         .unwrap();
     let executor = NativeExecutor::sequential();
     let zero = StorageLimit::new(0, 0).unwrap();
@@ -212,7 +219,7 @@ fn resource_and_cancellation_fail_before_publication() {
 fn large_cycle_uses_the_bounded_sparse_path() {
     let metric = cycle_metric(65);
     let rho = compatible_density(&metric, 7, 31);
-    let problem = metric.mean_zero_poisson(rho).unwrap();
+    let problem = metric.mean_zero_poisson_density(rho).unwrap();
     let executor = NativeExecutor::sequential();
     let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
     let work = WorkLimit::new(u64::MAX);
@@ -221,4 +228,53 @@ fn large_cycle_uses_the_bounded_sparse_path() {
     let solution = prepared.solve(&problem, &mut workspace, work).unwrap();
     assert!(solution.evidence().residual_bound() <= 1.0e-10);
     assert_eq!(solution.evidence().exact_fallback_rows(), 0);
+}
+
+#[test]
+fn integrated_load_uses_the_same_gauged_solver_without_density_conversion() {
+    let metric = sphere_metric();
+    let surface = TriangleSurface::admit(Arc::clone(metric.realization())).unwrap();
+    let source = density(&metric, vec![1.0, 7.0, -1.0, 2.0]);
+    let integrated = surface
+        .divergence(&surface.gradient(&source).unwrap())
+        .unwrap()
+        .negated();
+    let problem = metric.mean_zero_poisson_load(integrated).unwrap();
+    let density_problem = metric
+        .mean_zero_poisson_density(compatible_density(&metric, 0, 1))
+        .unwrap();
+    let executor = NativeExecutor::sequential();
+    let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
+    let work = WorkLimit::new(u64::MAX);
+    let prepared = density_problem
+        .prepare_with(&executor, storage, work)
+        .unwrap();
+    let mut workspace = prepared.workspace_for(&problem, storage).unwrap();
+    let solution = prepared.solve(&problem, &mut workspace, work).unwrap();
+
+    let weights = metric.hodge_coefficients_slice(0).unwrap();
+    let mean = weights
+        .iter()
+        .zip(source.coefficients())
+        .map(|(&mass, &value)| mass * value)
+        .sum::<f64>()
+        / weights.iter().sum::<f64>();
+    for (&actual, &original) in solution
+        .potential()
+        .coefficients()
+        .iter()
+        .zip(source.coefficients())
+    {
+        assert!((actual - (original - mean)).abs() <= 1.0e-12);
+    }
+    assert!(solution.evidence().residual_bound() <= 1.0e-12);
+
+    let incompatible = load(&metric, vec![1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(
+        metric
+            .mean_zero_poisson_load(incompatible)
+            .unwrap_err()
+            .reason(),
+        "incompatible_rhs"
+    );
 }

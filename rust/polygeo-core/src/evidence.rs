@@ -540,6 +540,74 @@ impl DiskView<'_> {
             regular: self.regular,
         }
     }
+
+    /// Boundary vertices in the orientation induced by the coherent face chain.
+    ///
+    /// The smallest boundary vertex starts the returned cycle. Reversing every
+    /// top-dimensional orientation therefore preserves the start and reverses
+    /// the remaining order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an allocation error or an internal-invariant error if retained
+    /// disk evidence and canonical incidence disagree.
+    pub fn boundary_vertices(&self) -> Result<Box<[usize]>, TopologyError> {
+        let vertex_count = self.owner.vertex_count();
+        let edge_basis = self.owner.basis(1)?;
+        let mut successor = try_filled(vertex_count, usize::MAX)?;
+        let mut boundary_edge_count = 0_usize;
+
+        for (edge, _, coefficient) in self.owner.chain_view().boundary(2)?.exact_entries() {
+            if !self
+                .regular
+                .boundary
+                .contains(1, edge, &self.owner.layout)?
+            {
+                continue;
+            }
+            let endpoints = edge_basis
+                .row(edge)
+                .ok_or(TopologyError::InternalInvariant)?;
+            let [low, high] = endpoints else {
+                return Err(TopologyError::InternalInvariant);
+            };
+            let (source, target) = match coefficient {
+                1 => (*low, *high),
+                -1 => (*high, *low),
+                _ => return Err(TopologyError::InternalInvariant),
+            };
+            if successor[source] != usize::MAX {
+                return Err(TopologyError::InternalInvariant);
+            }
+            successor[source] = target;
+            boundary_edge_count = boundary_edge_count
+                .checked_add(1)
+                .ok_or(TopologyError::CountOverflow)?;
+        }
+
+        let start = successor
+            .iter()
+            .position(|&vertex| vertex != usize::MAX)
+            .ok_or(TopologyError::InternalInvariant)?;
+        let mut cycle = Vec::new();
+        cycle
+            .try_reserve_exact(boundary_edge_count)
+            .map_err(|_| TopologyError::Allocation)?;
+        let mut visited = try_filled(vertex_count, false)?;
+        let mut current = start;
+        for _ in 0..boundary_edge_count {
+            if current >= vertex_count || successor[current] == usize::MAX || visited[current] {
+                return Err(TopologyError::InternalInvariant);
+            }
+            visited[current] = true;
+            cycle.push(current);
+            current = successor[current];
+        }
+        if current != start || cycle.len() != boundary_edge_count {
+            return Err(TopologyError::InternalInvariant);
+        }
+        Ok(cycle.into_boxed_slice())
+    }
 }
 
 mod sealed {

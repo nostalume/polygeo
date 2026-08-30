@@ -40,7 +40,7 @@ pub use evidence::{
 };
 pub use form::{
     Binary64Chain, Binary64ChainSpace, Binary64Cochain, Binary64CochainSpace, Binary64Element,
-    Binary64ElementError, Binary64Space, Form,
+    Binary64ElementError, Binary64Space,
 };
 pub use halfedge::{
     Edge, ExteriorHalfedge, FaceKind, FaceOrbit, Halfedge, HalfedgeInput, HalfedgeSurfaceCore,
@@ -53,9 +53,9 @@ pub use incidence::{
 };
 pub use operator::{LinearOperator, OperatorError};
 pub use problem::{
-    DirichletEvidence, DirichletProblem, DirichletSolution, HarmonicExtension, HodgeDecomposition,
-    HodgeEvidence, HodgeProblem, MeanZeroPoisson, PoissonSolution, Problem, ProblemError,
-    ResidualEvidence,
+    DirichletEvidence, DirichletProblem, DirichletSolution, HarmonicExtension, HeatProblem,
+    HeatSolution, HodgeDecomposition, HodgeEvidence, HodgeProblem, MeanZeroPoisson,
+    PoissonSolution, Problem, ProblemError, ResidualEvidence,
 };
 pub use realization::{
     CircumcentricPairing, EuclideanRealization, MetricError, NondegenerateCapability,
@@ -66,12 +66,13 @@ pub use representation::{
 };
 pub use solve::{
     CancellationToken, NativeExecutor, Prepared, SolveError, SolveExt, SolveWorkspace,
+    SurfaceComputationError,
 };
 pub use subset::{CanonicalSelection, SimplexSubset, SubsetBuilder};
 pub use surface::{
-    EntityVectors, FaceDirectionField, FaceVectors, FlowEvidence, FlowProblem, FlowStep,
-    HolonomyEvidence, IntegrableConnection, SurfaceConnection, SurfaceError, TriangleSurface,
-    VertexVectors,
+    EntityVectors, FaceDirectionField, FaceVectors, FlowEvidence, FlowStep, HolonomyEvidence,
+    IntegrableConnection, LeastSquaresConformalMapEvidence, LeastSquaresConformalMapSolution,
+    SurfaceConnection, SurfaceError, TriangleSurface, VertexVectors,
 };
 
 /// Portable logical-storage ceiling for one unpublished operation.

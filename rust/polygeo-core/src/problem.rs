@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use faer::dyn_stack::MemStack;
 use num_bigint::BigInt;
@@ -6,9 +6,9 @@ use num_traits::{Signed, ToPrimitive, Zero};
 
 use crate::form::{dyadic, next_up, rounded_dyadic};
 use crate::{
-    Binary64Cochain, Binary64ElementError, Binary64Space, CanonicalSelection, Cochain,
-    LinearOperator, OperatorError, PairingCapability, PositiveMetric, RealizationError,
-    TopologyError,
+    Binary64Chain, Binary64Cochain, Binary64Element, Binary64ElementError, Binary64Space,
+    CanonicalSelection, Cochain, LinearOperator, OperatorError, PairingCapability, PositiveMetric,
+    RealizationError, TopologyError, Variance,
 };
 
 mod private {
@@ -26,6 +26,7 @@ pub trait Problem: private::Sealed {
 pub enum ProblemError {
     SpaceMismatch,
     IncompatibleRhs,
+    TimeStep,
     Topology,
     Metric,
     BoundarySelection,
@@ -39,6 +40,7 @@ impl ProblemError {
         match self {
             Self::SpaceMismatch => "space_mismatch",
             Self::IncompatibleRhs => "incompatible_rhs",
+            Self::TimeStep => "time_step",
             Self::Topology => "topology",
             Self::Metric => "metric",
             Self::BoundarySelection => "boundary_selection",
@@ -87,14 +89,37 @@ impl From<OperatorError> for ProblemError {
 
 #[derive(Clone, Copy, Debug)]
 struct CompatibilityEvidence {
-    weighted_l1: f64,
+    rhs_l1: f64,
 }
 
-/// Compatible density for a mean-zero degree-zero Poisson equation.
+#[derive(Clone, Debug)]
+enum PoissonRhs {
+    Density(Binary64Cochain),
+    Load(Binary64Chain),
+}
+
+impl PoissonRhs {
+    fn len(&self) -> usize {
+        match self {
+            Self::Density(value) => value.coefficients().len(),
+            Self::Load(value) => value.coefficients().len(),
+        }
+    }
+
+    fn weak_value(&self, index: usize, masses: &[f64]) -> Option<f64> {
+        let value = match self {
+            Self::Density(density) => masses[index] * density.coefficients()[index],
+            Self::Load(load) => load.coefficients()[index],
+        };
+        value.is_finite().then_some(value)
+    }
+}
+
+/// Compatible right-hand side for a mean-zero degree-zero Poisson equation.
 #[derive(Clone, Debug)]
 pub struct MeanZeroPoisson {
     metric: PositiveMetric,
-    density: Binary64Cochain,
+    rhs: PoissonRhs,
     compatibility: CompatibilityEvidence,
 }
 
@@ -103,22 +128,48 @@ impl Problem for MeanZeroPoisson {
     type Solution = PoissonSolution;
 }
 
-impl private::Sealed for crate::FlowProblem {}
-impl Problem for crate::FlowProblem {
-    type Solution = crate::FlowStep;
+/// One admitted backward-Euler evolution of a full scalar vertex cochain.
+#[derive(Clone, Debug)]
+pub struct HeatProblem {
+    metric: PositiveMetric,
+    source: Binary64Cochain,
+    time_step: f64,
+}
+
+impl private::Sealed for HeatProblem {}
+impl Problem for HeatProblem {
+    type Solution = HeatSolution;
+}
+
+impl HeatProblem {
+    pub(crate) const fn metric(&self) -> &PositiveMetric {
+        &self.metric
+    }
+
+    pub(crate) const fn source(&self) -> &Binary64Cochain {
+        &self.source
+    }
+
+    #[must_use]
+    pub const fn time_step(&self) -> f64 {
+        self.time_step
+    }
 }
 
 impl MeanZeroPoisson {
     pub(crate) const fn metric(&self) -> &PositiveMetric {
         &self.metric
     }
-    pub(crate) const fn density(&self) -> &Binary64Cochain {
-        &self.density
+    pub(crate) fn len(&self) -> usize {
+        self.rhs.len()
     }
-    /// Sum of absolute weighted density terms used by exact compatibility admission.
+    pub(crate) fn weak_value(&self, index: usize, masses: &[f64]) -> Option<f64> {
+        self.rhs.weak_value(index, masses)
+    }
+    /// Sum of absolute weak right-hand-side terms used by compatibility admission.
     #[must_use]
     pub const fn compatibility_scale(&self) -> f64 {
-        self.compatibility.weighted_l1
+        self.compatibility.rhs_l1
     }
 
     pub(crate) fn certify(
@@ -129,7 +180,8 @@ impl MeanZeroPoisson {
         let metric = self.metric();
         let vertex_weights = metric.hodge_coefficients_slice(0)?;
         if vertex_weights.len() == 1 {
-            if self.density.coefficients()[0] != 0.0 || potential.coefficients()[0] != 0.0 {
+            if self.weak_value(0, vertex_weights) != Some(0.0) || potential.coefficients()[0] != 0.0
+            {
                 return Err(ProblemError::Numerical);
             }
             return Ok(PoissonSolution::new(
@@ -159,6 +211,9 @@ impl MeanZeroPoisson {
         let indices = boundary.indices();
         let potential_coefficients = potential.coefficients();
         for row in 0..vertex_weights.len() {
+            let rhs = self
+                .weak_value(row, vertex_weights)
+                .ok_or(ProblemError::Numerical)?;
             let terms = indices[indptr[row]..indptr[row + 1]]
                 .iter()
                 .flat_map(|&edge| {
@@ -173,10 +228,7 @@ impl MeanZeroPoisson {
                         (sign * edge_weights[edge], potential_coefficients[column])
                     })
                 })
-                .chain(std::iter::once((
-                    -vertex_weights[row],
-                    self.density.coefficients()[row],
-                )));
+                .chain(std::iter::once((-1.0, rhs)));
             let scale = terms
                 .clone()
                 .map(|(a, b)| (a * b).abs())
@@ -212,22 +264,61 @@ impl MeanZeroPoisson {
 }
 
 impl PositiveMetric {
+    fn require_mean_zero_space<K: Variance>(
+        &self,
+        rhs: &Binary64Element<K>,
+    ) -> Result<(), ProblemError> {
+        let owner = self.realization().topology();
+        owner.refine_connected()?;
+        owner.refine_regular()?.without_boundary()?;
+        let expected = Binary64Space::<K>::full(Arc::clone(owner), 0)?;
+        expected
+            .same_space(rhs.space())
+            .then_some(())
+            .ok_or(ProblemError::SpaceMismatch)
+    }
+
+    /// Admit one backward-Euler step for a full scalar vertex cochain.
+    ///
+    /// # Errors
+    /// Rejects a foreign, selected, non-vertex source or nonpositive/nonfinite time.
+    pub fn heat_evolution(
+        &self,
+        source: Binary64Cochain,
+        time_step: f64,
+    ) -> Result<HeatProblem, ProblemError> {
+        if !time_step.is_finite() || time_step <= 0.0 {
+            return Err(ProblemError::TimeStep);
+        }
+        if !source.space().is_full() {
+            return Err(ProblemError::SpaceMismatch);
+        }
+        let expected =
+            Binary64Space::<Cochain>::full(Arc::clone(self.realization().topology()), 0)?;
+        if !expected.same_space(source.space()) {
+            return Err(ProblemError::SpaceMismatch);
+        }
+        self.hodge_coefficients_slice(0)?;
+        if self.realization().topology().dimension() > 0 {
+            self.hodge_coefficients_slice(1)?;
+        }
+        Ok(HeatProblem {
+            metric: self.clone(),
+            source,
+            time_step,
+        })
+    }
+
     /// Admit a compatible density on a connected closed complex.
     ///
     /// # Errors
     /// Rejects a foreign/non-vertex density, unsuitable topology, or a
     /// nonzero exact binary64 weighted sum.
-    pub fn mean_zero_poisson(
+    pub fn mean_zero_poisson_density(
         &self,
         density: Binary64Cochain,
     ) -> Result<MeanZeroPoisson, ProblemError> {
-        let owner = self.realization().topology();
-        owner.refine_connected()?;
-        owner.refine_regular()?.without_boundary()?;
-        let expected = Binary64Space::<Cochain>::full(Arc::clone(owner), 0)?;
-        if !expected.same_space(density.space()) {
-            return Err(ProblemError::SpaceMismatch);
-        }
+        self.require_mean_zero_space(&density)?;
         let weights = self.hodge_coefficients_slice(0)?;
         if !exact_dot_is_zero(weights, density.coefficients()) {
             return Err(ProblemError::IncompatibleRhs);
@@ -239,8 +330,48 @@ impl PositiveMetric {
             .sum();
         Ok(MeanZeroPoisson {
             metric: self.clone(),
-            density,
-            compatibility: CompatibilityEvidence { weighted_l1 },
+            rhs: PoissonRhs::Density(density),
+            compatibility: CompatibilityEvidence {
+                rhs_l1: weighted_l1,
+            },
+        })
+    }
+
+    /// Admit a compatible integrated degree-zero load on a connected closed complex.
+    ///
+    /// # Errors
+    /// Rejects a foreign/non-vertex load, unsuitable topology, or a binary64
+    /// coefficient sum outside the scale-relative compatibility bound.
+    pub fn mean_zero_poisson_load(
+        &self,
+        load: Binary64Chain,
+    ) -> Result<MeanZeroPoisson, ProblemError> {
+        self.require_mean_zero_space(&load)?;
+        let mut l1 = 0.0_f64;
+        for coefficient in load.coefficients() {
+            l1 = next_up(l1 + coefficient.abs());
+        }
+        if !l1.is_finite() {
+            return Err(ProblemError::Numerical);
+        }
+        let operation_count = f64::from(
+            u32::try_from(load.coefficients().len().saturating_add(1)).unwrap_or(u32::MAX),
+        );
+        let tolerance = next_up(256.0 * f64::EPSILON * l1 + operation_count * f64::from_bits(1));
+        let compatibility = adaptive_product_sum(
+            load.coefficients()
+                .iter()
+                .copied()
+                .map(|value| (1.0, value)),
+            tolerance,
+        );
+        if !compatibility.accepted {
+            return Err(ProblemError::IncompatibleRhs);
+        }
+        Ok(MeanZeroPoisson {
+            metric: self.clone(),
+            rhs: PoissonRhs::Load(load),
+            compatibility: CompatibilityEvidence { rhs_l1: l1 },
         })
     }
 
@@ -774,6 +905,67 @@ pub struct PoissonSolution {
     evidence: ResidualEvidence,
 }
 
+/// One scalar heat value with the evidence required for publication.
+#[derive(Clone, Debug)]
+pub struct HeatSolution {
+    value: Binary64Cochain,
+    residual_bound: f64,
+    mass_residual_bound: f64,
+    energy_before: f64,
+    energy_after: f64,
+    exact_fallback_rows: usize,
+}
+
+impl HeatSolution {
+    #[must_use]
+    pub const fn value(&self) -> &Binary64Cochain {
+        &self.value
+    }
+
+    #[must_use]
+    pub const fn residual_bound(&self) -> f64 {
+        self.residual_bound
+    }
+
+    #[must_use]
+    pub const fn mass_residual_bound(&self) -> f64 {
+        self.mass_residual_bound
+    }
+
+    #[must_use]
+    pub const fn energy_before(&self) -> f64 {
+        self.energy_before
+    }
+
+    #[must_use]
+    pub const fn energy_after(&self) -> f64 {
+        self.energy_after
+    }
+
+    #[must_use]
+    pub const fn exact_fallback_rows(&self) -> usize {
+        self.exact_fallback_rows
+    }
+
+    pub(crate) const fn new(
+        value: Binary64Cochain,
+        residual_bound: f64,
+        mass_residual_bound: f64,
+        energy_before: f64,
+        energy_after: f64,
+        exact_fallback_rows: usize,
+    ) -> Self {
+        Self {
+            value,
+            residual_bound,
+            mass_residual_bound,
+            energy_before,
+            energy_after,
+            exact_fallback_rows,
+        }
+    }
+}
+
 impl PoissonSolution {
     #[must_use]
     pub const fn potential(&self) -> &Binary64Cochain {
@@ -797,13 +989,13 @@ fn exact_dot_is_zero(left: &[f64], right: &[f64]) -> bool {
 }
 
 #[derive(Clone, Copy)]
-struct AdaptiveVerdict {
-    accepted: bool,
-    bound: f64,
-    exact_fallback: bool,
+pub(crate) struct AdaptiveVerdict {
+    pub(crate) accepted: bool,
+    pub(crate) bound: f64,
+    pub(crate) exact_fallback: bool,
 }
 
-fn adaptive_product_sum(
+pub(crate) fn adaptive_product_sum(
     terms: impl Clone + Iterator<Item = (f64, f64)>,
     tolerance: f64,
 ) -> AdaptiveVerdict {
@@ -896,6 +1088,34 @@ pub(crate) fn adaptive_product_value(
     let (value, exponent) = exact_product_sum(terms);
     let rounded = rounded_dyadic(&value, exponent)?;
     rounded.is_finite().then_some((rounded, true))
+}
+
+pub(crate) fn adaptive_product_sign(
+    terms: impl Clone + Iterator<Item = (f64, f64)>,
+) -> Option<(Ordering, bool)> {
+    if terms
+        .clone()
+        .any(|(left, right)| !left.is_finite() || !right.is_finite())
+    {
+        return None;
+    }
+    let mut sum = 0.0_f64;
+    let mut magnitude = 0.0_f64;
+    let mut count = 0_usize;
+    for (left, right) in terms.clone() {
+        let product = left * right;
+        sum += product;
+        magnitude = next_up(magnitude + product.abs());
+        count = count.saturating_add(1);
+    }
+    let operations = count.saturating_mul(2).saturating_add(1);
+    let operations = f64::from(u32::try_from(operations).unwrap_or(u32::MAX));
+    let bound = next_up(operations * f64::EPSILON * magnitude);
+    if sum.is_finite() && sum.abs() > 8.0 * bound {
+        return Some((sum.total_cmp(&0.0), false));
+    }
+    let (value, _) = exact_product_sum(terms);
+    Some((value.cmp(&BigInt::zero()), true))
 }
 
 fn exact_product_sum(terms: impl Clone + Iterator<Item = (f64, f64)>) -> (BigInt, i32) {

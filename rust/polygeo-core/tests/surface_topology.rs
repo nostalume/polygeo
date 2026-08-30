@@ -71,6 +71,20 @@ fn disk_fact_is_cached_on_the_topology_owner_and_preserves_identity() {
     assert!(std::ptr::eq(first.owner(), owner.as_ref()));
     assert!(std::ptr::eq(first.owner(), second.owner()));
     assert!(std::ptr::eq(first.triangle().owner(), owner.as_ref()));
+    assert_eq!(first.boundary_vertices().unwrap().as_ref(), [0, 1, 2, 3]);
+
+    let reversed =
+        ComplexCore::admit(CandidateInput::signed([0, 2, 1, 0, 3, 2], 2, 3, Some(4)).unwrap())
+            .unwrap();
+    assert_eq!(
+        reversed
+            .refine_disk()
+            .unwrap()
+            .boundary_vertices()
+            .unwrap()
+            .as_ref(),
+        [0, 3, 2, 1]
+    );
 }
 
 #[test]

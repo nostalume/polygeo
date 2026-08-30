@@ -82,6 +82,19 @@ fn derivative_squares_to_zero_in_the_retained_basis() {
 }
 
 #[test]
+fn binary64_wedge_uses_the_same_oriented_cochain_product() {
+    let owner = triangle();
+    let space = Binary64CochainSpace::full(Arc::clone(&owner), 1).unwrap();
+    let left = Binary64Cochain::admit(space.clone(), vec![2.0, 5.0, 7.0]).unwrap();
+    let right = Binary64Cochain::admit(space, vec![11.0, 13.0, 17.0]).unwrap();
+
+    let product = left.wedge(&right).unwrap();
+
+    assert_eq!(product.space().degree(), 2);
+    assert!((product.coefficients()[0] + 13.0).abs() < 1.0e-12);
+}
+
+#[test]
 fn equal_sized_selections_remain_distinct_basis_handles() {
     let owner = triangle();
     let left = Arc::new(owner.selection(0, vec![0, 1]).unwrap());

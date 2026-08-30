@@ -1519,13 +1519,13 @@ pub struct IntegralHomology {
 }
 
 impl IntegralHomology {
-    /// Prepare ordinary absolute integral homology for canonicalized degrees.
+    /// Analyze ordinary absolute integral homology for canonicalized degrees.
     ///
     /// # Errors
     ///
     /// Returns a classified degree, resource, allocation, or exact-law failure
     /// without publishing a partial analysis.
-    pub fn prepare(
+    pub fn analyze(
         chain: &IntegralChainComplex,
         requested_degrees: impl IntoIterator<Item = usize>,
         limit: HomologyLimit,
@@ -1907,9 +1907,11 @@ fn verify_group(
 
 const fn map_chain_error(error: ChainError) -> HomologyError {
     match error {
-        ChainError::SpaceMismatch | ChainError::BasisIndexOutside { .. } => {
-            HomologyError::InternalInvariant
-        }
+        ChainError::SpaceMismatch
+        | ChainError::NotSimplicial
+        | ChainError::CoefficientFieldRequired
+        | ChainError::NormalizationNotInvertible
+        | ChainError::BasisIndexOutside { .. } => HomologyError::InternalInvariant,
         ChainError::Topology(_) => HomologyError::InvalidChain,
     }
 }

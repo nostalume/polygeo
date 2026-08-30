@@ -2,8 +2,9 @@ use std::f64::consts::PI;
 use std::sync::Arc;
 
 use polygeo_core::{
-    CandidateInput, ComplexCore, EuclideanRealization, RealizationLimit, SurfaceError,
-    TriangleSurface,
+    Binary64CochainSpace, Binary64Element, CancellationToken, CandidateInput, ComplexCore,
+    EuclideanRealization, NativeExecutor, NondegenerateCapability, PairingCapability,
+    RealizationLimit, SolveError, StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
 };
 
 fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
@@ -37,6 +38,22 @@ fn triangle() -> Arc<EuclideanRealization> {
         topology,
         3,
         vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        RealizationLimit::DEFAULT,
+    )
+    .unwrap()
+}
+
+fn nonplanar_disk() -> Arc<EuclideanRealization> {
+    let topology = ComplexCore::admit(
+        CandidateInput::unsigned([0_u64, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4], 4, 3, Some(5)).unwrap(),
+    )
+    .unwrap();
+    EuclideanRealization::admit(
+        topology,
+        3,
+        vec![
+            -1.0, -1.0, 0.0, 1.0, -1.0, 0.2, 1.0, 1.0, 0.0, -1.0, 1.0, -0.1, 0.0, 0.0, 0.5,
+        ],
         RealizationLimit::DEFAULT,
     )
     .unwrap()
@@ -89,6 +106,243 @@ fn assert_close(left: f64, right: f64, tolerance: f64) {
     assert!((left - right).abs() <= tolerance, "{left} != {right}");
 }
 
+fn assert_lscm_failures(surface: &TriangleSurface) {
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert_eq!(
+        surface
+            .least_squares_conformal_map(
+                [0, 2],
+                RealizationLimit::DEFAULT,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &cancellation,
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::Cancelled)
+    );
+    assert_eq!(
+        surface
+            .least_squares_conformal_map(
+                [0, 2],
+                RealizationLimit::DEFAULT,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(0, 0).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ResourceLimit)
+    );
+    assert_eq!(
+        surface
+            .least_squares_conformal_map(
+                [0, 4],
+                RealizationLimit::DEFAULT,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .surface(),
+        Some(SurfaceError::AnchorNotBoundary)
+    );
+}
+
+#[test]
+fn least_squares_conformal_map_preserves_explicit_anchors_and_certifies_the_disk() {
+    let surface = TriangleSurface::admit(nonplanar_disk()).unwrap();
+    let solution = surface
+        .least_squares_conformal_map(
+            [0, 2],
+            RealizationLimit::DEFAULT,
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert!(Arc::ptr_eq(
+        solution.realization().topology(),
+        surface.realization().topology()
+    ));
+    assert_eq!(solution.realization().ambient_dimension(), 2);
+    let positions = solution.realization().positions();
+    assert_eq!(&positions[0..2], &[0.0, 0.0]);
+    assert_eq!(&positions[4..6], &[1.0, 0.0]);
+
+    let evidence = solution.evidence();
+    assert_eq!(evidence.required_rank(), 6);
+    assert_eq!(evidence.observed_rank(), 6);
+    assert!(evidence.condition_indicator().is_finite());
+    assert!(evidence.condition_indicator() >= 1.0);
+    assert!(evidence.residual_bound() < 1.0);
+    assert!(evidence.minimum_normalized_signed_twice_area() > 0.0);
+
+    let mapped = positions.to_vec();
+    let transformed_positions = surface
+        .realization()
+        .positions()
+        .chunks_exact(3)
+        .flat_map(|point| {
+            [
+                -2.0 * point[1] + 5.0,
+                2.0 * point[0] - 7.0,
+                2.0 * point[2] + 3.0,
+            ]
+        })
+        .collect();
+    let transformed = EuclideanRealization::admit(
+        Arc::clone(surface.realization().topology()),
+        3,
+        transformed_positions,
+        RealizationLimit::DEFAULT,
+    )
+    .unwrap();
+    let transformed = TriangleSurface::admit(transformed)
+        .unwrap()
+        .least_squares_conformal_map(
+            [0, 2],
+            RealizationLimit::DEFAULT,
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    for (&left, &right) in mapped.iter().zip(transformed.realization().positions()) {
+        assert_close(left, right, 2.0e-13);
+    }
+
+    let reversed = surface
+        .least_squares_conformal_map(
+            [2, 0],
+            RealizationLimit::DEFAULT,
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    for (forward, reverse) in mapped
+        .chunks_exact(2)
+        .zip(reversed.realization().positions().chunks_exact(2))
+    {
+        assert_close(reverse[0], 1.0 - forward[0], 2.0e-13);
+        assert_close(reverse[1], -forward[1], 2.0e-13);
+    }
+
+    assert_lscm_failures(&surface);
+}
+
+fn assert_triangle_differential(
+    realization: &Arc<EuclideanRealization>,
+    scalar: [f64; 3],
+    vector: [f64; 3],
+    expected_gradient: [f64; 3],
+    expected_divergence: [f64; 3],
+) {
+    let surface = TriangleSurface::admit(Arc::clone(realization)).unwrap();
+    let scalar = Binary64Element::admit(
+        Binary64CochainSpace::full(Arc::clone(realization.topology()), 0).unwrap(),
+        scalar.to_vec(),
+    )
+    .unwrap();
+    let gradient = surface.gradient(&scalar).unwrap();
+    for (&actual, expected) in gradient.values().iter().zip(expected_gradient) {
+        assert_close(actual, expected, 2.0e-14);
+    }
+    let field = surface.face_vectors(vector.to_vec()).unwrap();
+    let divergence = surface.divergence(&field).unwrap();
+    for (&actual, expected) in divergence.coefficients().iter().zip(expected_divergence) {
+        assert_close(actual, expected, 2.0e-14);
+    }
+}
+
+fn assert_differential_rejections(
+    surface: &TriangleSurface,
+    realization: &Arc<EuclideanRealization>,
+    scalar: &[f64],
+    vector: &[f64],
+) {
+    let foreign = TriangleSurface::admit(triangle()).unwrap();
+    let foreign_scalar = Binary64Element::admit(
+        Binary64CochainSpace::full(Arc::clone(foreign.realization().topology()), 0).unwrap(),
+        scalar.to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        surface.gradient(&foreign_scalar).unwrap_err(),
+        SurfaceError::OwnerMismatch
+    );
+
+    for invalid in [
+        Binary64Element::admit(
+            Binary64CochainSpace::full(Arc::clone(realization.topology()), 1).unwrap(),
+            vec![0.0; 3],
+        )
+        .unwrap(),
+        Binary64Element::admit(
+            Binary64CochainSpace::selected(Arc::new(
+                realization.topology().selection(0, vec![0, 1]).unwrap(),
+            ))
+            .unwrap(),
+            vec![1.0, 7.0],
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(
+            surface.gradient(&invalid).unwrap_err(),
+            SurfaceError::OwnerMismatch
+        );
+    }
+    assert_eq!(
+        surface
+            .divergence(&foreign.face_vectors(vector.to_vec()).unwrap())
+            .unwrap_err(),
+        SurfaceError::OwnerMismatch
+    );
+    assert_eq!(
+        surface
+            .divergence(&surface.vertex_vectors(vec![0.0; 9]).unwrap())
+            .unwrap_err(),
+        SurfaceError::FieldShape
+    );
+}
+
+fn assert_gradient_divergence_matches_stiffness() {
+    let realization = tetrahedron(1.0, [0.0; 3]);
+    let metric = realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let surface = TriangleSurface::admit(Arc::clone(&realization)).unwrap();
+    let scalar = Binary64Element::admit(
+        Binary64CochainSpace::full(Arc::clone(realization.topology()), 0).unwrap(),
+        vec![1.0, 7.0, -1.0, 2.0],
+    )
+    .unwrap();
+    let load = surface
+        .divergence(&surface.gradient(&scalar).unwrap())
+        .unwrap();
+    assert_close(load.coefficients().iter().sum(), 0.0, 2.0e-13);
+    let laplacian = metric.laplacian(0).unwrap().apply(&scalar).unwrap();
+    for ((&actual, &mass), &value) in load
+        .coefficients()
+        .iter()
+        .zip(metric.hodge_coefficients_slice(0).unwrap())
+        .zip(laplacian.coefficients())
+    {
+        assert_close(actual, -mass * value, 2.0e-13);
+    }
+}
+
 #[test]
 fn one_field_carrier_obeys_support_shape_and_normalization() {
     let surface = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
@@ -123,6 +377,105 @@ fn one_field_carrier_obeys_support_shape_and_normalization() {
         surface.face_vectors(invalid).unwrap_err(),
         SurfaceError::NonFinite
     );
+}
+
+#[test]
+fn gradient_and_divergence_are_affine_negative_adjoints() {
+    let realization = triangle();
+    let surface = TriangleSurface::admit(Arc::clone(&realization)).unwrap();
+    let scalar_space = Binary64CochainSpace::full(Arc::clone(realization.topology()), 0).unwrap();
+    let scalar = Binary64Element::admit(scalar_space.clone(), vec![1.0, 7.0, -1.0]).unwrap();
+
+    let gradient = surface.gradient(&scalar).unwrap();
+    assert_eq!(gradient.values(), &[3.0, -2.0, 0.0]);
+    let shifted =
+        Binary64Element::admit(scalar_space, vec![1.0e12 + 1.0, 1.0e12 + 7.0, 1.0e12 - 1.0])
+            .unwrap();
+    assert_eq!(
+        surface.gradient(&shifted).unwrap().values(),
+        gradient.values()
+    );
+    let constant = Binary64Element::admit(
+        Binary64CochainSpace::full(Arc::clone(realization.topology()), 0).unwrap(),
+        vec![1.0e300; 3],
+    )
+    .unwrap();
+    assert_eq!(surface.gradient(&constant).unwrap().values(), &[0.0; 3]);
+
+    let field = surface.face_vectors(vec![4.0, -3.0, 7.0]).unwrap();
+    let divergence = surface.divergence(&field).unwrap();
+    assert_eq!(divergence.coefficients(), &[-1.0, -2.0, 3.0]);
+    let pairing = scalar
+        .coefficients()
+        .iter()
+        .zip(divergence.coefficients())
+        .map(|(&value, &load)| value * load)
+        .sum::<f64>();
+    assert_close(pairing, -18.0, 2.0e-14);
+
+    let scaled_realization = EuclideanRealization::admit(
+        Arc::clone(realization.topology()),
+        3,
+        realization
+            .positions()
+            .iter()
+            .map(|value| 3.0 * value)
+            .collect(),
+        RealizationLimit::DEFAULT,
+    )
+    .unwrap();
+    assert_triangle_differential(
+        &scaled_realization,
+        [1.0, 7.0, -1.0],
+        [4.0, -3.0, 7.0],
+        [1.0, -2.0 / 3.0, 0.0],
+        [-3.0, -6.0, 9.0],
+    );
+
+    let rotated_realization = EuclideanRealization::admit(
+        Arc::clone(realization.topology()),
+        3,
+        realization
+            .positions()
+            .chunks_exact(3)
+            .flat_map(|point| [-point[1] + 5.0, point[0] - 7.0, point[2] + 11.0])
+            .collect(),
+        RealizationLimit::DEFAULT,
+    )
+    .unwrap();
+    assert_triangle_differential(
+        &rotated_realization,
+        [1.0, 7.0, -1.0],
+        [3.0, 4.0, 7.0],
+        [2.0, 3.0, 0.0],
+        [-1.0, -2.0, 3.0],
+    );
+
+    let reversed_topology =
+        ComplexCore::admit(CandidateInput::unsigned([0_u64, 2, 1], 1, 3, Some(3)).unwrap())
+            .unwrap();
+    let reversed_realization = EuclideanRealization::admit(
+        Arc::clone(&reversed_topology),
+        3,
+        realization.positions().to_vec(),
+        RealizationLimit::DEFAULT,
+    )
+    .unwrap();
+    assert_triangle_differential(
+        &reversed_realization,
+        [1.0, 7.0, -1.0],
+        [4.0, -3.0, 7.0],
+        [3.0, -2.0, 0.0],
+        [-1.0, -2.0, 3.0],
+    );
+
+    assert_differential_rejections(
+        &surface,
+        &realization,
+        scalar.coefficients(),
+        field.values(),
+    );
+    assert_gradient_divergence_matches_stiffness();
 }
 
 #[test]
