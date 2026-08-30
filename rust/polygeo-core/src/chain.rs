@@ -2633,7 +2633,7 @@ where
 /// Each retained value is an integral degree-one cocycle in the simplicial
 /// complex's induced dual basis. Generator-edge indices retain the deterministic
 /// tree-cotree presentation named by the public surface API.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IntegralDualCycleBasis {
     chain: IntegralChainComplex,
     cycles: Box<[IntegralCochain]>,

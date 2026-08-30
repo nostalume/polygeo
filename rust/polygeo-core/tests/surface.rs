@@ -1,10 +1,12 @@
 use std::f64::consts::PI;
 use std::sync::Arc;
 
+use num_bigint::BigInt;
 use polygeo_core::{
     Binary64CochainSpace, Binary64Element, CancellationToken, CandidateInput, ComplexCore,
-    EuclideanRealization, NativeExecutor, NondegenerateCapability, PairingCapability,
-    RealizationLimit, SolveError, StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
+    EuclideanRealization, HomologyLimit, IntegralHomology, NativeExecutor, NondegenerateCapability,
+    PairingCapability, RealizationLimit, SolveError, StorageLimit, SurfaceError, TriangleSurface,
+    WorkLimit,
 };
 
 fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
@@ -60,6 +62,17 @@ fn nonplanar_disk() -> Arc<EuclideanRealization> {
 }
 
 fn torus(major_sections: usize, minor_sections: usize) -> Arc<EuclideanRealization> {
+    let mut positions = Vec::with_capacity(3 * major_sections * minor_sections);
+    for major in 0..major_sections {
+        let theta = 2.0 * PI * f64::from(u32::try_from(major).unwrap())
+            / f64::from(u32::try_from(major_sections).unwrap());
+        for minor in 0..minor_sections {
+            let phi = 2.0 * PI * (f64::from(u32::try_from(minor).unwrap()) + 0.1 * theta.sin())
+                / f64::from(u32::try_from(minor_sections).unwrap());
+            let radius = 2.0 + phi.cos();
+            positions.extend([radius * theta.cos(), radius * theta.sin(), phi.sin()]);
+        }
+    }
     let mut faces = Vec::new();
     for major in 0..major_sections {
         for minor in 0..minor_sections {
@@ -68,7 +81,21 @@ fn torus(major_sections: usize, minor_sections: usize) -> Arc<EuclideanRealizati
             let diagonal =
                 ((major + 1) % major_sections) * minor_sections + (minor + 1) % minor_sections;
             let minor_next = major * minor_sections + (minor + 1) % minor_sections;
-            faces.extend([[lower, major_next, diagonal], [lower, diagonal, minor_next]]);
+            let point = |vertex: usize| -> [f64; 3] {
+                positions[3 * vertex..3 * vertex + 3].try_into().unwrap()
+            };
+            let first_weight = cotangent(point(lower), point(diagonal), point(major_next))
+                + cotangent(point(lower), point(diagonal), point(minor_next));
+            let second_weight = cotangent(point(major_next), point(minor_next), point(lower))
+                + cotangent(point(major_next), point(minor_next), point(diagonal));
+            if first_weight >= second_weight {
+                faces.extend([[lower, major_next, diagonal], [lower, diagonal, minor_next]]);
+            } else {
+                faces.extend([
+                    [lower, major_next, minor_next],
+                    [major_next, diagonal, minor_next],
+                ]);
+            }
         }
     }
     let topology = ComplexCore::admit(
@@ -84,18 +111,23 @@ fn torus(major_sections: usize, minor_sections: usize) -> Arc<EuclideanRealizati
         .unwrap(),
     )
     .unwrap();
-    let mut positions = Vec::with_capacity(3 * major_sections * minor_sections);
-    for major in 0..major_sections {
-        let theta = 2.0 * PI * f64::from(u32::try_from(major).unwrap())
-            / f64::from(u32::try_from(major_sections).unwrap());
-        for minor in 0..minor_sections {
-            let phi = 2.0 * PI * f64::from(u32::try_from(minor).unwrap())
-                / f64::from(u32::try_from(minor_sections).unwrap());
-            let radius = 3.0 + phi.cos();
-            positions.extend([radius * theta.cos(), radius * theta.sin(), phi.sin()]);
-        }
-    }
     EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+}
+
+fn cotangent(left: [f64; 3], right: [f64; 3], opposite: [f64; 3]) -> f64 {
+    let left = std::array::from_fn::<_, 3, _>(|axis| left[axis] - opposite[axis]);
+    let right = std::array::from_fn::<_, 3, _>(|axis| right[axis] - opposite[axis]);
+    let dot = left
+        .iter()
+        .zip(right)
+        .map(|(&left, right)| left * right)
+        .sum::<f64>();
+    let cross = [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ];
+    dot / norm(&cross)
 }
 
 fn norm(vector: &[f64]) -> f64 {
@@ -608,6 +640,202 @@ fn connection_retains_only_transport_and_integrability_shares_owner() {
     for vector in vectors.values().chunks_exact(3) {
         assert_close(norm(vector), 1.0, 8.0e-15);
     }
+}
+
+#[test]
+fn direction_field_singularities_are_exact_and_quantization_checked() {
+    let surface = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
+    let levi_civita = surface.levi_civita_connection().unwrap();
+    let deviations = levi_civita
+        .transports()
+        .chunks_exact(2)
+        .map(|value| -value[1].atan2(value[0]))
+        .collect::<Vec<_>>();
+    let connection = surface.connection(&deviations).unwrap();
+    let cycles = surface
+        .realization()
+        .topology()
+        .integral_dual_cycle_basis()
+        .unwrap();
+    let field = connection
+        .require_integrable(&cycles)
+        .unwrap()
+        .direction_field(0.0)
+        .unwrap();
+
+    let singularities = field.singularity_indices().unwrap();
+    assert_eq!(singularities.indices().degree(), 0);
+    assert_eq!(
+        singularities
+            .indices()
+            .coefficients()
+            .iter()
+            .cloned()
+            .sum::<BigInt>(),
+        BigInt::from(2)
+    );
+    assert!(singularities.maximum_quantization_residual() <= singularities.residual_limit());
+}
+
+#[test]
+fn minimum_energy_direction_field_realizes_exact_sphere_indices() {
+    let realization = tetrahedron(1.0, [0.0; 3]);
+    let metric = realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let surface = TriangleSurface::admit(realization).unwrap();
+    let homology = IntegralHomology::analyze(
+        &surface.realization().topology().chain_complex(),
+        [1],
+        HomologyLimit::DEFAULT,
+    )
+    .unwrap();
+    let harmonic = metric
+        .harmonic_one_form_basis(
+            homology.group(1).unwrap(),
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let cycles = surface
+        .realization()
+        .topology()
+        .integral_dual_cycle_basis()
+        .unwrap();
+    let singularity_space = surface
+        .realization()
+        .topology()
+        .chain_complex()
+        .dual()
+        .space(0)
+        .unwrap();
+    let requested = singularity_space
+        .element([(0, BigInt::from(1)), (1, BigInt::from(1))])
+        .unwrap();
+
+    let field = surface
+        .minimum_energy_direction_field(
+            &metric,
+            &harmonic,
+            &cycles,
+            &requested,
+            &[],
+            0.25,
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    let observed = field.singularity_indices().unwrap();
+    assert_eq!(observed.indices().indices(), requested.indices());
+    assert_eq!(observed.indices().coefficients(), requested.coefficients());
+
+    let invalid = singularity_space.element([(0, BigInt::from(1))]).unwrap();
+    assert_eq!(
+        surface
+            .minimum_energy_direction_field(
+                &metric,
+                &harmonic,
+                &cycles,
+                &invalid,
+                &[],
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ProblemMismatch)
+    );
+    assert_eq!(
+        surface
+            .minimum_energy_direction_field(
+                &metric,
+                &harmonic,
+                &cycles,
+                &requested,
+                &[],
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(0, 0).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ResourceLimit)
+    );
+}
+
+#[test]
+fn minimum_energy_direction_field_closes_lifted_torus_turns() {
+    let torus_realization = torus(8, 7);
+    let torus_metric = torus_realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let torus_surface = TriangleSurface::admit(torus_realization).unwrap();
+    let torus_homology = IntegralHomology::analyze(
+        &torus_surface.realization().topology().chain_complex(),
+        [1],
+        HomologyLimit::DEFAULT,
+    )
+    .unwrap();
+    let torus_harmonic = torus_metric
+        .harmonic_one_form_basis(
+            torus_homology.group(1).unwrap(),
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let torus_cycles = torus_surface
+        .realization()
+        .topology()
+        .integral_dual_cycle_basis()
+        .unwrap();
+    let no_singularities = torus_surface
+        .realization()
+        .topology()
+        .chain_complex()
+        .dual()
+        .space(0)
+        .unwrap()
+        .element([])
+        .unwrap();
+    let torus_field = torus_surface
+        .minimum_energy_direction_field(
+            &torus_metric,
+            &torus_harmonic,
+            &torus_cycles,
+            &no_singularities,
+            &[1, -1],
+            0.0,
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(torus_harmonic.rank(), 2);
+    assert!(
+        torus_field
+            .singularity_indices()
+            .unwrap()
+            .indices()
+            .indices()
+            .is_empty()
+    );
 }
 
 #[test]

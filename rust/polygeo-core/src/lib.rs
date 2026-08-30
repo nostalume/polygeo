@@ -70,9 +70,10 @@ pub use solve::{
 };
 pub use subset::{CanonicalSelection, SimplexSubset, SubsetBuilder};
 pub use surface::{
-    EntityVectors, FaceDirectionField, FaceVectors, FlowEvidence, FlowStep, HolonomyEvidence,
-    IntegrableConnection, LeastSquaresConformalMapEvidence, LeastSquaresConformalMapSolution,
-    SurfaceConnection, SurfaceError, TriangleSurface, VertexVectors,
+    DirectionFieldSingularities, EntityVectors, FaceDirectionField, FaceVectors, FlowEvidence,
+    FlowStep, HolonomyEvidence, IntegrableConnection, LeastSquaresConformalMapEvidence,
+    LeastSquaresConformalMapSolution, SurfaceConnection, SurfaceError, TriangleSurface,
+    VertexVectors,
 };
 
 /// Portable logical-storage ceiling for one unpublished operation.

@@ -29,14 +29,16 @@ use num_traits::ToPrimitive;
 
 use crate::incidence::{IncidenceAxis, independent_incidence};
 use crate::problem::{adaptive_product_sign, adaptive_product_sum, adaptive_product_value};
+use crate::surface::dual_edges;
 use crate::{
-    Binary64Cochain, Binary64Element, Binary64Space, CanonicalSelection, Cochain,
-    DirichletEvidence, DirichletProblem, DirichletSolution, EuclideanRealization, FlowEvidence,
-    FlowStep, HarmonicExtension, HeatProblem, HeatSolution, HodgeDecomposition, HodgeProblem,
-    HomologyGroup, IntegralDualCycleBasis, LeastSquaresConformalMapEvidence,
-    LeastSquaresConformalMapSolution, LinearOperator, MeanZeroPoisson, NondegenerateCapability,
-    PairingCapability, PoissonSolution, PositiveMetric, Problem, RealizationError,
-    RealizationLimit, StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
+    Binary64Chain, Binary64Cochain, Binary64Element, Binary64Space, CanonicalSelection, Chain,
+    Cochain, DirichletEvidence, DirichletProblem, DirichletSolution, EuclideanRealization,
+    FaceDirectionField, FlowEvidence, FlowStep, HarmonicExtension, HeatProblem, HeatSolution,
+    HodgeDecomposition, HodgeProblem, HomologyGroup, IntegralCochain, IntegralDualCycleBasis,
+    LeastSquaresConformalMapEvidence, LeastSquaresConformalMapSolution, LinearOperator,
+    MeanZeroPoisson, NondegenerateCapability, PairingCapability, PoissonSolution, PositiveMetric,
+    Problem, RealizationError, RealizationLimit, StorageLimit, SurfaceError, TriangleSurface,
+    WorkLimit,
 };
 
 type EdgeEndpoints = [(usize, i64); 2];
@@ -1104,7 +1106,332 @@ fn maximum_absolute(values: &[f64]) -> Result<f64, SolveError> {
     })
 }
 
+fn dual_edge_values(
+    surface: &TriangleSurface,
+    chain: &Binary64Chain,
+) -> Result<Vec<f64>, SurfaceComputationError> {
+    let topology = surface.realization().topology();
+    let expected =
+        Binary64Space::<Chain>::full(Arc::clone(topology), 1).map_err(|_| SolveError::Numerical)?;
+    if !expected.same_space(chain.space()) {
+        return Err(SolveError::ProblemMismatch.into());
+    }
+    let dual = dual_edges(topology)?;
+    chain
+        .coefficients()
+        .iter()
+        .enumerate()
+        .map(|(edge, &value)| {
+            let (_, _, source_sign) = dual.edge(edge)?;
+            Ok(f64::from(source_sign) * value)
+        })
+        .collect()
+}
+
+fn dual_period(
+    surface: &TriangleSurface,
+    cycles: &IntegralDualCycleBasis,
+    cycle_index: usize,
+    values: &[f64],
+) -> Result<f64, SurfaceComputationError> {
+    let cycle = cycles
+        .cocycle(cycle_index)
+        .ok_or(SurfaceError::IndexOutside)?;
+    let dual = dual_edges(surface.realization().topology())?;
+    let mut terms = Vec::new();
+    terms
+        .try_reserve_exact(cycle.indices().len())
+        .map_err(|_| SolveError::Allocation)?;
+    for (&edge, coefficient) in cycle.indices().iter().zip(cycle.coefficients()) {
+        let coefficient = coefficient
+            .to_f64()
+            .filter(|value| value.is_finite())
+            .ok_or(SurfaceError::Unrepresentable)?;
+        let (_, _, source_sign) = dual.edge(edge)?;
+        terms.push((-f64::from(source_sign) * coefficient, values[edge]));
+    }
+    adaptive_product_value(terms.into_iter())
+        .map(|(value, _)| value)
+        .ok_or_else(|| SolveError::Numerical.into())
+}
+
+fn exact_singularity_sum(singularities: &IntegralCochain) -> num_bigint::BigInt {
+    singularities.coefficients().iter().sum()
+}
+
+fn same_integral_coordinates(left: &IntegralCochain, right: &IntegralCochain) -> bool {
+    left.space().same_based_space(right.space())
+        && left.indices() == right.indices()
+        && left.coefficients() == right.coefficients()
+}
+
+fn require_direction_field_resources(
+    vertex_count: usize,
+    edge_count: usize,
+    face_count: usize,
+    rank: usize,
+    storage: StorageLimit,
+    work: WorkLimit,
+) -> Result<(), SolveError> {
+    let retained_scalars = edge_count
+        .saturating_mul(2)
+        .saturating_add(face_count.saturating_mul(4));
+    let retained = logical_bytes(retained_scalars, size_of::<f64>())?;
+    let edge_temporaries = logical_bytes(
+        edge_count.saturating_mul(rank.saturating_add(4)),
+        size_of::<f64>(),
+    )?;
+    let vertex_temporaries = logical_bytes(vertex_count.saturating_mul(3), size_of::<f64>())?;
+    let period_matrices = matrix_bytes(rank)?.saturating_mul(2);
+    let poisson_factor = matrix_bytes(vertex_count.saturating_sub(1))?;
+    let peak = retained
+        .checked_add(edge_temporaries)
+        .and_then(|value| value.checked_add(vertex_temporaries))
+        .and_then(|value| value.checked_add(period_matrices))
+        .and_then(|value| value.checked_add(poisson_factor.saturating_mul(2)))
+        .ok_or(SolveError::ResourceLimit)?;
+    require_storage(storage, retained, peak)?;
+    let required_work = cubic_work(vertex_count.saturating_sub(1))?
+        .checked_add(cubic_work(rank)?)
+        .and_then(|value| {
+            value
+                .checked_add(u64::try_from(edge_count.saturating_mul(rank.saturating_add(4))).ok()?)
+        })
+        .ok_or(SolveError::ResourceLimit)?;
+    require_work(work, required_work)
+}
+
+fn solve_coexact_direction_adjustment(
+    surface: &TriangleSurface,
+    metric: &PositiveMetric,
+    singularities: &IntegralCochain,
+    executor: NativeExecutor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<Vec<f64>, SurfaceComputationError> {
+    let topology = surface.realization().topology();
+    let curvature = surface.gaussian_curvature_measure()?;
+    let mut load_values = curvature
+        .coefficients()
+        .iter()
+        .map(|value| -*value)
+        .collect::<Vec<_>>();
+    for (&vertex, coefficient) in singularities
+        .indices()
+        .iter()
+        .zip(singularities.coefficients())
+    {
+        let index = coefficient
+            .to_f64()
+            .filter(|value| value.is_finite())
+            .ok_or(SurfaceError::Unrepresentable)?;
+        load_values[vertex] += std::f64::consts::TAU * index;
+    }
+    let load_space =
+        Binary64Space::<Chain>::full(Arc::clone(topology), 0).map_err(|_| SolveError::Numerical)?;
+    let load =
+        Binary64Element::admit(load_space, load_values).map_err(|_| SolveError::Numerical)?;
+    let problem = metric
+        .mean_zero_poisson_load(load)
+        .map_err(|_| SolveError::Numerical)?;
+    let prepared = problem.prepare_with_cancellation(&executor, storage, work, cancellation)?;
+    let mut workspace = prepared.workspace_for(&problem, storage)?;
+    let solution = prepared.solve_cancellable(&problem, &mut workspace, work, cancellation)?;
+    let gradient = solution
+        .potential()
+        .exterior_derivative()
+        .map_err(|_| SolveError::Numerical)?;
+    let coexact = metric
+        .riesz(1)
+        .map_err(|_| SolveError::Numerical)?
+        .apply(&gradient)
+        .map_err(|_| SolveError::Numerical)?;
+    dual_edge_values(surface, &coexact)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the private kernel mirrors explicit mathematical and execution inputs"
+)]
+fn add_harmonic_direction_adjustment(
+    surface: &Arc<TriangleSurface>,
+    metric: &PositiveMetric,
+    harmonic_basis: &HarmonicOneFormBasis,
+    dual_cycles: &IntegralDualCycleBasis,
+    generator_turns: &[i64],
+    deviations: &mut [f64],
+    executor: NativeExecutor,
+    cancellation: &CancellationToken,
+) -> Result<(), SurfaceComputationError> {
+    let rank = dual_cycles.rank();
+    if rank == 0 {
+        return Ok(());
+    }
+    let levi_civita_angles = surface
+        .levi_civita_connection()?
+        .transports()
+        .chunks_exact(2)
+        .map(|value| value[1].atan2(value[0]))
+        .collect::<Vec<_>>();
+    let mut harmonic_dual = Vec::new();
+    harmonic_dual
+        .try_reserve_exact(rank)
+        .map_err(|_| SolveError::Allocation)?;
+    let riesz = metric.riesz(1).map_err(|_| SolveError::Numerical)?;
+    for form in harmonic_basis.forms() {
+        let chain = riesz.apply(form).map_err(|_| SolveError::ProblemMismatch)?;
+        harmonic_dual.push(dual_edge_values(surface, &chain)?);
+    }
+    let mut periods = Mat::<f64>::zeros(rank, rank);
+    let mut target = Mat::<f64>::zeros(rank, 1);
+    for row in 0..rank {
+        let base_angle = dual_period(surface, dual_cycles, row, &levi_civita_angles)?;
+        let coexact_period = dual_period(surface, dual_cycles, row, deviations)?;
+        let turns = generator_turns[row]
+            .to_f64()
+            .ok_or(SurfaceError::Unrepresentable)?;
+        target[(row, 0)] = std::f64::consts::TAU * turns - base_angle - coexact_period;
+        for column in 0..rank {
+            periods[(row, column)] =
+                dual_period(surface, dual_cycles, row, &harmonic_dual[column])?;
+        }
+    }
+    let factor = factor_dense_square(periods, executor, cancellation)?;
+    require_stable_dense_lu(&factor)?;
+    let requirement = factor_solve_requirement(&factor, executor, 1);
+    let mut buffer = MemBuffer::try_new(requirement).map_err(|_| SolveError::Allocation)?;
+    let scale = factor_scale(&factor);
+    for row in 0..rank {
+        target[(row, 0)] /= scale;
+    }
+    solve_factor(
+        &factor,
+        target.as_mut(),
+        executor,
+        MemStack::new(&mut buffer),
+    );
+    for (edge, deviation) in deviations.iter_mut().enumerate() {
+        let (correction, _) = adaptive_product_value(
+            harmonic_dual
+                .iter()
+                .enumerate()
+                .map(|(column, form)| (form[edge], target[(column, 0)])),
+        )
+        .ok_or(SolveError::Numerical)?;
+        *deviation += correction;
+    }
+    let operation_count =
+        u32::try_from(deviations.len().saturating_add(rank).saturating_add(1)).unwrap_or(u32::MAX);
+    let period_limit = 8192.0 * f64::EPSILON * f64::from(operation_count);
+    for (row, &turns) in generator_turns.iter().enumerate() {
+        let turns = turns.to_f64().ok_or(SurfaceError::Unrepresentable)?;
+        let observed = dual_period(surface, dual_cycles, row, &levi_civita_angles)?
+            + dual_period(surface, dual_cycles, row, deviations)?;
+        if (observed - std::f64::consts::TAU * turns).abs() > period_limit {
+            return Err(SolveError::Numerical.into());
+        }
+    }
+    Ok(())
+}
+
 impl TriangleSurface {
+    /// Construct the minimum-energy ordinary direction field with exact indices and turns.
+    ///
+    /// The supplied degree-zero integral cochain fixes singularity indices. Generator turns
+    /// are lifted integer holonomies in the order of `dual_cycles`; `anchor_phase` fixes the
+    /// remaining global rotation only.
+    ///
+    /// # Errors
+    /// Rejects foreign inputs, an index sum different from Euler characteristic, mismatched
+    /// generator dimensions, exhausted resources, cancellation, or failed certification.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mathematical inputs and execution policies remain explicit"
+    )]
+    pub fn minimum_energy_direction_field(
+        self: &Arc<Self>,
+        metric: &PositiveMetric,
+        harmonic_basis: &HarmonicOneFormBasis,
+        dual_cycles: &IntegralDualCycleBasis,
+        singularities: &IntegralCochain,
+        generator_turns: &[i64],
+        anchor_phase: f64,
+        executor: &NativeExecutor,
+        storage: StorageLimit,
+        work: WorkLimit,
+        cancellation: &CancellationToken,
+    ) -> Result<FaceDirectionField, SurfaceComputationError> {
+        let topology = self.realization().topology();
+        if !Arc::ptr_eq(metric.realization(), self.realization())
+            || !dual_cycles
+                .chain_complex()
+                .same_owner(&topology.chain_complex())
+        {
+            return Err(SolveError::ProblemMismatch.into());
+        }
+        let singularity_space = topology
+            .chain_complex()
+            .dual()
+            .space(0)
+            .map_err(SurfaceError::from)?;
+        if !singularities.space().same_based_space(&singularity_space)
+            || harmonic_basis.rank() != dual_cycles.rank()
+            || generator_turns.len() != dual_cycles.rank()
+            || !anchor_phase.is_finite()
+        {
+            return Err(SolveError::ProblemMismatch.into());
+        }
+        let edge_count = topology.basis(1).map_err(SurfaceError::from)?.row_count();
+        require_direction_field_resources(
+            topology.vertex_count(),
+            edge_count,
+            self.face_count(),
+            harmonic_basis.rank(),
+            storage,
+            work,
+        )?;
+        check_cancelled(cancellation)?;
+        let euler = i128::try_from(topology.vertex_count())
+            .ok()
+            .and_then(|value| value.checked_sub(i128::try_from(edge_count).ok()?))
+            .and_then(|value| value.checked_add(i128::try_from(self.face_count()).ok()?))
+            .ok_or(SurfaceError::Overflow)?;
+        if exact_singularity_sum(singularities) != num_bigint::BigInt::from(euler) {
+            return Err(SolveError::ProblemMismatch.into());
+        }
+
+        let mut deviations = solve_coexact_direction_adjustment(
+            self,
+            metric,
+            singularities,
+            *executor,
+            storage,
+            work,
+            cancellation,
+        )?;
+        add_harmonic_direction_adjustment(
+            self,
+            metric,
+            harmonic_basis,
+            dual_cycles,
+            generator_turns,
+            &mut deviations,
+            *executor,
+            cancellation,
+        )?;
+        check_cancelled(cancellation)?;
+        let field = self
+            .connection(&deviations)?
+            .require_integrable(dual_cycles)?
+            .direction_field(anchor_phase)?;
+        let observed = field.singularity_indices()?;
+        if !same_integral_coordinates(observed.indices(), singularities) {
+            return Err(SolveError::Numerical.into());
+        }
+        Ok(field)
+    }
+
     /// Compute one bounded least-squares conformal parameterization of an oriented disk.
     ///
     /// The two distinct boundary anchors map to `(0, 0)` and `(1, 0)` in caller order.

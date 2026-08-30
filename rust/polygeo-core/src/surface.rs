@@ -1,13 +1,14 @@
 use std::fmt;
 use std::sync::Arc;
 
+use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use once_cell::sync::OnceCell;
 
 use crate::problem::adaptive_product_value;
 use crate::{
     Binary64Chain, Binary64ChainSpace, Binary64Cochain, Binary64CochainSpace, Binary64Element,
-    CanonicalBoundary, ComplexCore, EuclideanRealization, IntegralDualCycleBasis,
+    CanonicalBoundary, ComplexCore, EuclideanRealization, IntegralCochain, IntegralDualCycleBasis,
     NondegenerateCapability, PairingCapability, PositiveMetric, TopologyError,
 };
 
@@ -1079,13 +1080,13 @@ fn complex_power(mut value: [f64; 2], exponent: i64) -> Result<[f64; 2], Surface
 }
 
 #[derive(Clone, Copy, Debug)]
-struct DualEdges<'a> {
+pub(crate) struct DualEdges<'a> {
     boundary: &'a CanonicalBoundary,
     edge_count: usize,
 }
 
 impl DualEdges<'_> {
-    fn edge(self, edge: usize) -> Result<(usize, usize, i8), SurfaceError> {
+    pub(crate) fn edge(self, edge: usize) -> Result<(usize, usize, i8), SurfaceError> {
         if edge >= self.edge_count {
             return Err(SurfaceError::IndexOutside);
         }
@@ -1110,7 +1111,7 @@ impl DualEdges<'_> {
     }
 }
 
-fn dual_edges(topology: &ComplexCore) -> Result<DualEdges<'_>, SurfaceError> {
+pub(crate) fn dual_edges(topology: &ComplexCore) -> Result<DualEdges<'_>, SurfaceError> {
     let boundary = topology.boundary(2)?;
     let edge_count = topology.basis(1)?.row_count();
     let dual = DualEdges {
@@ -1129,6 +1130,31 @@ pub struct HolonomyEvidence {
     local_error: f64,
     generator_error: f64,
     limit: f64,
+}
+
+/// Exact ordinary field singularities admitted from binary64 angle evidence.
+#[derive(Clone, Debug)]
+pub struct DirectionFieldSingularities {
+    indices: IntegralCochain,
+    maximum_quantization_residual: f64,
+    residual_limit: f64,
+}
+
+impl DirectionFieldSingularities {
+    #[must_use]
+    pub const fn indices(&self) -> &IntegralCochain {
+        &self.indices
+    }
+
+    #[must_use]
+    pub const fn maximum_quantization_residual(&self) -> f64 {
+        self.maximum_quantization_residual
+    }
+
+    #[must_use]
+    pub const fn residual_limit(&self) -> f64 {
+        self.residual_limit
+    }
 }
 
 impl HolonomyEvidence {
@@ -1309,52 +1335,17 @@ fn local_holonomy_error(
     for vertex in 0..topology.vertex_count() {
         let start = incidence.indptr()[vertex];
         let stop = incidence.indptr()[vertex + 1];
-        let incident = &incidence.indices()[start..stop];
-        if incident.is_empty() {
-            continue;
-        }
-        let first_edge = *incident.iter().min().ok_or(SurfaceError::IndexOutside)?;
-        let (start_face, _, _) = dual.edge(first_edge)?;
-        let mut current = start_face;
-        let mut previous = usize::MAX;
         let mut product = [1.0, 0.0];
-        loop {
-            let mut candidates = incident
-                .iter()
-                .copied()
-                .filter_map(|edge| {
-                    let (source, target, _) = dual.edge(edge).ok()?;
-                    if source == current && target != previous {
-                        Some((target, edge, true))
-                    } else if target == current && source != previous {
-                        Some((source, edge, false))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            candidates.sort_by_key(|&(neighbor, edge, _)| (edge, neighbor));
-            if previous != usize::MAX && candidates.len() != 1 {
-                return Err(SurfaceError::Unrepresentable);
-            }
-            let (next, edge, forward) = candidates
-                .first()
-                .copied()
-                .ok_or(SurfaceError::Unrepresentable)?;
-            let transport = complex_at(transports, edge)?;
+        for (&edge, &incidence_sign) in incidence.indices()[start..stop]
+            .iter()
+            .zip(&incidence.data()[start..stop])
+        {
+            let (_, _, source_sign) = dual.edge(edge)?;
+            let exponent = -i64::from(source_sign) * i64::from(incidence_sign);
             product = normalize_complex(complex_multiply(
                 product,
-                if forward {
-                    transport
-                } else {
-                    complex_conjugate(transport)
-                },
+                complex_power(complex_at(transports, edge)?, exponent)?,
             ))?;
-            previous = current;
-            current = next;
-            if current == start_face {
-                break;
-            }
         }
         maximum = maximum.max(product[1].atan2(product[0]).abs());
     }
@@ -1364,6 +1355,12 @@ fn local_holonomy_error(
 fn propagate_phases(connection: &SurfaceConnection) -> Result<(Vec<f64>, f64), SurfaceError> {
     let dual = dual_edges(connection.surface.realization.topology())?;
     let face_count = connection.surface.face_count();
+    let mut adjacency = vec![Vec::new(); face_count];
+    for edge in 0..connection.surface.edge_count() {
+        let (source, target, _) = dual.edge(edge)?;
+        adjacency[source].push((target, edge, true));
+        adjacency[target].push((source, edge, false));
+    }
     let mut phases = vec![0.0; 2 * face_count];
     phases[0] = 1.0;
     let mut visited = vec![false; face_count];
@@ -1373,15 +1370,7 @@ fn propagate_phases(connection: &SurfaceConnection) -> Result<(Vec<f64>, f64), S
     while cursor < pending.len() {
         let face = pending[cursor];
         cursor += 1;
-        for edge in 0..connection.surface.edge_count() {
-            let (source, target, _) = dual.edge(edge)?;
-            let (neighbor, forward) = if source == face {
-                (target, true)
-            } else if target == face {
-                (source, false)
-            } else {
-                continue;
-            };
+        for &(neighbor, edge, forward) in &adjacency[face] {
             if visited[neighbor] {
                 continue;
             }
@@ -1493,6 +1482,84 @@ impl FaceDirectionField {
     #[must_use]
     pub fn directions(&self) -> &[f64] {
         &self.directions
+    }
+
+    /// Calculate exact ordinary singularity indices with quantization evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unavailable surface geometry, indeterminate binary64 rounding, or
+    /// a result that violates the exact closed-surface index law.
+    pub fn singularity_indices(&self) -> Result<DirectionFieldSingularities, SurfaceError> {
+        let surface = &self.connection.surface;
+        let topology = surface.realization.topology();
+        let curvature = surface.gaussian_curvature_measure()?;
+        let levi_civita = surface.levi_civita_connection()?;
+        let dual = dual_edges(topology)?;
+        let incidence = topology.boundary(1)?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(topology.vertex_count())
+            .map_err(|_| SurfaceError::Overflow)?;
+        let mut maximum_residual = 0.0_f64;
+        let mut maximum_valence = 0_usize;
+        let mut total = BigInt::from(0);
+        for vertex in 0..topology.vertex_count() {
+            let start = incidence.indptr()[vertex];
+            let stop = incidence.indptr()[vertex + 1];
+            maximum_valence = maximum_valence.max(stop - start);
+            let mut terms = Vec::new();
+            terms
+                .try_reserve_exact(stop - start + 1)
+                .map_err(|_| SurfaceError::Overflow)?;
+            terms.push((1.0, curvature.coefficients()[vertex]));
+            for (&edge, &incidence_sign) in incidence.indices()[start..stop]
+                .iter()
+                .zip(&incidence.data()[start..stop])
+            {
+                let (source, target, source_sign) = dual.edge(edge)?;
+                let expected = complex_multiply(
+                    complex_at(levi_civita.transports(), edge)?,
+                    complex_at(&self.directions, source)?,
+                );
+                let mismatch = complex_multiply(
+                    complex_at(&self.directions, target)?,
+                    complex_conjugate(expected),
+                );
+                let traversal = -i64::from(source_sign) * i64::from(incidence_sign);
+                let traversal = traversal.to_f64().ok_or(SurfaceError::Unrepresentable)?;
+                terms.push((-traversal, mismatch[1].atan2(mismatch[0])));
+            }
+            let (numerator, _) =
+                adaptive_product_value(terms.into_iter()).ok_or(SurfaceError::Unrepresentable)?;
+            let raw = numerator / (2.0 * std::f64::consts::PI);
+            let rounded = raw.round();
+            let index = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
+            maximum_residual = maximum_residual.max((raw - rounded).abs());
+            if index != 0 {
+                entries.push((vertex, BigInt::from(index)));
+            }
+            total += index;
+        }
+        let operation_count = u32::try_from(maximum_valence.saturating_add(2)).unwrap_or(u32::MAX);
+        let residual_limit = 4096.0 * f64::EPSILON * f64::from(operation_count);
+        let euler = i128::try_from(topology.vertex_count())
+            .ok()
+            .and_then(|value| value.checked_sub(i128::try_from(surface.edge_count()).ok()?))
+            .and_then(|value| value.checked_add(i128::try_from(surface.face_count()).ok()?))
+            .ok_or(SurfaceError::Overflow)?;
+        if maximum_residual > residual_limit || total != BigInt::from(euler) {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        let space = topology.chain_complex().dual().space(0)?;
+        let indices = space
+            .element(entries)
+            .map_err(|_| SurfaceError::Unrepresentable)?;
+        Ok(DirectionFieldSingularities {
+            indices,
+            maximum_quantization_residual: maximum_residual,
+            residual_limit,
+        })
     }
 
     /// Borrow the connection-owned crossing residual without duplicating it.
