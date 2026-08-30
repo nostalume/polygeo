@@ -50,7 +50,7 @@ Exact algebra uses one generic native `ChainComplex`, `Space`, `Element`, and
 `LinearMap` family over integer or rational coefficients and chain/cochain
 variance. Exact values have no implicit binary64 or array conversion.
 `to_python_copy()` and checked `to_scipy_int64_copy()` are explicit copies.
-Requested-degree integral homology is prepared under an immutable resource
+Requested-degree integral homology is analyzed under an immutable resource
 limit and retains its exact owner.
 
 ## Binary64 layer
@@ -73,8 +73,8 @@ native source and target identities and reject foreign values.
 `dual_measures_numpy_copy()`.
 
 `realization.positive_metric()` admits represented positive Hodge weights and
-constructs metric maps or one of the native problem variants. Every problem
-follows the same lifecycle:
+constructs metric maps, reusable problem variants, or direct bounded analyses.
+Every reusable problem follows the same lifecycle:
 
 ```text
 problem.prepare(limits, cancellation)
@@ -82,10 +82,12 @@ problem.prepare(limits, cancellation)
   -> prepared.solve(problem, workspace, limits, cancellation)
 ```
 
-Preparation and solving release the GIL. Storage and work limits are explicit;
-cancellation is cooperative. A result is published only after a complete
-solve. Flow results contain a newly admitted target realization and never
-mutate their source.
+Preparation and solving release the GIL. One-shot harmonic-basis, frozen-flow,
+and LSCM computations execute directly instead of publishing unusable preparation
+objects. Storage and work limits are explicit; cancellation is cooperative. A
+result is published only after complete certification. Harmonic bases retain
+existing binary64 cochains normalized to exact homology periods; flow and LSCM
+results contain newly admitted realizations and never mutate their source.
 
 ## Triangle surfaces
 

@@ -81,19 +81,19 @@ Save it as `quick_start.py` and run `uv run python quick_start.py`.
 | Exact chain algebra | Direct native owner-bound sparse chains and algebraic-dual cochains over Z and Q, explicit scalar extension, checked map composition and duality, bounded explicit CSR materialization, requested-degree integral homology, and checked owner transport through surface chain isomorphisms. |
 | Combinatorial surfaces | Immutable orientable halfedge owners, material/exterior face separation, an exact integral chain complex, explicit eligible triangle-complex conversion with checked chain isomorphism, and owner-local component/Euler/genus facts. |
 | Geometry and metric DEC | Native `EuclideanRealization` (`Geometry` is the same class), explicit copied projections, primal and signed circumcentric dual measures, exterior derivative, Riesz maps, codifferential, Hodge Laplacian, and positive metric admission. |
-| Problems and numerics | Native problem/preparation/workspace carriers for Dirichlet, compatible mean-zero Poisson, Hodge decomposition, harmonic extension, and frozen mean-curvature flow, with limits, cancellation, and residual evidence. |
+| Problems and numerics | Native reusable problem/preparation/workspace carriers for Dirichlet, compatible mean-zero Poisson, Hodge decomposition, harmonic extension, and scalar heat; direct bounded computations for frozen mean-curvature flow, LSCM, and period-normalized harmonic one-form bases; all with cancellation and residual evidence. |
 | Triangle surfaces | Disk admission, face and vertex normal constructions, area and volume gradients, mean-curvature vectors, integrated Gaussian curvature, one frozen-metric implicit flow step, deterministic face frames, geometry-bound SO(2) connection transport, exact integral dual generators, local/global holonomy evidence, factory-only integrability, and ambient face direction fields. |
 | Optional boundaries | Root Trimesh surface input plus Plotly snapshots for geometry, full forms, free homology-cycle selections, and native surface-vector fields. |
 
-Exact integral homology is prepared explicitly under immutable resource limits.
+Exact integral homology is analyzed explicitly under immutable resource limits.
 Analyses, group views, and representatives retain their native owner; Python,
 NumPy, SciPy, and binary64 compatibility values are explicit owned projections.
 
 ## Examples
 
-The executable Marimo studies in [`examples/`](examples/) cover curvature,
-Poisson, harmonic extension, mean-curvature flow, homology, Hodge decomposition,
-and connection holonomy. See the [examples guide](examples/README.md).
+The seven executable Marimo studies in [`examples/`](examples/) cover curvature,
+Poisson, LSCM, heat-method distance, homology, Hodge decomposition, and connection
+holonomy. See the [examples guide](examples/README.md).
 
 ## Architecture
 
