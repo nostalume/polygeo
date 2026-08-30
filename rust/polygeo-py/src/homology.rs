@@ -171,13 +171,13 @@ impl PyIntegralHomology {
 }
 
 #[pyclass(name = "HomologyGroup", frozen, module = "polygeo")]
-struct PyHomologyGroup {
-    analysis: Arc<CoreIntegralHomology>,
-    degree: usize,
+pub(crate) struct PyHomologyGroup {
+    pub(crate) analysis: Arc<CoreIntegralHomology>,
+    pub(crate) degree: usize,
 }
 
 impl PyHomologyGroup {
-    fn row(&self) -> polygeo_core::HomologyGroup<'_> {
+    pub(crate) fn row(&self) -> polygeo_core::HomologyGroup<'_> {
         self.analysis
             .group(self.degree)
             .expect("native group retains one admitted analysis row")

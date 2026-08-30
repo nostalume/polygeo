@@ -1,8 +1,11 @@
-# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
+
+from typing import Literal
 
 from polygeo import (
     Binary64Cochain,
     Geometry,
+    HomologyGroup,
     PositiveMetric,
     load_surface,
     plot_form,
@@ -28,3 +31,9 @@ def incompatible_problems(metric: PositiveMetric, source: Binary64Cochain[int]) 
     poisson = metric.mean_zero_poisson_density(source)
     prepared = heat.prepare()
     prepared.solve(poisson, prepared.workspace_for(heat))
+
+
+def wrong_harmonic_basis_degree(
+    metric: PositiveMetric, group: HomologyGroup[Literal[0]]
+) -> None:
+    metric.harmonic_one_form_basis(group)

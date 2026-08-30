@@ -10,6 +10,32 @@ import pytest
 import polygeo
 
 
+def _equilateral_torus() -> tuple[polygeo.Complex, polygeo.EuclideanRealization]:
+    major_sections = 3
+    minor_sections = 3
+    faces: list[tuple[int, int, int]] = []
+    for major in range(major_sections):
+        for minor in range(minor_sections):
+            lower = major * minor_sections + minor
+            major_next = ((major + 1) % major_sections) * minor_sections + minor
+            diagonal = ((major + 1) % major_sections) * minor_sections + (
+                minor + 1
+            ) % minor_sections
+            minor_next = major * minor_sections + (minor + 1) % minor_sections
+            faces.extend(((lower, major_next, diagonal), (lower, diagonal, minor_next)))
+    vertex_count = major_sections * minor_sections
+    domain = (
+        polygeo.Complex.from_maximal_simplices(np.asarray(faces, dtype=np.int64))
+        .triangle_manifold()
+        .oriented()
+        .without_boundary()
+        .connected()
+    )
+    return domain, polygeo.EuclideanRealization.from_positions(
+        domain, np.eye(vertex_count, dtype=np.float64)
+    )
+
+
 def test_domain_issues_binary64_space_element_and_operator() -> None:
     complex_ = polygeo.Complex.from_maximal_simplices(
         np.array([[0, 1, 2]], dtype=np.int64)
@@ -113,6 +139,37 @@ def test_problem_preparation_workspace_and_solve_share_one_owner_graph() -> None
     assert isinstance(solution, polygeo.PoissonSolution)
     assert solution.residual_bound <= 1.0e-12
     assert solution.gauge_bound <= 1.0e-12
+
+
+def test_harmonic_one_form_basis_projects_existing_cochain_handles() -> None:
+    domain, realization = _equilateral_torus()
+    group = polygeo.analyze_integral_homology(domain.chain_complex(), [1])[1]
+    basis = realization.positive_metric().harmonic_one_form_basis(group)
+
+    assert isinstance(basis, polygeo.HarmonicOneFormBasis)
+    assert basis.rank == group.free_rank == 2
+    assert len(basis.forms) == basis.rank
+    chain_space = domain.binary64_chain_space(1)
+    periods = np.array(
+        [
+            [
+                np.dot(
+                    form.coefficients_numpy_copy(),
+                    chain_space.realize_integral(
+                        group.free_cycle(row)
+                    ).coefficients_numpy_copy(),
+                )
+                for form in basis.forms
+            ]
+            for row in range(group.free_rank)
+        ]
+    )
+    np.testing.assert_allclose(
+        periods, np.eye(group.free_rank), atol=basis.residual_limit
+    )
+    assert basis.maximum_closedness_residual <= basis.residual_limit
+    assert basis.maximum_coclosedness_residual <= basis.residual_limit
+    assert basis.maximum_identity_period_residual <= basis.residual_limit
 
 
 def test_problem_limits_and_cancellation_are_classified_failures() -> None:

@@ -6,7 +6,7 @@ use polygeo_core::{
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule};
+use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 
 use crate::classified_exception;
 use crate::form::{Element, PyBinary64Element};
@@ -379,6 +379,59 @@ impl PyDirichletSolution {
 struct PyHodgeDecomposition {
     inner: polygeo_core::HodgeDecomposition,
 }
+
+#[pyclass(
+    name = "HarmonicOneFormBasis",
+    frozen,
+    module = "polygeo",
+    skip_from_py_object
+)]
+pub(crate) struct PyHarmonicOneFormBasis {
+    pub(crate) inner: polygeo_core::HarmonicOneFormBasis,
+}
+
+#[pymethods]
+impl PyHarmonicOneFormBasis {
+    #[getter]
+    fn rank(&self) -> usize {
+        self.inner.rank()
+    }
+
+    #[getter]
+    fn forms(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        Ok(PyTuple::new(
+            py,
+            self.inner
+                .forms()
+                .iter()
+                .cloned()
+                .map(|form| PyBinary64Element {
+                    inner: Element::Cochain(form),
+                }),
+        )?
+        .unbind())
+    }
+
+    #[getter]
+    fn maximum_closedness_residual(&self) -> f64 {
+        self.inner.maximum_closedness_residual()
+    }
+
+    #[getter]
+    fn maximum_coclosedness_residual(&self) -> f64 {
+        self.inner.maximum_coclosedness_residual()
+    }
+
+    #[getter]
+    fn maximum_identity_period_residual(&self) -> f64 {
+        self.inner.maximum_identity_period_residual()
+    }
+
+    #[getter]
+    fn residual_limit(&self) -> f64 {
+        self.inner.residual_limit()
+    }
+}
 #[pymethods]
 impl PyHodgeDecomposition {
     #[getter]
@@ -484,6 +537,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPoissonSolution>()?;
     module.add_class::<PyDirichletSolution>()?;
     module.add_class::<PyHodgeDecomposition>()?;
+    module.add_class::<PyHarmonicOneFormBasis>()?;
     module.add_class::<PyHeatSolution>()?;
     module.add_class::<PyFlowStep>()
 }

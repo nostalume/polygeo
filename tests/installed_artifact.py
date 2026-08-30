@@ -18,6 +18,7 @@ from polygeo import (
     Complex,
     FlowStep,
     Geometry,
+    HarmonicOneFormBasis,
     HalfedgeSurface,
     HeatSolution,
     LeastSquaresConformalMapSolution,
@@ -53,6 +54,7 @@ assert version("polygeo") == "0.1.0"
 assert distribution["License-Expression"] == "MIT"
 assert Complex is _polygeo_native.Complex
 assert HalfedgeSurface is _polygeo_native.HalfedgeSurface
+assert HarmonicOneFormBasis is _polygeo_native.HarmonicOneFormBasis
 assert "_native" not in polygeo.__all__
 
 complex_ = (

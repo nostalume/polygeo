@@ -368,6 +368,34 @@ impl PyPositiveMetric {
         })
     }
 
+    #[pyo3(signature = (group, *, executor=None, storage=None, work=None, cancellation=None))]
+    fn harmonic_one_form_basis(
+        &self,
+        py: Python<'_>,
+        group: &crate::homology::PyHomologyGroup,
+        executor: Option<&crate::solve::PyNativeExecutor>,
+        storage: Option<&crate::solve::PyStorageLimit>,
+        work: Option<&crate::solve::PyWorkLimit>,
+        cancellation: Option<&crate::solve::PyCancellationToken>,
+    ) -> PyResult<crate::solve::PyHarmonicOneFormBasis> {
+        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
+        let cancellation = cancellation
+            .map_or_else(polygeo_core::CancellationToken::new, |value| {
+                value.inner.clone()
+            });
+        let metric = self.inner.clone();
+        let analysis = Arc::clone(&group.analysis);
+        let degree = group.degree;
+        py.detach(move || {
+            let group = analysis
+                .group(degree)
+                .expect("Python homology group retains one admitted analysis row");
+            metric.harmonic_one_form_basis(group, &executor, storage, work, &cancellation)
+        })
+        .map(|inner| crate::solve::PyHarmonicOneFormBasis { inner })
+        .map_err(crate::solve::surface_computation_error)
+    }
+
     fn mean_zero_poisson_density(
         &self,
         density: &crate::form::PyBinary64Element,
