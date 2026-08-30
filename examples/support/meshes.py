@@ -99,3 +99,31 @@ def annulus(
         .connected()
     )
     return domain, Geometry.from_positions(domain, positions)
+
+
+def disk(radial_rings: int, angular_sections: int):
+    """Return a deterministic convex Delaunay disk with a positive Hodge metric."""
+    points = [np.array([[0.0, 0.0]], dtype=np.float64)]
+    for ring in range(1, radial_rings + 1):
+        radius = ring / radial_rings
+        angles = (
+            2.0
+            * np.pi
+            * (np.arange(angular_sections) + 0.173 * ring)
+            / angular_sections
+        )
+        points.append(
+            np.column_stack(
+                (1.4 * radius * np.cos(angles), 0.8 * radius * np.sin(angles))
+            )
+        )
+    positions = np.vstack(points)
+    faces = np.asarray(Delaunay(positions).simplices, dtype=np.int64)
+    domain = (
+        Complex.from_maximal_simplices(faces)
+        .triangle_manifold()
+        .oriented()
+        .with_boundary()
+        .connected()
+    )
+    return domain, Geometry.from_positions(domain, positions)
