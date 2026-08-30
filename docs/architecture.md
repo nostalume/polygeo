@@ -98,6 +98,13 @@ dual-cycle evidence, holonomy, integrability, and direction fields retain the
 same native surface/realization spine. Array observations use explicit
 `*_numpy_copy()` names.
 
+Ordinary direction-field synthesis composes those same objects. An exact
+degree-zero cochain prescribes singularities, exact dual cycles order integer
+generator turns, and period-normalized harmonic one-forms provide global
+freedom. One compatible Poisson load and a temporary period solve publish the
+existing `FaceDirectionField`; exact indices and compact quantization evidence
+remain observable afterward.
+
 ## Optional effects
 
 `polygeo.mesh.load_surface()` imports Trimesh only when called and returns an
