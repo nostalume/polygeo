@@ -263,8 +263,31 @@ impl PyBinary64Element {
         })
     }
 
+    fn __neg__(&self) -> Self {
+        Self {
+            inner: match &self.inner {
+                Element::Chain(value) => Element::Chain(value.negated()),
+                Element::Cochain(value) => Element::Cochain(value.negated()),
+            },
+        }
+    }
+
     fn apply(&self, operator: &PyLinearOperator) -> PyResult<Self> {
         operator.apply(self)
+    }
+
+    fn wedge(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {
+        let (Element::Cochain(left), Element::Cochain(right)) = (&self.inner, &other.inner) else {
+            return Err(element_error(Binary64ElementError::SpaceMismatch));
+        };
+        let left = left.clone();
+        let right = right.clone();
+        let inner = py
+            .detach(move || left.wedge(&right))
+            .map_err(element_error)?;
+        Ok(Self {
+            inner: Element::Cochain(inner),
+        })
     }
 }
 
@@ -470,6 +493,5 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Binary64CochainSpace", space)?;
     let element = module.getattr("Binary64Element")?;
     module.add("Binary64Chain", element.clone())?;
-    module.add("Binary64Cochain", element.clone())?;
-    module.add("Form", element)
+    module.add("Binary64Cochain", element)
 }

@@ -3,11 +3,11 @@ from typing import Literal, assert_type
 import numpy as np
 
 from polygeo import (
+    Binary64Cochain,
     Binary64Element,
     Binary64Space,
     ChainIsomorphism,
     Complex,
-    Form,
     Geometry,
     HalfedgeSurface,
     LinearOperator,
@@ -35,7 +35,7 @@ form = space.admit_numpy(np.zeros(space.size, dtype=np.float64))
 assert_type(space, Binary64Space[Literal["cochain"], int])
 assert_type(selected, Binary64Space[Literal["cochain"], int])
 assert_type(form, Binary64Element[Literal["cochain"], int])
-assert_type(form, Form[int])
+assert_type(form, Binary64Cochain[int])
 assert_type(
     space.identity(),
     LinearOperator[Literal["cochain"], int, Literal["cochain"], int],

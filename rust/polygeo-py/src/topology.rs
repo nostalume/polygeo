@@ -198,6 +198,17 @@ impl NativeComplex {
         })
     }
 
+    fn disk_boundary_vertices_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let vertices = self
+            .owner
+            .refine_disk()
+            .and_then(|disk| disk.boundary_vertices())
+            .map_err(topology_error)?;
+        filled_array_1d(py, vertices.len(), |output| {
+            fill_indices::<i64>(vertices.iter().copied(), output)
+        })
+    }
+
     fn boundary_subset(slf: &Bound<'_, Self>) -> PyResult<NativeSubset> {
         let borrowed = slf.borrow();
         borrowed

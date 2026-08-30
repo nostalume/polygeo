@@ -259,7 +259,11 @@ fn chain_error(error: CoreChainError) -> PyErr {
                 details.set_item("index", index).is_err()
                     || details.set_item("bound", bound).is_err()
             }
-            CoreChainError::SpaceMismatch | CoreChainError::Topology(_) => false,
+            CoreChainError::SpaceMismatch
+            | CoreChainError::NotSimplicial
+            | CoreChainError::CoefficientFieldRequired
+            | CoreChainError::NormalizationNotInvertible
+            | CoreChainError::Topology(_) => false,
         };
         if translation_failed {
             return exact_error("translation", "failed to translate chain failure");

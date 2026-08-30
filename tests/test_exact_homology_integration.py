@@ -22,7 +22,7 @@ def test_exact_homology_graph_retains_owners_and_isolates_projections() -> None:
     representation = polygeo.CsrRepresentation.build(
         boundary, polygeo.BigIntEncoding, estimate.as_limit()
     )
-    analysis = polygeo.prepare_integral_homology(exact, [1])
+    analysis = polygeo.analyze_integral_homology(exact, [1])
     first_group = analysis[1]
     second_group = analysis[1]
     cycle = first_group.free_cycle(0)

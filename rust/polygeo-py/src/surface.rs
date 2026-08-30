@@ -3,7 +3,8 @@ use std::sync::Arc;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use polygeo_core::{
     EntityVectors, FaceDirectionField, HolonomyEvidence, IntegrableConnection,
-    IntegralDualCycleBasis, SurfaceConnection, SurfaceError, TriangleSurface,
+    IntegralDualCycleBasis, LeastSquaresConformalMapSolution, SurfaceConnection, SurfaceError,
+    TriangleSurface,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
@@ -11,7 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule};
 
 use crate::form::{Element, PyBinary64Element};
-use crate::realization::{NativeEuclideanRealization, PyPositiveMetric};
+use crate::realization::{NativeEuclideanRealization, PyPositiveMetric, PyRealizationLimit};
 use crate::{
     ExactElement, NativeChainElement, classified_exception, filled_array_1d, filled_array_2d,
 };
@@ -36,6 +37,8 @@ pub(crate) fn surface_error(error: SurfaceError) -> PyErr {
                 SurfaceError::Overflow => "count_overflow",
                 SurfaceError::Unrepresentable => "unrepresentable",
                 SurfaceError::TimeStep => "time_step",
+                SurfaceError::CoincidentAnchor => "coincident_anchor",
+                SurfaceError::AnchorNotBoundary => "anchor_not_boundary",
                 _ => "surface",
             },
             PyDict::new(py).unbind(),
@@ -94,6 +97,17 @@ impl PyTriangleSurface {
                 .map_err(surface_error)?,
         })
     }
+    fn gradient(&self, source: &PyBinary64Element) -> PyResult<PyEntityVectors> {
+        let Element::Cochain(source) = &source.inner else {
+            return Err(surface_error(SurfaceError::FieldShape));
+        };
+        field(self.inner.gradient(source))
+    }
+    fn divergence(&self, field: &PyEntityVectors) -> PyResult<PyBinary64Element> {
+        Ok(PyBinary64Element {
+            inner: Element::Chain(self.inner.divergence(&field.inner).map_err(surface_error)?),
+        })
+    }
     fn first_frame_axes_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         project_rows(
             py,
@@ -147,6 +161,84 @@ impl PyTriangleSurface {
         let deviations = deviations.extract::<PyReadonlyArray1<'_, f64>>()?;
         let deviations = deviations.as_array().iter().copied().collect::<Vec<_>>();
         connection(self.inner.connection(&deviations))
+    }
+
+    #[pyo3(signature = (anchors, *, realization_limit=None, executor=None, storage=None, work=None, cancellation=None))]
+    fn least_squares_conformal_map(
+        &self,
+        anchors: [usize; 2],
+        realization_limit: Option<&PyRealizationLimit>,
+        executor: Option<&crate::solve::PyNativeExecutor>,
+        storage: Option<&crate::solve::PyStorageLimit>,
+        work: Option<&crate::solve::PyWorkLimit>,
+        cancellation: Option<&crate::solve::PyCancellationToken>,
+    ) -> PyResult<PyLeastSquaresConformalMapSolution> {
+        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
+        let realization_limit = realization_limit
+            .copied()
+            .unwrap_or(PyRealizationLimit::DEFAULT)
+            .core();
+        let cancellation = cancellation
+            .map_or_else(polygeo_core::CancellationToken::new, |value| {
+                value.inner.clone()
+            });
+        let surface = Arc::clone(&self.inner);
+        Python::attach(|py| {
+            py.detach(move || {
+                surface.least_squares_conformal_map(
+                    anchors,
+                    realization_limit,
+                    &executor,
+                    storage,
+                    work,
+                    &cancellation,
+                )
+            })
+        })
+        .map(|inner| PyLeastSquaresConformalMapSolution { inner })
+        .map_err(crate::solve::surface_computation_error)
+    }
+}
+
+#[pyclass(
+    name = "LeastSquaresConformalMapSolution",
+    frozen,
+    module = "polygeo",
+    skip_from_py_object
+)]
+pub(crate) struct PyLeastSquaresConformalMapSolution {
+    inner: LeastSquaresConformalMapSolution,
+}
+
+#[pymethods]
+impl PyLeastSquaresConformalMapSolution {
+    #[getter]
+    fn realization(&self) -> NativeEuclideanRealization {
+        NativeEuclideanRealization::from_owner(Arc::clone(self.inner.realization()))
+    }
+    #[getter]
+    fn required_rank(&self) -> usize {
+        self.inner.evidence().required_rank()
+    }
+    #[getter]
+    fn observed_rank(&self) -> usize {
+        self.inner.evidence().observed_rank()
+    }
+    #[getter]
+    fn condition_indicator(&self) -> f64 {
+        self.inner.evidence().condition_indicator()
+    }
+    #[getter]
+    fn residual_bound(&self) -> f64 {
+        self.inner.evidence().residual_bound()
+    }
+    #[getter]
+    fn minimum_normalized_signed_twice_area(&self) -> f64 {
+        self.inner.evidence().minimum_normalized_signed_twice_area()
+    }
+    #[getter]
+    fn exact_fallback_faces(&self) -> usize {
+        self.inner.evidence().exact_fallback_faces()
     }
 }
 
@@ -405,6 +497,7 @@ fn project_rows(
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SurfaceError", module.py().get_type::<SurfaceErrorPy>())?;
     module.add_class::<PyTriangleSurface>()?;
+    module.add_class::<PyLeastSquaresConformalMapSolution>()?;
     module.add_class::<PyEntityVectors>()?;
     let field = module.getattr("EntityVectors")?;
     module.add("VertexVectors", field.clone())?;

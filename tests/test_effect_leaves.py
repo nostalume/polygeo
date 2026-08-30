@@ -110,14 +110,14 @@ def test_plot_homology_cycle_realizes_one_direct_group_selection() -> None:
     geometry = polygeo.Geometry.from_positions(
         complex_, np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
     )
-    group = polygeo.prepare_integral_homology(complex_.chain_complex(), [1])[1]
+    group = polygeo.analyze_integral_homology(complex_.chain_complex(), [1])[1]
     figure = polygeo.plot_homology_cycle(geometry, group, 0)
     assert len(figure.data[-1].customdata) == 4
 
     foreign = polygeo.Complex.from_maximal_simplices(
         np.array([[0, 1], [1, 2], [2, 3], [0, 3]], dtype=np.int64)
     )
-    foreign_group = polygeo.prepare_integral_homology(foreign.chain_complex(), [1])[1]
+    foreign_group = polygeo.analyze_integral_homology(foreign.chain_complex(), [1])[1]
     with np.testing.assert_raises(polygeo.PlotError):
         polygeo.plot_homology_cycle(geometry, foreign_group, 0)
 

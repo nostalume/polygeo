@@ -24,7 +24,7 @@ def test_public_mathematical_objects_have_one_package_identity() -> None:
         ("HomologyLimit", "HomologyLimit"),
         ("IntegralHomology", "IntegralHomology"),
         ("HomologyGroup", "HomologyGroup"),
-        ("prepare_integral_homology", "prepare_integral_homology"),
+        ("analyze_integral_homology", "analyze_integral_homology"),
     ):
         assert getattr(polygeo, public_name) is getattr(native, native_name)
 
@@ -36,7 +36,7 @@ def test_public_mathematical_objects_have_one_package_identity() -> None:
         polygeo.CsrRepresentation,
         polygeo.HomologyError,
         polygeo.IntegralHomology,
-        polygeo.prepare_integral_homology,
+        polygeo.analyze_integral_homology,
     ):
         assert public_object.__module__ == "polygeo"
 

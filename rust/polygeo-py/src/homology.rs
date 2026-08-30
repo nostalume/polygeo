@@ -131,7 +131,7 @@ struct PyIntegralHomology {
 }
 
 impl PyIntegralHomology {
-    fn prepare(
+    fn analyze(
         py: Python<'_>,
         chain: &NativeChainComplex,
         degrees: Vec<usize>,
@@ -144,7 +144,7 @@ impl PyIntegralHomology {
             ));
         };
         let chain = chain.clone();
-        py.detach(move || CoreIntegralHomology::prepare(&chain, degrees, limit))
+        py.detach(move || CoreIntegralHomology::analyze(&chain, degrees, limit))
             .map(|analysis| Self {
                 analysis: Arc::new(analysis),
             })
@@ -230,13 +230,13 @@ impl PyHomologyGroup {
 
 #[pyfunction]
 #[pyo3(signature = (chain, degrees, *, limit=None))]
-fn prepare_integral_homology(
+fn analyze_integral_homology(
     py: Python<'_>,
     chain: &NativeChainComplex,
     degrees: Vec<usize>,
     limit: Option<&PyHomologyLimit>,
 ) -> PyResult<PyIntegralHomology> {
-    PyIntegralHomology::prepare(
+    PyIntegralHomology::analyze(
         py,
         chain,
         degrees,
@@ -252,9 +252,9 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "DEFAULT_HOMOLOGY_LIMIT",
         Py::new(module.py(), PyHomologyLimit::DEFAULT)?,
     )?;
-    module.add_function(wrap_pyfunction!(prepare_integral_homology, module)?)?;
+    module.add_function(wrap_pyfunction!(analyze_integral_homology, module)?)?;
     module
-        .getattr("prepare_integral_homology")?
+        .getattr("analyze_integral_homology")?
         .setattr("__module__", "polygeo")?;
     let error = module.py().get_type::<HomologyError>();
     error.setattr("__module__", "polygeo")?;

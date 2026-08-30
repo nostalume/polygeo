@@ -20,7 +20,7 @@ from polygeo import (
     HomologyLimit,
     IntegralHomology,
     QQ,
-    prepare_integral_homology,
+    analyze_integral_homology,
 )
 
 
@@ -82,7 +82,7 @@ def grid(side: int) -> Complex:
 def test_integral_homology_is_canonical_borrowed_and_owner_retaining() -> None:
     complex_ = cycle(5)
     chain_complex = complex_.chain_complex()
-    analysis = prepare_integral_homology(chain_complex, [1, 0, 1])
+    analysis = analyze_integral_homology(chain_complex, [1, 0, 1])
 
     assert isinstance(analysis, IntegralHomology)
     assert analysis.degrees == (0, 1)
@@ -101,7 +101,7 @@ def test_integral_homology_is_canonical_borrowed_and_owner_retaining() -> None:
 
 def test_empty_degree_request_publishes_one_empty_retaining_analysis() -> None:
     chain_complex = cycle(3).chain_complex()
-    analysis = prepare_integral_homology(chain_complex, [])
+    analysis = analyze_integral_homology(chain_complex, [])
 
     assert analysis.degrees == ()
     with pytest.raises(HomologyError) as caught:
@@ -114,10 +114,10 @@ def test_unrequested_degree_wrong_coefficients_and_resource_limits_fail_stably()
 ):
     chain_complex = cycle(4).chain_complex()
     with pytest.raises(HomologyError) as outside:
-        prepare_integral_homology(chain_complex, [2])
+        analyze_integral_homology(chain_complex, [2])
     assert outside.value.reason == "degree_outside"
 
-    analysis = prepare_integral_homology(chain_complex, [1])
+    analysis = analyze_integral_homology(chain_complex, [1])
     with pytest.raises(HomologyError) as unrequested:
         analysis[0]
     assert unrequested.value.reason == "degree_not_requested"
@@ -126,12 +126,12 @@ def test_unrequested_degree_wrong_coefficients_and_resource_limits_fail_stably()
     assert generator.value.reason == "generator_outside"
 
     with pytest.raises(HomologyError) as rational:
-        prepare_integral_homology(cast(Any, chain_complex.over(QQ)), [0])
+        analyze_integral_homology(cast(Any, chain_complex.over(QQ)), [0])
     assert rational.value.reason == "coefficient_system"
 
     denied = DEFAULT_HOMOLOGY_LIMIT.replace(smith_steps=0)
     with pytest.raises(HomologyError) as exhausted:
-        prepare_integral_homology(chain_complex, [0, 1], limit=denied)
+        analyze_integral_homology(chain_complex, [0, 1], limit=denied)
     assert exhausted.value.reason == "resource_limit"
     details = cast(dict[str, int | str], exhausted.value.details)
     assert details["axis"] == "smith_steps"
@@ -156,7 +156,7 @@ def test_each_homology_resource_axis_is_enforced(
 ) -> None:
     limit = cast(Any, DEFAULT_HOMOLOGY_LIMIT.replace)(**changes)
     with pytest.raises(HomologyError) as caught:
-        prepare_integral_homology(cycle(4).chain_complex(), [0, 1], limit=limit)
+        analyze_integral_homology(cycle(4).chain_complex(), [0, 1], limit=limit)
     assert caught.value.reason == "resource_limit"
     details = cast(dict[str, int | str], caught.value.details)
     assert details["axis"] == axis
@@ -173,11 +173,11 @@ def test_homology_limit_rejects_an_invalid_storage_lifecycle() -> None:
 
 def test_homology_rejects_duck_typed_inputs_and_group_construction() -> None:
     with pytest.raises(TypeError):
-        prepare_integral_homology(cast(Any, object()), [0])
+        analyze_integral_homology(cast(Any, object()), [0])
     with pytest.raises(TypeError):
-        prepare_integral_homology(cycle(3).chain_complex(), cast(Any, ["0"]))
+        analyze_integral_homology(cycle(3).chain_complex(), cast(Any, ["0"]))
     with pytest.raises(TypeError):
-        prepare_integral_homology(
+        analyze_integral_homology(
             cycle(3).chain_complex(), [0], limit=cast(Any, object())
         )
     with pytest.raises(TypeError):
@@ -190,7 +190,7 @@ def test_halfedge_chain_factory_is_an_equal_entrypoint() -> None:
         np.array([3, 4, 5, 0, 1, 2], dtype=np.int64),
         exterior_faces=np.array([1], dtype=np.int64),
     )
-    group = prepare_integral_homology(surface.chain_complex(), [0])[0]
+    group = analyze_integral_homology(surface.chain_complex(), [0])[0]
     assert group.free_rank == 1
     assert group.torsion_orders == ()
 
@@ -214,7 +214,7 @@ def test_torsion_cycles_and_bounds_remain_exact_chains() -> None:
         )
     )
     chain_complex = projective_plane.chain_complex()
-    group = prepare_integral_homology(chain_complex, [1])[1]
+    group = analyze_integral_homology(chain_complex, [1])[1]
     assert group.free_rank == 0
     assert group.torsion_orders == (2,)
     cycle_indices, cycle_coefficients = group.torsion_cycle(0).to_python_copy()
@@ -237,7 +237,7 @@ def test_homology_preparation_releases_the_gil() -> None:
     worker = threading.Thread(target=sample_clock)
     worker.start()
     started = time.perf_counter_ns()
-    prepare_integral_homology(chain_complex, [0, 1, 2])
+    analyze_integral_homology(chain_complex, [0, 1, 2])
     finished = time.perf_counter_ns()
     stop.set()
     worker.join()

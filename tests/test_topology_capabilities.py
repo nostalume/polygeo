@@ -24,6 +24,10 @@ def test_refinement_returns_the_one_complex_and_has_no_state_axes() -> None:
     assert not hasattr(complex_, "orientation_state")
     assert not hasattr(complex_, "connectivity_state")
     assert not hasattr(complex_, "topology_state")
+    np.testing.assert_array_equal(
+        complex_.disk_boundary_vertices_numpy_copy(),
+        [0, 1, 2, 3],
+    )
 
 
 def test_require_is_query_only_and_domain_operations_do_not_refine() -> None:

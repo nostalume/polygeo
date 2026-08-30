@@ -54,6 +54,42 @@ def test_exact_integer_and_rational_values_preserve_variance_and_large_scalars()
     assert rationals.coefficient_system == "Q"
 
 
+def test_exact_cup_product_preserves_coefficients_owner_and_domain_errors() -> None:
+    integers = integral_complex()
+    cochains = integers.dual()
+    alpha = cochains[1].element({0: 2})
+    beta = cochains[1].element({3: 3})
+
+    assert alpha.cup(beta).to_python_copy() == ((0,), (6,))
+
+    foreign = integral_complex().dual()[1].element({0: 1})
+    with pytest.raises(ChainError) as wrong_owner:
+        alpha.cup(foreign)
+    assert wrong_owner.value.reason == "space_mismatch"
+
+    rational = integers.over(QQ).dual()[1].element({0: Fraction(1)})
+    with pytest.raises(ChainError) as wrong_system:
+        alpha.cup(cast(Any, rational))
+    assert wrong_system.value.reason == "space_mismatch"
+
+    chain = integers[1].element({0: 1})
+    with pytest.raises(ChainError) as wrong_variance:
+        alpha.cup(cast(Any, chain))
+    assert wrong_variance.value.reason == "space_mismatch"
+
+    triangle = (
+        native.Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
+        .triangle_manifold()
+        .oriented()
+    )
+    halfedge, _ = native.HalfedgeSurface.from_complex(triangle)
+    halfedge_cochain = halfedge.chain_complex().dual()[1].element({0: 1})
+    with pytest.raises(ChainError) as wrong_domain:
+        halfedge_cochain.cup(halfedge_cochain)
+    assert wrong_domain.value.reason == "not_simplicial"
+    assert wrong_domain.value.details == {}
+
+
 def test_exact_transport_preserves_signed_multilimb_integers_and_fractions() -> None:
     integers = integral_complex()
     positive = (1 << 4097) + 12345

@@ -16,8 +16,11 @@ import polygeo
 from polygeo import _polygeo_native
 from polygeo import (
     Complex,
+    FlowStep,
     Geometry,
     HalfedgeSurface,
+    HeatSolution,
+    LeastSquaresConformalMapSolution,
     MeshError,
     PlotError,
     PoissonSolution,
@@ -27,7 +30,7 @@ from polygeo import (
     plot_geometry,
     plot_homology_cycle,
     plot_surface_vectors,
-    prepare_integral_homology,
+    analyze_integral_homology,
 )
 
 
@@ -66,7 +69,7 @@ complex_ = (
 exact = complex_.chain_complex()
 chain = exact[1].element({0: 1 << 130})
 assert exact.boundary(1).apply(chain).to_python_copy()[0]
-homology = prepare_integral_homology(exact, [0, 1])
+homology = analyze_integral_homology(exact, [0, 1])
 assert homology[0].free_rank == 1
 
 geometry = Geometry.from_positions(
@@ -83,9 +86,17 @@ geometry = Geometry.from_positions(
 )
 space = complex_.binary64_cochain_space(0)
 metric = geometry.positive_metric()
+heat = metric.heat_evolution(space.admit_numpy(np.array([1.0, 0.0, 0.0, 0.0])), 0.1)
+heat_prepared = heat.prepare()
+heat_solution = heat_prepared.solve(heat, heat_prepared.workspace_for(heat))
+assert isinstance(heat_solution, HeatSolution)
+assert heat_solution.residual_bound <= 1.0e-10
+flow_step = metric.frozen_mean_curvature_flow(0.1)
+assert isinstance(flow_step, FlowStep)
+assert flow_step.residual_bound <= 1.0e-10
 weights = metric.hodge_coefficients_numpy_copy(0)
 density = space.admit_numpy(np.array([weights[1], -weights[0], 0.0, 0.0]))
-problem = metric.mean_zero_poisson(density)
+problem = metric.mean_zero_poisson_density(density)
 prepared = problem.prepare()
 solution = prepared.solve(problem, prepared.workspace_for(problem))
 assert isinstance(solution, PoissonSolution)
@@ -94,11 +105,39 @@ assert solution.potential.space.same_space(space)
 surface = TriangleSurface.admit(geometry)
 field = surface.face_unit_normals()
 assert field.vectors_numpy_copy().shape == (surface.face_count, 3)
+gradient = surface.gradient(space.admit_numpy(geometry.positions_numpy_copy()[:, 0]))
+load = surface.divergence(gradient)
+assert gradient.vectors_numpy_copy().shape == (surface.face_count, 3)
+assert load.coefficients_numpy_copy().shape == (4,)
+assert load.space.variance == "chain"
+load_problem = metric.mean_zero_poisson_load(-load)
+load_prepared = load_problem.prepare()
+load_solution = load_prepared.solve(
+    load_problem, load_prepared.workspace_for(load_problem)
+)
+assert isinstance(load_solution, PoissonSolution)
 oriented_triangle = (
     Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
     .triangle_manifold()
     .oriented()
 )
+np.testing.assert_array_equal(
+    oriented_triangle.disk_boundary_vertices_numpy_copy(), [0, 1, 2]
+)
+triangle_geometry = Geometry.from_positions(
+    oriented_triangle,
+    np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.25, 1.0, 0.5]]),
+)
+conformal_map = TriangleSurface.admit(triangle_geometry).least_squares_conformal_map(
+    (0, 1)
+)
+assert isinstance(conformal_map, LeastSquaresConformalMapSolution)
+np.testing.assert_array_equal(
+    conformal_map.realization.positions_numpy_copy()[[0, 1]],
+    [[0.0, 0.0], [1.0, 0.0]],
+)
+assert conformal_map.required_rank == conformal_map.observed_rank == 2
+assert conformal_map.minimum_normalized_signed_twice_area > 0.0
 converted, correspondence = HalfedgeSurface.from_complex(oriented_triangle)
 transport = correspondence.chain_isomorphism()
 source_chain = transport.source[1].element({0: 1})

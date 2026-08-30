@@ -475,6 +475,24 @@ impl NativeChainElement {
             }
         }
     }
+
+    fn cup(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {
+        let left = self.inner.clone();
+        let right = other.inner.clone();
+        let inner = py
+            .detach(move || cup_exact(&left, &right))
+            .map_err(chain_error)?;
+        Ok(Self { inner })
+    }
+
+    fn wedge(&self, py: Python<'_>, other: &Self) -> PyResult<Self> {
+        let left = self.inner.clone();
+        let right = other.inner.clone();
+        let inner = py
+            .detach(move || wedge_exact(&left, &right))
+            .map_err(chain_error)?;
+        Ok(Self { inner })
+    }
 }
 
 enum ExactEvaluation {
@@ -492,6 +510,30 @@ fn evaluate_exact(
         }
         (ExactElement::RationalCochain(cochain), ExactElement::RationalChain(chain)) => {
             cochain.evaluate(chain).map(ExactEvaluation::Rational)
+        }
+        _ => Err(CoreChainError::SpaceMismatch),
+    }
+}
+
+fn cup_exact(left: &ExactElement, right: &ExactElement) -> Result<ExactElement, CoreChainError> {
+    match (left, right) {
+        (ExactElement::IntegerCochain(left), ExactElement::IntegerCochain(right)) => {
+            left.cup(right).map(ExactElement::IntegerCochain)
+        }
+        (ExactElement::RationalCochain(left), ExactElement::RationalCochain(right)) => {
+            left.cup(right).map(ExactElement::RationalCochain)
+        }
+        _ => Err(CoreChainError::SpaceMismatch),
+    }
+}
+
+fn wedge_exact(left: &ExactElement, right: &ExactElement) -> Result<ExactElement, CoreChainError> {
+    match (left, right) {
+        (ExactElement::RationalCochain(left), ExactElement::RationalCochain(right)) => {
+            left.wedge(right).map(ExactElement::RationalCochain)
+        }
+        (ExactElement::IntegerCochain(_), ExactElement::IntegerCochain(_)) => {
+            Err(CoreChainError::CoefficientFieldRequired)
         }
         _ => Err(CoreChainError::SpaceMismatch),
     }

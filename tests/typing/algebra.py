@@ -14,7 +14,7 @@ from polygeo import (
     IntegralHomology,
     QQ,
     RationalChain,
-    prepare_integral_homology,
+    analyze_integral_homology,
 )
 
 
@@ -28,6 +28,7 @@ def exact_relations(complex_: IntegralChainComplex) -> None:
     assert_type(chain, IntegralChain[int])
     assert_type(cochain, IntegralCochain[int])
     assert_type(cochain.evaluate(chain), int)
+    assert_type(cochain.cup(cochain), IntegralCochain[int])
 
     boundary = complex_.boundary(1)
     assert_type(boundary.apply(chain), IntegralChain[int])
@@ -46,7 +47,7 @@ def exact_relations(complex_: IntegralChainComplex) -> None:
 
 
 def homology_relations(complex_: Complex) -> None:
-    analysis = prepare_integral_homology(complex_.chain_complex(), [0, 1])
+    analysis = analyze_integral_homology(complex_.chain_complex(), [0, 1])
     assert_type(analysis, IntegralHomology)
     group = analysis[1]
     assert_type(group, HomologyGroup[Literal[1]])

@@ -76,7 +76,7 @@ fn geometry_input_error(reason: &'static str, message: &'static str) -> PyErr {
     skip_from_py_object
 )]
 #[derive(Clone, Copy)]
-struct PyRealizationLimit {
+pub(crate) struct PyRealizationLimit {
     retained_logical_bytes: u64,
     peak_live_logical_bytes: u64,
     coefficient_bits: u64,
@@ -84,14 +84,14 @@ struct PyRealizationLimit {
 }
 
 impl PyRealizationLimit {
-    const DEFAULT: Self = Self {
+    pub(crate) const DEFAULT: Self = Self {
         retained_logical_bytes: 128 * 1024 * 1024,
         peak_live_logical_bytes: 512 * 1024 * 1024,
         coefficient_bits: 65_536,
         exact_steps: 100_000_000,
     };
 
-    fn core(self) -> RealizationLimit {
+    pub(crate) fn core(self) -> RealizationLimit {
         let storage = StorageLimit::new(self.retained_logical_bytes, self.peak_live_logical_bytes)
             .expect("Python construction preserves the storage lifecycle");
         RealizationLimit::new(
@@ -368,7 +368,7 @@ impl PyPositiveMetric {
         })
     }
 
-    fn mean_zero_poisson(
+    fn mean_zero_poisson_density(
         &self,
         density: &crate::form::PyBinary64Element,
     ) -> PyResult<crate::solve::PyProblem> {
@@ -380,7 +380,25 @@ impl PyPositiveMetric {
         Ok(crate::solve::PyProblem {
             inner: crate::solve::Problem::MeanZero(
                 self.inner
-                    .mean_zero_poisson(density.clone())
+                    .mean_zero_poisson_density(density.clone())
+                    .map_err(crate::solve::problem_error)?,
+            ),
+        })
+    }
+
+    fn mean_zero_poisson_load(
+        &self,
+        load: &crate::form::PyBinary64Element,
+    ) -> PyResult<crate::solve::PyProblem> {
+        let crate::form::Element::Chain(load) = &load.inner else {
+            return Err(crate::solve::problem_error(
+                polygeo_core::ProblemError::SpaceMismatch,
+            ));
+        };
+        Ok(crate::solve::PyProblem {
+            inner: crate::solve::Problem::MeanZero(
+                self.inner
+                    .mean_zero_poisson_load(load.clone())
                     .map_err(crate::solve::problem_error)?,
             ),
         })
@@ -422,14 +440,59 @@ impl PyPositiveMetric {
         })
     }
 
-    fn frozen_mean_curvature_flow(&self, time_step: f64) -> PyResult<crate::solve::PyProblem> {
+    fn heat_evolution(
+        &self,
+        source: &crate::form::PyBinary64Element,
+        time_step: f64,
+    ) -> PyResult<crate::solve::PyProblem> {
+        let crate::form::Element::Cochain(source) = &source.inner else {
+            return Err(crate::solve::problem_error(
+                polygeo_core::ProblemError::SpaceMismatch,
+            ));
+        };
         Ok(crate::solve::PyProblem {
-            inner: crate::solve::Problem::Flow(
+            inner: crate::solve::Problem::Heat(
                 self.inner
-                    .frozen_mean_curvature_flow(time_step)
-                    .map_err(|error| PyValueError::new_err(error.to_string()))?,
+                    .heat_evolution(source.clone(), time_step)
+                    .map_err(crate::solve::problem_error)?,
             ),
         })
+    }
+
+    #[pyo3(signature = (time_step, *, realization_limit=None, executor=None, storage=None, work=None, cancellation=None))]
+    fn frozen_mean_curvature_flow(
+        &self,
+        time_step: f64,
+        realization_limit: Option<&PyRealizationLimit>,
+        executor: Option<&crate::solve::PyNativeExecutor>,
+        storage: Option<&crate::solve::PyStorageLimit>,
+        work: Option<&crate::solve::PyWorkLimit>,
+        cancellation: Option<&crate::solve::PyCancellationToken>,
+    ) -> PyResult<crate::solve::PyFlowStep> {
+        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
+        let realization_limit = realization_limit
+            .copied()
+            .unwrap_or(PyRealizationLimit::DEFAULT)
+            .core();
+        let cancellation = cancellation
+            .map_or_else(polygeo_core::CancellationToken::new, |value| {
+                value.inner.clone()
+            });
+        let metric = self.inner.clone();
+        Python::attach(|py| {
+            py.detach(move || {
+                metric.frozen_mean_curvature_flow(
+                    time_step,
+                    realization_limit,
+                    &executor,
+                    storage,
+                    work,
+                    &cancellation,
+                )
+            })
+        })
+        .map(|inner| crate::solve::PyFlowStep { inner })
+        .map_err(crate::solve::surface_computation_error)
     }
 }
 

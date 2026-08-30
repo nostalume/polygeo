@@ -96,10 +96,14 @@ def test_problem_preparation_workspace_and_solve_share_one_owner_graph() -> None
     density = complex_.binary64_cochain_space(0).admit_numpy(
         np.array([weights[1], -weights[0], 0.0, 0.0])
     )
-    problem = metric.mean_zero_poisson(density)
-    del complex_, realization, metric, density
+    density_problem = metric.mean_zero_poisson_density(density)
+    source = complex_.binary64_cochain_space(0).admit_numpy(positions[:, 0])
+    surface = polygeo.TriangleSurface.admit(realization)
+    load = -surface.divergence(surface.gradient(source))
+    problem = metric.mean_zero_poisson_load(load)
+    prepared = density_problem.prepare()
+    del complex_, realization, metric, density, density_problem, source, surface, load
     gc.collect()
-    prepared = problem.prepare()
     workspace = prepared.workspace_for(problem)
     solution = prepared.solve(problem, workspace)
 
@@ -126,7 +130,7 @@ def test_problem_limits_and_cancellation_are_classified_failures() -> None:
     density = complex_.binary64_cochain_space(0).admit_numpy(
         np.array([weights[1], -weights[0], 0.0, 0.0])
     )
-    problem = metric.mean_zero_poisson(density)
+    problem = metric.mean_zero_poisson_density(density)
 
     token = polygeo.CancellationToken()
     token.cancel()
@@ -147,15 +151,77 @@ def test_flow_publishes_new_realization_without_source_mutation() -> None:
         [[1.0, 1.0, 1.0], [-1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [1.0, -1.0, -1.0]]
     )
     source = polygeo.EuclideanRealization.from_positions(complex_, positions)
-    problem = source.positive_metric().frozen_mean_curvature_flow(0.1)
-    prepared = problem.prepare()
-    workspace = prepared.workspace_for(problem)
-    step = prepared.solve(problem, workspace)
+    metric = source.positive_metric()
+    scalar = complex_.binary64_cochain_space(0).admit_numpy(positions[:, 0])
+    heat_problem = metric.heat_evolution(scalar, 0.1)
+    heat_prepared = heat_problem.prepare()
+    heat_solution = heat_prepared.solve(
+        heat_problem, heat_prepared.workspace_for(heat_problem)
+    )
+    step = metric.frozen_mean_curvature_flow(0.1)
 
     assert isinstance(step, polygeo.FlowStep)
+    assert isinstance(heat_solution, polygeo.HeatSolution)
+    assert heat_solution.value.space.same_space(scalar.space)
+    assert heat_solution.residual_bound <= 1.0e-10
+    assert heat_solution.mass_residual_bound <= 1.0e-12
+    assert heat_solution.energy_after <= heat_solution.energy_before
     np.testing.assert_array_equal(source.positions_numpy_copy(), positions)
     assert step.energy_after <= step.energy_before
     assert step.residual_bound <= 1.0e-10
+
+    token = polygeo.CancellationToken()
+    token.cancel()
+    with pytest.raises(polygeo.SolveError) as cancelled:
+        metric.frozen_mean_curvature_flow(0.1, cancellation=token)
+    assert cancelled.value.reason == "cancelled"
+
+    with pytest.raises(polygeo.SolveError) as bounded:
+        metric.frozen_mean_curvature_flow(0.1, storage=polygeo.StorageLimit(0, 0))
+    assert bounded.value.reason == "resource_limit"
+
+    with pytest.raises(polygeo.SurfaceError) as invalid_time:
+        metric.frozen_mean_curvature_flow(0.0)
+    assert invalid_time.value.reason == "time_step"
+
+
+def test_surface_lscm_returns_one_certified_planar_realization() -> None:
+    complex_ = polygeo.Complex.from_maximal_simplices(
+        np.array([[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]], dtype=np.int64)
+    )
+    positions = np.array(
+        [
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.2],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, -0.1],
+            [0.0, 0.0, 0.5],
+        ]
+    )
+    source = polygeo.EuclideanRealization.from_positions(complex_, positions)
+    surface = polygeo.TriangleSurface.admit(source)
+    solution = surface.least_squares_conformal_map((0, 2))
+
+    assert isinstance(solution, polygeo.LeastSquaresConformalMapSolution)
+    assert solution.realization.complex.shares_data_with(source.complex)
+    mapped = solution.realization.positions_numpy_copy()
+    np.testing.assert_array_equal(mapped[[0, 2]], [[0.0, 0.0], [1.0, 0.0]])
+    assert solution.required_rank == solution.observed_rank == 6
+    assert np.isfinite(solution.condition_indicator)
+    assert solution.residual_bound < 1.0
+    assert solution.minimum_normalized_signed_twice_area > 0.0
+
+    token = polygeo.CancellationToken()
+    token.cancel()
+    with pytest.raises(polygeo.SolveError) as cancelled:
+        surface.least_squares_conformal_map((0, 2), cancellation=token)
+    assert cancelled.value.reason == "cancelled"
+    with pytest.raises(polygeo.SolveError) as bounded:
+        surface.least_squares_conformal_map((0, 2), storage=polygeo.StorageLimit(0, 0))
+    assert bounded.value.reason == "resource_limit"
+    with pytest.raises(polygeo.SurfaceError) as interior:
+        surface.least_squares_conformal_map((0, 4))
+    assert interior.value.reason == "anchor_not_boundary"
 
 
 def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
@@ -169,6 +235,9 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     surface = polygeo.TriangleSurface.admit(realization)
     normals = surface.face_unit_normals()
     curvature = surface.gaussian_curvature_measure()
+    scalar = complex_.binary64_cochain_space(0).admit_numpy(positions[:, 0])
+    gradient = surface.gradient(scalar)
+    divergence = surface.divergence(gradient)
 
     assert type(normals) is polygeo.EntityVectors
     assert polygeo.VertexVectors is polygeo.EntityVectors
@@ -176,6 +245,16 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     assert normals.is_face_supported
     assert normals.vectors_numpy_copy().shape == (4, 3)
     assert curvature.coefficients_numpy_copy().shape == (4,)
+    assert gradient.is_face_supported
+    assert divergence.space.variance == "chain"
+    areas = realization.primal_measures_numpy_copy(2)
+    gradient_values = gradient.vectors_numpy_copy()
+    np.testing.assert_allclose(
+        np.dot(scalar.coefficients_numpy_copy(), divergence.coefficients_numpy_copy()),
+        -np.sum(areas * np.einsum("ij,ij->i", gradient_values, gradient_values)),
+        rtol=2.0e-14,
+        atol=2.0e-14,
+    )
 
     cycles = realization.complex.integral_dual_cycle_basis()
     connection = surface.levi_civita_connection()
