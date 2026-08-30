@@ -319,3 +319,14 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     assert cycles.rank == 0
     assert np.isfinite(evidence.local_error)
     assert evidence.limit > 0.0
+
+    homology = polygeo.analyze_integral_homology(complex_.chain_complex(), [1])
+    harmonic = realization.positive_metric().harmonic_one_form_basis(homology[1])
+    requested = complex_.chain_complex().dual()[0].element({0: 1, 1: 1})
+    direction = surface.minimum_energy_direction_field(
+        realization.positive_metric(), harmonic, cycles, requested, [], 0.25
+    )
+    singularities = direction.singularity_indices()
+    assert isinstance(singularities, polygeo.DirectionFieldSingularities)
+    assert singularities.indices.to_python_copy() == requested.to_python_copy()
+    assert singularities.maximum_quantization_residual <= singularities.residual_limit

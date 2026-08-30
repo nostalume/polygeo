@@ -8,11 +8,14 @@ from polygeo import (
     Binary64Element,
     EntityVectors,
     EuclideanRealization,
+    FaceDirectionField,
     FlowStep,
     Geometry,
     HarmonicOneFormBasis,
     HeatSolution,
     HomologyGroup,
+    IntegralCochain,
+    IntegralDualCycleBasis,
     LeastSquaresConformalMapSolution,
     PositiveMetric,
     PreparedProblem,
@@ -55,8 +58,20 @@ def numerical_effects(
     assert_type(metric.harmonic_one_form_basis(group), HarmonicOneFormBasis)
 
 
-def surface_effects(surface: TriangleSurface) -> None:
+def surface_effects(
+    surface: TriangleSurface,
+    metric: PositiveMetric,
+    harmonic: HarmonicOneFormBasis,
+    cycles: IntegralDualCycleBasis,
+    singularities: IntegralCochain[Literal[0]],
+) -> None:
     assert_type(
         surface.least_squares_conformal_map((0, 1)),
         LeastSquaresConformalMapSolution,
+    )
+    assert_type(
+        surface.minimum_energy_direction_field(
+            metric, harmonic, cycles, singularities, (), 0.0
+        ),
+        FaceDirectionField,
     )

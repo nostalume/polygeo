@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use polygeo_core::{
-    EntityVectors, FaceDirectionField, HolonomyEvidence, IntegrableConnection,
-    IntegralDualCycleBasis, LeastSquaresConformalMapSolution, SurfaceConnection, SurfaceError,
-    TriangleSurface,
+    DirectionFieldSingularities, EntityVectors, FaceDirectionField, HolonomyEvidence,
+    IntegrableConnection, IntegralDualCycleBasis, LeastSquaresConformalMapSolution,
+    SurfaceConnection, SurfaceError, TriangleSurface,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
@@ -161,6 +161,58 @@ impl PyTriangleSurface {
         let deviations = deviations.extract::<PyReadonlyArray1<'_, f64>>()?;
         let deviations = deviations.as_array().iter().copied().collect::<Vec<_>>();
         connection(self.inner.connection(&deviations))
+    }
+
+    #[pyo3(signature = (metric, harmonic_basis, dual_cycles, singularities, generator_turns, anchor_phase, *, executor=None, storage=None, work=None, cancellation=None))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the binding preserves the explicit native call boundary"
+    )]
+    fn minimum_energy_direction_field(
+        &self,
+        py: Python<'_>,
+        metric: &PyPositiveMetric,
+        harmonic_basis: &crate::solve::PyHarmonicOneFormBasis,
+        dual_cycles: &PyIntegralDualCycleBasis,
+        singularities: &NativeChainElement,
+        generator_turns: Vec<i64>,
+        anchor_phase: f64,
+        executor: Option<&crate::solve::PyNativeExecutor>,
+        storage: Option<&crate::solve::PyStorageLimit>,
+        work: Option<&crate::solve::PyWorkLimit>,
+        cancellation: Option<&crate::solve::PyCancellationToken>,
+    ) -> PyResult<PyFaceDirectionField> {
+        let ExactElement::IntegerCochain(singularities) = &singularities.inner else {
+            return Err(PyValueError::new_err(
+                "singularities must be an integral cochain",
+            ));
+        };
+        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
+        let cancellation = cancellation
+            .map_or_else(polygeo_core::CancellationToken::new, |value| {
+                value.inner.clone()
+            });
+        let surface = Arc::clone(&self.inner);
+        let metric = metric.inner.clone();
+        let harmonic_basis = harmonic_basis.inner.clone();
+        let dual_cycles = dual_cycles.inner.clone();
+        let singularities = singularities.clone();
+        py.detach(move || {
+            surface.minimum_energy_direction_field(
+                &metric,
+                &harmonic_basis,
+                &dual_cycles,
+                &singularities,
+                &generator_turns,
+                anchor_phase,
+                &executor,
+                storage,
+                work,
+                &cancellation,
+            )
+        })
+        .map(|inner| PyFaceDirectionField { inner })
+        .map_err(crate::solve::surface_computation_error)
     }
 
     #[pyo3(signature = (anchors, *, realization_limit=None, executor=None, storage=None, work=None, cancellation=None))]
@@ -464,9 +516,42 @@ impl PyFaceDirectionField {
     fn ambient_vectors_numpy_copy(&self) -> PyResult<PyEntityVectors> {
         field(self.inner.ambient_vectors_copy())
     }
+    fn singularity_indices(&self) -> PyResult<PyDirectionFieldSingularities> {
+        Ok(PyDirectionFieldSingularities {
+            inner: self.inner.singularity_indices().map_err(surface_error)?,
+        })
+    }
     #[getter]
     fn crossing_error(&self) -> PyResult<f64> {
         self.inner.crossing_error().map_err(surface_error)
+    }
+}
+
+#[pyclass(
+    name = "DirectionFieldSingularities",
+    frozen,
+    module = "polygeo",
+    skip_from_py_object
+)]
+struct PyDirectionFieldSingularities {
+    inner: DirectionFieldSingularities,
+}
+
+#[pymethods]
+impl PyDirectionFieldSingularities {
+    #[getter]
+    fn indices(&self) -> NativeChainElement {
+        NativeChainElement {
+            inner: ExactElement::IntegerCochain(self.inner.indices().clone()),
+        }
+    }
+    #[getter]
+    fn maximum_quantization_residual(&self) -> f64 {
+        self.inner.maximum_quantization_residual()
+    }
+    #[getter]
+    fn residual_limit(&self) -> f64 {
+        self.inner.residual_limit()
     }
 }
 
@@ -506,5 +591,6 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyIntegralDualCycleBasis>()?;
     module.add_class::<PyHolonomyEvidence>()?;
     module.add_class::<PyIntegrableConnection>()?;
-    module.add_class::<PyFaceDirectionField>()
+    module.add_class::<PyFaceDirectionField>()?;
+    module.add_class::<PyDirectionFieldSingularities>()
 }

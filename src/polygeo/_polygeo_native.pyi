@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from fractions import Fraction
 from typing import Any, Literal, Never, Protocol, Self, final, overload
 
@@ -681,6 +681,20 @@ class TriangleSurface:
     ) -> LeastSquaresConformalMapSolution: ...
     def levi_civita_connection(self) -> SurfaceConnection: ...
     def connection(self, deviations: NDArray[np.float64]) -> SurfaceConnection: ...
+    def minimum_energy_direction_field(
+        self,
+        metric: PositiveMetric[Any],
+        harmonic_basis: HarmonicOneFormBasis,
+        dual_cycles: IntegralDualCycleBasis,
+        singularities: Element[Space[int, Cochain, Literal[0]]],
+        generator_turns: Sequence[int],
+        anchor_phase: float,
+        *,
+        executor: NativeExecutor | None = None,
+        storage: StorageLimit | None = None,
+        work: WorkLimit | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> FaceDirectionField: ...
 
 class EntityVectors:
     def __new__(cls, _token: Never, /) -> Self: ...
@@ -738,6 +752,15 @@ class FaceDirectionField:
     def crossing_error(self) -> float: ...
     def directions_numpy_copy(self) -> NDArray[np.float64]: ...
     def ambient_vectors_numpy_copy(self) -> EntityVectors: ...
+    def singularity_indices(self) -> DirectionFieldSingularities: ...
+
+class DirectionFieldSingularities:
+    @property
+    def indices(self) -> Element[Space[int, Cochain, Literal[0]]]: ...
+    @property
+    def maximum_quantization_residual(self) -> float: ...
+    @property
+    def residual_limit(self) -> float: ...
 
 class HalfedgeSurface:
     @staticmethod
