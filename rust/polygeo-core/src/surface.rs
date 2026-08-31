@@ -371,6 +371,18 @@ struct SurfaceRows {
     second: Box<[f64]>,
 }
 
+#[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by bounded field construction")
+)]
+pub(crate) struct BoundaryDirectionTargets {
+    component_offsets: Box<[usize]>,
+    component_edges: Box<[usize]>,
+    faces: Box<[usize]>,
+    power_directions: Box<[f64]>,
+}
+
 /// One admitted oriented triangle-manifold realization in ambient dimension three.
 pub struct TriangleSurface {
     realization: Arc<EuclideanRealization>,
@@ -532,6 +544,38 @@ impl TriangleSurface {
     /// Returns an unrepresentable frame failure.
     pub fn second_frame_axes(&self) -> Result<&[f64], SurfaceError> {
         Ok(&self.surface_rows()?.second)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by bounded field construction")
+    )]
+    pub(crate) fn boundary_direction_targets(
+        &self,
+        symmetry_order: NonZeroU32,
+        boundary_angle_offset: f64,
+    ) -> Result<BoundaryDirectionTargets, SurfaceError> {
+        if !boundary_angle_offset.is_finite() {
+            return Err(SurfaceError::NonFinite);
+        }
+        self.realization
+            .topology()
+            .refine_regular()?
+            .with_boundary()?;
+        let (component_offsets, component_edges) =
+            oriented_boundary_components(self.realization.topology())?;
+        let (faces, power_directions) = boundary_face_power_directions(
+            self,
+            symmetry_order,
+            boundary_angle_offset,
+            &component_edges,
+        )?;
+        Ok(BoundaryDirectionTargets {
+            component_offsets: component_offsets.into_boxed_slice(),
+            component_edges: component_edges.into_boxed_slice(),
+            faces: faces.into_boxed_slice(),
+            power_directions: power_directions.into_boxed_slice(),
+        })
     }
 
     fn surface_rows(&self) -> Result<&SurfaceRows, SurfaceError> {
@@ -990,6 +1034,177 @@ impl TriangleSurface {
             .then_some((vertices, coefficients))
             .ok_or(SurfaceError::Unrepresentable)
     }
+}
+
+fn oriented_boundary_edge(
+    edge_basis: &crate::Basis,
+    boundary: &CanonicalBoundary,
+    edge: usize,
+) -> Result<Option<(usize, usize, usize)>, SurfaceError> {
+    let start = *boundary
+        .indptr()
+        .get(edge)
+        .ok_or(SurfaceError::IndexOutside)?;
+    let stop = *boundary
+        .indptr()
+        .get(edge + 1)
+        .ok_or(SurfaceError::IndexOutside)?;
+    if stop - start != 1 {
+        return Ok(None);
+    }
+    let endpoints = edge_basis.row(edge).ok_or(SurfaceError::IndexOutside)?;
+    let [low, high] = endpoints else {
+        return Err(SurfaceError::Unrepresentable);
+    };
+    let (source, target) = match boundary.data()[start] {
+        1 => (*low, *high),
+        -1 => (*high, *low),
+        _ => return Err(SurfaceError::Unrepresentable),
+    };
+    Ok(Some((source, target, boundary.indices()[start])))
+}
+
+fn oriented_boundary_components(
+    topology: &ComplexCore,
+) -> Result<(Vec<usize>, Vec<usize>), SurfaceError> {
+    let edge_basis = topology.basis(1)?;
+    let boundary = topology.boundary(2)?;
+    let mut edge_at_source = vec![usize::MAX; topology.vertex_count()];
+    let mut incoming = vec![false; topology.vertex_count()];
+    let mut boundary_edge_count = 0_usize;
+    for edge in 0..edge_basis.row_count() {
+        let Some((source, target, _)) = oriented_boundary_edge(edge_basis, boundary, edge)? else {
+            continue;
+        };
+        if edge_at_source[source] != usize::MAX || incoming[target] {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        edge_at_source[source] = edge;
+        incoming[target] = true;
+        boundary_edge_count = boundary_edge_count
+            .checked_add(1)
+            .ok_or(SurfaceError::Overflow)?;
+    }
+
+    let mut offsets = vec![0_usize];
+    let mut edges = Vec::with_capacity(boundary_edge_count);
+    let mut visited = vec![false; edge_basis.row_count()];
+    for start in 0..topology.vertex_count() {
+        let first_edge = edge_at_source[start];
+        if first_edge == usize::MAX || visited[first_edge] {
+            continue;
+        }
+        let mut vertex = start;
+        loop {
+            let edge = edge_at_source[vertex];
+            if edge == usize::MAX || visited[edge] {
+                return Err(SurfaceError::Unrepresentable);
+            }
+            visited[edge] = true;
+            edges.push(edge);
+            let (_, target, _) = oriented_boundary_edge(edge_basis, boundary, edge)?
+                .ok_or(SurfaceError::Unrepresentable)?;
+            vertex = target;
+            if vertex == start {
+                break;
+            }
+        }
+        offsets.push(edges.len());
+    }
+    if edges.len() != boundary_edge_count {
+        return Err(SurfaceError::Unrepresentable);
+    }
+    Ok((offsets, edges))
+}
+
+fn boundary_edge_geometry(
+    surface: &TriangleSurface,
+    edge: usize,
+) -> Result<(usize, [f64; 3], f64), SurfaceError> {
+    let topology = surface.realization().topology();
+    let (source, target, face) =
+        oriented_boundary_edge(topology.basis(1)?, topology.boundary(2)?, edge)?
+            .ok_or(SurfaceError::Unrepresentable)?;
+    let displacement = subtract(surface.point(target)?, surface.point(source)?);
+    let length = norm(displacement);
+    let tangent = normalize(displacement).ok_or(SurfaceError::Unrepresentable)?;
+    if !length.is_finite() {
+        return Err(SurfaceError::Unrepresentable);
+    }
+    Ok((face, tangent, length))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BoundaryTargetAccumulator {
+    length_scale: f64,
+    sum: [f64; 2],
+    correction: [f64; 2],
+    weight_sum: f64,
+    term_count: u32,
+}
+
+fn boundary_face_power_directions(
+    surface: &TriangleSurface,
+    symmetry_order: NonZeroU32,
+    boundary_angle_offset: f64,
+    edges: &[usize],
+) -> Result<(Vec<usize>, Vec<f64>), SurfaceError> {
+    let mut accumulators = vec![BoundaryTargetAccumulator::default(); surface.face_count()];
+    for &edge in edges {
+        let (face, _, length) = boundary_edge_geometry(surface, edge)?;
+        accumulators[face].length_scale = accumulators[face].length_scale.max(length);
+    }
+
+    let first_axes = surface.first_frame_axes()?;
+    let second_axes = surface.second_frame_axes()?;
+    for &edge in edges {
+        let (face, tangent, length) = boundary_edge_geometry(surface, edge)?;
+        let direction = complex_power(
+            normalize_complex([
+                dot(tangent, row3(first_axes, face)?),
+                dot(tangent, row3(second_axes, face)?),
+            ])?,
+            i64::from(symmetry_order.get()),
+        )?;
+        let accumulator = &mut accumulators[face];
+        let weight = length / accumulator.length_scale;
+        for (axis, direction) in direction.into_iter().enumerate() {
+            compensated_add(
+                &mut accumulator.sum[axis],
+                &mut accumulator.correction[axis],
+                weight * direction,
+            )?;
+        }
+        accumulator.weight_sum += weight;
+        accumulator.term_count = accumulator
+            .term_count
+            .checked_add(1)
+            .ok_or(SurfaceError::Overflow)?;
+    }
+
+    let order = f64::from(symmetry_order.get());
+    let offset_angle = boundary_angle_offset.rem_euclid(std::f64::consts::TAU / order) * order;
+    let offset = [offset_angle.cos(), offset_angle.sin()];
+    let mut faces = Vec::new();
+    let mut power_directions = Vec::new();
+    for (face, accumulator) in accumulators.into_iter().enumerate() {
+        if accumulator.term_count == 0 {
+            continue;
+        }
+        let sum = [
+            product_sum([(accumulator.sum[0], 1.0), (accumulator.correction[0], 1.0)])?,
+            product_sum([(accumulator.sum[1], 1.0), (accumulator.correction[1], 1.0)])?,
+        ];
+        let magnitude = sum[0].hypot(sum[1]);
+        let operation_count = f64::from(accumulator.term_count.saturating_add(2));
+        let limit = 64.0 * f64::EPSILON * operation_count * accumulator.weight_sum;
+        if !magnitude.is_finite() || magnitude <= limit {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        faces.push(face);
+        power_directions.extend(complex_multiply(normalize_complex(sum)?, offset));
+    }
+    Ok((faces, power_directions))
 }
 
 fn difference(left: f64, right: f64) -> Result<f64, SurfaceError> {
@@ -1615,5 +1830,180 @@ impl FaceDirectionField {
             Support::Face,
             values,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CandidateInput, RealizationLimit};
+
+    fn annulus(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
+        let faces = [
+            0_u64, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7,
+        ];
+        let topology = ComplexCore::admit(
+            CandidateInput::unsigned(faces, 8, 3, Some(8)).expect("valid annulus input"),
+        )
+        .expect("valid annulus topology");
+        let points = [
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+            [-0.4, -0.4, 0.0],
+            [0.4, -0.4, 0.0],
+            [0.4, 0.4, 0.0],
+            [-0.4, 0.4, 0.0],
+        ];
+        let positions = points
+            .into_iter()
+            .flat_map(|point| {
+                point
+                    .into_iter()
+                    .zip(translation)
+                    .map(move |(coordinate, offset)| scale * coordinate + offset)
+            })
+            .collect();
+        EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT)
+            .expect("valid annulus realization")
+    }
+
+    #[test]
+    fn boundary_direction_targets_follow_induced_cycles_and_similarity() {
+        let order = NonZeroU32::new(4).expect("nonzero order");
+        let angle = 0.17;
+        let surface = TriangleSurface::admit(annulus(1.0, [0.0; 3])).expect("valid surface");
+        let targets = surface
+            .boundary_direction_targets(order, angle)
+            .expect("determinate targets");
+
+        assert_eq!(&*targets.component_offsets, &[0, 4, 8]);
+        assert_eq!(targets.component_edges.len(), 8);
+        assert_eq!(targets.faces.len(), 8);
+        let topology = surface.realization().topology();
+        let edges = topology.basis(1).expect("edge basis");
+        let boundary = topology.boundary(2).expect("face boundary");
+        let first = surface.first_frame_axes().expect("first frame");
+        let second = surface.second_frame_axes().expect("second frame");
+        let offset = [
+            (f64::from(order.get()) * angle).cos(),
+            (f64::from(order.get()) * angle).sin(),
+        ];
+        for component in targets.component_offsets.windows(2) {
+            let component_edges = &targets.component_edges[component[0]..component[1]];
+            let mut previous_target = None;
+            let mut first_source = None;
+            for &edge in component_edges {
+                let start = boundary.indptr()[edge];
+                let face = boundary.indices()[start];
+                let coefficient = boundary.data()[start];
+                let endpoints = edges.row(edge).expect("edge endpoints");
+                let (source, target) = if coefficient > 0 {
+                    (endpoints[0], endpoints[1])
+                } else {
+                    (endpoints[1], endpoints[0])
+                };
+                assert_eq!(previous_target.unwrap_or(source), source);
+                first_source.get_or_insert(source);
+                previous_target = Some(target);
+
+                let tangent = normalize(subtract(
+                    surface.point(target).expect("target point"),
+                    surface.point(source).expect("source point"),
+                ))
+                .expect("nonzero edge");
+                let coordinates = normalize_complex([
+                    dot(tangent, row3(first, face).expect("first axis")),
+                    dot(tangent, row3(second, face).expect("second axis")),
+                ])
+                .expect("tangent coordinates");
+                let expected = complex_multiply(
+                    complex_power(coordinates, i64::from(order.get())).expect("power"),
+                    offset,
+                );
+                let target_row = targets
+                    .faces
+                    .iter()
+                    .position(|&candidate| candidate == face)
+                    .expect("boundary face");
+                let actual = complex_at(&targets.power_directions, target_row).expect("target");
+                assert!((actual[0] - expected[0]).abs() <= 64.0 * f64::EPSILON);
+                assert!((actual[1] - expected[1]).abs() <= 64.0 * f64::EPSILON);
+            }
+            assert_eq!(previous_target, first_source);
+        }
+
+        let transformed = TriangleSurface::admit(annulus(7.5, [3.0, -5.0, 2.0]))
+            .expect("valid transformed surface")
+            .boundary_direction_targets(order, angle)
+            .expect("transformed targets");
+        assert_eq!(targets.component_offsets, transformed.component_offsets);
+        assert_eq!(targets.component_edges, transformed.component_edges);
+        assert_eq!(targets.faces, transformed.faces);
+        for (&left, &right) in targets
+            .power_directions
+            .iter()
+            .zip(transformed.power_directions.iter())
+        {
+            assert!((left - right).abs() <= 128.0 * f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn boundary_direction_targets_aggregate_edges_and_reject_ambiguity() {
+        let quad = ComplexCore::admit(
+            CandidateInput::unsigned([0_u64, 1, 2, 0, 2, 3], 2, 3, Some(4))
+                .expect("valid quad input"),
+        )
+        .expect("valid quad topology");
+        let quad = TriangleSurface::admit(
+            EuclideanRealization::admit(
+                quad,
+                3,
+                vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+                RealizationLimit::DEFAULT,
+            )
+            .expect("valid quad realization"),
+        )
+        .expect("valid quad surface");
+        for (order, expected) in [
+            (1, [2.0_f64 / 5.0_f64.sqrt(), 1.0 / 5.0_f64.sqrt()]),
+            (2, [1.0, 0.0]),
+            (4, [1.0, 0.0]),
+        ] {
+            let targets = quad
+                .boundary_direction_targets(NonZeroU32::new(order).expect("nonzero order"), 0.0)
+                .expect("determinate multi-edge targets");
+            let face = targets
+                .faces
+                .iter()
+                .position(|&face| face == 0)
+                .expect("first boundary face");
+            let actual = complex_at(&targets.power_directions, face).expect("target");
+            assert!((actual[0] - expected[0]).abs() <= 64.0 * f64::EPSILON);
+            assert!((actual[1] - expected[1]).abs() <= 64.0 * f64::EPSILON);
+        }
+
+        let triangle = TriangleSurface::admit(
+            EuclideanRealization::admit(
+                ComplexCore::admit(
+                    CandidateInput::unsigned([0_u64, 1, 2], 1, 3, Some(3))
+                        .expect("valid triangle input"),
+                )
+                .expect("valid triangle topology"),
+                3,
+                vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                RealizationLimit::DEFAULT,
+            )
+            .expect("valid triangle realization"),
+        )
+        .expect("valid triangle surface");
+        assert_eq!(
+            triangle
+                .boundary_direction_targets(NonZeroU32::MIN, 0.0)
+                .expect_err("closed tangent sum is ambiguous"),
+            SurfaceError::Unrepresentable
+        );
     }
 }
