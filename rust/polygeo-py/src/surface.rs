@@ -224,6 +224,46 @@ impl PyTriangleSurface {
         .map_err(crate::solve::surface_computation_error)
     }
 
+    #[pyo3(signature = (symmetry_order, metric, boundary_angle_offset, *, executor=None, storage=None, work=None, cancellation=None))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the binding preserves the explicit native call boundary"
+    )]
+    fn boundary_aligned_direction_field(
+        &self,
+        py: Python<'_>,
+        symmetry_order: u32,
+        metric: &PyPositiveMetric,
+        boundary_angle_offset: f64,
+        executor: Option<&crate::solve::PyNativeExecutor>,
+        storage: Option<&crate::solve::PyStorageLimit>,
+        work: Option<&crate::solve::PyWorkLimit>,
+        cancellation: Option<&crate::solve::PyCancellationToken>,
+    ) -> PyResult<PyFaceDirectionField> {
+        let symmetry_order = NonZeroU32::new(symmetry_order)
+            .ok_or_else(|| PyValueError::new_err("symmetry_order must be positive"))?;
+        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
+        let cancellation = cancellation
+            .map_or_else(polygeo_core::CancellationToken::new, |value| {
+                value.inner.clone()
+            });
+        let surface = Arc::clone(&self.inner);
+        let metric = metric.inner.clone();
+        py.detach(move || {
+            surface.boundary_aligned_direction_field(
+                symmetry_order,
+                &metric,
+                boundary_angle_offset,
+                &executor,
+                storage,
+                work,
+                &cancellation,
+            )
+        })
+        .map(|inner| PyFaceDirectionField { inner })
+        .map_err(crate::solve::surface_computation_error)
+    }
+
     #[pyo3(signature = (anchors, *, realization_limit=None, executor=None, storage=None, work=None, cancellation=None))]
     fn least_squares_conformal_map(
         &self,

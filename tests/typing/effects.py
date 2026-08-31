@@ -79,3 +79,6 @@ def surface_effects(
     singularity_evidence = direction.singularities()
     assert_type(singularity_evidence, DirectionFieldSingularities)
     assert_type(singularity_evidence.symmetry_order, int)
+    assert_type(
+        surface.boundary_aligned_direction_field(2, metric, 0.0), FaceDirectionField
+    )

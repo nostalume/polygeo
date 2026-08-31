@@ -369,3 +369,27 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     assert singularities.symmetry_order == 2
     assert singularities.charges.to_python_copy() == requested.to_python_copy()
     assert singularities.maximum_quantization_residual <= singularities.residual_limit
+
+    sections = 16
+    angles = 2.0 * np.pi * np.arange(sections) / sections
+    disk_positions = np.vstack(
+        (
+            np.column_stack((np.cos(angles), np.sin(angles), np.zeros(sections))),
+            np.zeros((1, 3)),
+        )
+    )
+    disk_faces = np.column_stack(
+        (
+            np.arange(sections),
+            np.roll(np.arange(sections), -1),
+            np.full(sections, sections),
+        )
+    )
+    disk = polygeo.Complex.from_maximal_simplices(disk_faces.astype(np.int64))
+    disk_realization = polygeo.EuclideanRealization.from_positions(disk, disk_positions)
+    disk_surface = polygeo.TriangleSurface.admit(disk_realization)
+    boundary_field = disk_surface.boundary_aligned_direction_field(
+        2, disk_realization.positive_metric(), 0.0
+    )
+    assert boundary_field.power_directions_numpy_copy().shape == (sections, 2)
+    assert boundary_field.singularities().boundary_turns_copy() == (0,)

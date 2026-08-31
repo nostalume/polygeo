@@ -698,6 +698,17 @@ class TriangleSurface:
         work: WorkLimit | None = None,
         cancellation: CancellationToken | None = None,
     ) -> FaceDirectionField: ...
+    def boundary_aligned_direction_field(
+        self,
+        symmetry_order: int,
+        metric: PositiveMetric[Any],
+        boundary_angle_offset: float,
+        *,
+        executor: NativeExecutor | None = None,
+        storage: StorageLimit | None = None,
+        work: WorkLimit | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> FaceDirectionField: ...
 
 class EntityVectors:
     def __new__(cls, _token: Never, /) -> Self: ...
