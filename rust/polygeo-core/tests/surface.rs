@@ -1,4 +1,5 @@
 use std::f64::consts::PI;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use num_bigint::BigInt;
@@ -30,6 +31,31 @@ fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
         })
         .collect();
     EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+}
+
+fn octahedron() -> Arc<EuclideanRealization> {
+    let topology = ComplexCore::admit(
+        CandidateInput::unsigned(
+            [
+                4_u64, 0, 2, 4, 2, 1, 4, 1, 3, 4, 3, 0, 5, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3,
+            ],
+            8,
+            3,
+            Some(6),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    EuclideanRealization::admit(
+        topology,
+        3,
+        vec![
+            1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            -1.0,
+        ],
+        RealizationLimit::DEFAULT,
+    )
+    .unwrap()
 }
 
 fn triangle() -> Arc<EuclideanRealization> {
@@ -614,7 +640,7 @@ fn connection_retains_only_transport_and_integrability_shares_owner() {
         .chunks_exact(2)
         .map(|value| -value[1].atan2(value[0]))
         .collect();
-    let flat = surface.connection(&deviations).unwrap();
+    let flat = surface.connection(NonZeroU32::MIN, &deviations).unwrap();
     for value in flat.transports().chunks_exact(2) {
         assert_close(value[0], 1.0, 8.0e-15);
         assert_close(value[1], 0.0, 8.0e-15);
@@ -634,52 +660,75 @@ fn connection_retains_only_transport_and_integrability_shares_owner() {
 
     let field = integrable.direction_field(0.25).unwrap();
     assert!(Arc::ptr_eq(field.connection(), &flat));
-    assert_eq!(field.directions().len(), 2 * surface.face_count());
+    assert_eq!(field.power_directions().len(), 2 * surface.face_count());
     assert_close(field.crossing_error().unwrap(), 0.0, holonomy.limit());
-    let vectors = field.ambient_vectors_copy().unwrap();
+    let vectors = field.ambient_vector_branch_copy(0).unwrap();
     for vector in vectors.values().chunks_exact(3) {
         assert_close(norm(vector), 1.0, 8.0e-15);
     }
 }
 
 #[test]
-fn direction_field_singularities_are_exact_and_quantization_checked() {
+fn direction_field_power_charges_are_exact_and_quantization_checked() {
     let surface = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
     let levi_civita = surface.levi_civita_connection().unwrap();
-    let deviations = levi_civita
-        .transports()
-        .chunks_exact(2)
-        .map(|value| -value[1].atan2(value[0]))
-        .collect::<Vec<_>>();
-    let connection = surface.connection(&deviations).unwrap();
     let cycles = surface
         .realization()
         .topology()
         .integral_dual_cycle_basis()
         .unwrap();
-    let field = connection
-        .require_integrable(&cycles)
-        .unwrap()
-        .direction_field(0.0)
-        .unwrap();
+    for order in [1, 2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
+        let deviations = levi_civita
+            .transports()
+            .chunks_exact(2)
+            .map(|value| -f64::from(order.get()) * value[1].atan2(value[0]))
+            .collect::<Vec<_>>();
+        let integrable = surface
+            .connection(order, &deviations)
+            .unwrap()
+            .require_integrable(&cycles)
+            .unwrap();
 
-    let singularities = field.singularity_indices().unwrap();
-    assert_eq!(singularities.indices().degree(), 0);
-    assert_eq!(
-        singularities
-            .indices()
-            .coefficients()
-            .iter()
-            .cloned()
-            .sum::<BigInt>(),
-        BigInt::from(2)
-    );
-    assert!(singularities.maximum_quantization_residual() <= singularities.residual_limit());
+        let singularities = integrable
+            .direction_field(0.0)
+            .unwrap()
+            .singularities()
+            .unwrap();
+        let rotated = integrable
+            .direction_field(0.137)
+            .unwrap()
+            .singularities()
+            .unwrap();
+        assert_eq!(singularities.symmetry_order(), order);
+        assert_eq!(
+            singularities.charges().indices(),
+            rotated.charges().indices()
+        );
+        assert_eq!(
+            singularities.charges().coefficients(),
+            rotated.charges().coefficients()
+        );
+        assert_eq!(singularities.charges().degree(), 0);
+        assert_eq!(
+            singularities
+                .charges()
+                .coefficients()
+                .iter()
+                .cloned()
+                .sum::<BigInt>(),
+            BigInt::from(2 * order.get())
+        );
+        assert!(singularities.maximum_quantization_residual() <= singularities.residual_limit());
+    }
 }
 
 #[test]
-fn minimum_energy_direction_field_realizes_exact_sphere_indices() {
-    let realization = tetrahedron(1.0, [0.0; 3]);
+#[expect(
+    clippy::too_many_lines,
+    reason = "one behavior cluster covers valid orders and adjacent atomic failures"
+)]
+fn minimum_energy_direction_field_realizes_exact_sphere_power_charges() {
+    let realization = octahedron();
     let metric = realization
         .circumcentric_pairing()
         .unwrap()
@@ -706,40 +755,55 @@ fn minimum_energy_direction_field_realizes_exact_sphere_indices() {
         .topology()
         .integral_dual_cycle_basis()
         .unwrap();
-    let singularity_space = surface
+    let charge_space = surface
         .realization()
         .topology()
         .chain_complex()
         .dual()
         .space(0)
         .unwrap();
-    let requested = singularity_space
-        .element([(0, BigInt::from(1)), (1, BigInt::from(1))])
+    for order in [1, 2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
+        let requested = match order.get() {
+            1 => charge_space.element([(0, 1.into()), (1, 1.into())]),
+            2 => charge_space.element([(0, 1.into()), (1, 1.into()), (2, 1.into()), (3, 1.into())]),
+            4 => charge_space.element([
+                (0, 2.into()),
+                (1, 2.into()),
+                (2, 1.into()),
+                (3, 1.into()),
+                (4, 1.into()),
+                (5, 1.into()),
+            ]),
+            _ => unreachable!(),
+        }
         .unwrap();
+        let field = surface
+            .minimum_energy_direction_field(
+                order,
+                &metric,
+                &harmonic,
+                &cycles,
+                &requested,
+                &[],
+                0.25,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_or_else(|error| panic!("order {order} failed: {error:?}"));
 
-    let field = surface
-        .minimum_energy_direction_field(
-            &metric,
-            &harmonic,
-            &cycles,
-            &requested,
-            &[],
-            0.25,
-            &NativeExecutor::sequential(),
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
-            &CancellationToken::new(),
-        )
-        .unwrap();
+        assert_eq!(field.symmetry_order(), order);
+        let observed = field.singularities().unwrap();
+        assert_eq!(observed.charges().indices(), requested.indices());
+        assert_eq!(observed.charges().coefficients(), requested.coefficients());
+    }
 
-    let observed = field.singularity_indices().unwrap();
-    assert_eq!(observed.indices().indices(), requested.indices());
-    assert_eq!(observed.indices().coefficients(), requested.coefficients());
-
-    let invalid = singularity_space.element([(0, BigInt::from(1))]).unwrap();
+    let invalid = charge_space.element([(0, BigInt::from(1))]).unwrap();
     assert_eq!(
         surface
             .minimum_energy_direction_field(
+                NonZeroU32::new(2).unwrap(),
                 &metric,
                 &harmonic,
                 &cycles,
@@ -755,9 +819,13 @@ fn minimum_energy_direction_field_realizes_exact_sphere_indices() {
             .solve(),
         Some(SolveError::ProblemMismatch)
     );
+    let requested = charge_space
+        .element([(0, BigInt::from(1)), (1, BigInt::from(1))])
+        .unwrap();
     assert_eq!(
         surface
             .minimum_energy_direction_field(
+                NonZeroU32::MIN,
                 &metric,
                 &harmonic,
                 &cycles,
@@ -804,7 +872,7 @@ fn minimum_energy_direction_field_closes_lifted_torus_turns() {
         .topology()
         .integral_dual_cycle_basis()
         .unwrap();
-    let no_singularities = torus_surface
+    let no_charges = torus_surface
         .realization()
         .topology()
         .chain_complex()
@@ -815,11 +883,12 @@ fn minimum_energy_direction_field_closes_lifted_torus_turns() {
         .unwrap();
     let torus_field = torus_surface
         .minimum_energy_direction_field(
+            NonZeroU32::new(4).unwrap(),
             &torus_metric,
             &torus_harmonic,
             &torus_cycles,
-            &no_singularities,
-            &[1, -1],
+            &no_charges,
+            &[1, 0],
             0.0,
             &NativeExecutor::sequential(),
             StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
@@ -828,11 +897,12 @@ fn minimum_energy_direction_field_closes_lifted_torus_turns() {
         )
         .unwrap();
     assert_eq!(torus_harmonic.rank(), 2);
+    assert_eq!(torus_field.symmetry_order().get(), 4);
     assert!(
         torus_field
-            .singularity_indices()
+            .singularities()
             .unwrap()
-            .indices()
+            .charges()
             .indices()
             .is_empty()
     );
@@ -865,35 +935,63 @@ fn vertex_normal_and_curvature_algorithms_share_the_field_carrier() {
 }
 
 #[test]
-fn connection_composition_is_pointwise_and_owner_checked() {
-    let surface = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
-    let deviations = vec![0.125; surface.edge_count()];
-    let left = surface.connection(&deviations).unwrap();
-    let right = surface.connection(&deviations).unwrap();
-    let composed = left.compose(&right).unwrap();
-    for ((left, right), composed) in left
+fn symmetric_connection_retains_power_order_and_projects_explicit_branches() {
+    let surface = TriangleSurface::admit(torus(4, 5)).unwrap();
+    let order = NonZeroU32::new(4).unwrap();
+    let levi_civita = surface.levi_civita_connection().unwrap();
+    let deviations = levi_civita
         .transports()
         .chunks_exact(2)
-        .zip(right.transports().chunks_exact(2))
-        .zip(composed.transports().chunks_exact(2))
-    {
-        assert_close(
-            composed[0],
-            left[0] * right[0] - left[1] * right[1],
-            2.0e-15,
-        );
-        assert_close(
-            composed[1],
-            left[0] * right[1] + left[1] * right[0],
-            2.0e-15,
-        );
+        .map(|value| -f64::from(order.get()) * value[1].atan2(value[0]))
+        .collect::<Vec<_>>();
+    let connection = surface.connection(order, &deviations).unwrap();
+    assert_eq!(connection.symmetry_order(), order);
+    for transport in connection.transports().chunks_exact(2) {
+        assert_close(transport[0], 1.0, 2.0e-14);
+        assert_close(transport[1], 0.0, 2.0e-14);
     }
 
-    let other = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
-    let foreign = other.levi_civita_connection().unwrap();
+    let cycles = surface
+        .realization()
+        .topology()
+        .integral_dual_cycle_basis()
+        .unwrap();
+    let field = connection
+        .require_integrable(&cycles)
+        .unwrap()
+        .direction_field(0.125)
+        .unwrap();
+    assert_eq!(field.symmetry_order(), order);
+    assert_eq!(field.power_directions().len(), 2 * surface.face_count());
+    let singularities = field.singularities().unwrap();
+    assert_eq!(singularities.symmetry_order(), order);
     assert_eq!(
-        left.compose(&foreign).unwrap_err(),
-        SurfaceError::OwnerMismatch
+        singularities
+            .charges()
+            .coefficients()
+            .iter()
+            .cloned()
+            .sum::<BigInt>(),
+        BigInt::from(0)
+    );
+    assert!(singularities.maximum_quantization_residual() <= singularities.residual_limit());
+
+    let first = field.ambient_vector_branch_copy(0).unwrap();
+    let second = field.ambient_vector_branch_copy(1).unwrap();
+    for (first, second) in first
+        .values()
+        .chunks_exact(3)
+        .zip(second.values().chunks_exact(3))
+    {
+        assert_close(
+            first.iter().zip(second).map(|(a, b)| a * b).sum(),
+            0.0,
+            2.0e-14,
+        );
+    }
+    assert_eq!(
+        field.ambient_vector_branch_copy(4).unwrap_err(),
+        SurfaceError::IndexOutside
     );
 }
 
@@ -906,7 +1004,7 @@ fn genus_two_cycle_coordinates_certify_identity_transport() {
         .chunks_exact(2)
         .map(|value| -value[1].atan2(value[0]))
         .collect::<Vec<_>>();
-    let identity = surface.connection(&deviations).unwrap();
+    let identity = surface.connection(NonZeroU32::MIN, &deviations).unwrap();
     let cycles = surface
         .realization()
         .topology()
@@ -924,7 +1022,7 @@ fn deterministic_nonintegrability_is_stable_and_boundary_connections_fail() {
     let surface = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
     let mut deviations = vec![0.0; surface.edge_count()];
     deviations[0] = 0.25;
-    let connection = surface.connection(&deviations).unwrap();
+    let connection = surface.connection(NonZeroU32::MIN, &deviations).unwrap();
     let cycles = surface
         .realization()
         .topology()

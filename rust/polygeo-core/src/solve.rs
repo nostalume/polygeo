@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering as CmpOrdering,
     marker::PhantomData,
     mem::size_of,
-    num::NonZeroUsize,
+    num::{NonZeroU32, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -1155,8 +1155,8 @@ fn dual_period(
         .ok_or_else(|| SolveError::Numerical.into())
 }
 
-fn exact_singularity_sum(singularities: &IntegralCochain) -> num_bigint::BigInt {
-    singularities.coefficients().iter().sum()
+fn exact_charge_sum(charges: &IntegralCochain) -> num_bigint::BigInt {
+    charges.coefficients().iter().sum()
 }
 
 fn same_integral_coordinates(left: &IntegralCochain, right: &IntegralCochain) -> bool {
@@ -1201,10 +1201,15 @@ fn require_direction_field_resources(
     require_work(work, required_work)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the helper keeps mathematical inputs and existing execution policies explicit"
+)]
 fn solve_coexact_direction_adjustment(
     surface: &TriangleSurface,
+    symmetry_order: NonZeroU32,
     metric: &PositiveMetric,
-    singularities: &IntegralCochain,
+    charges: &IntegralCochain,
     executor: NativeExecutor,
     storage: StorageLimit,
     work: WorkLimit,
@@ -1212,21 +1217,18 @@ fn solve_coexact_direction_adjustment(
 ) -> Result<Vec<f64>, SurfaceComputationError> {
     let topology = surface.realization().topology();
     let curvature = surface.gaussian_curvature_measure()?;
+    let order = f64::from(symmetry_order.get());
     let mut load_values = curvature
         .coefficients()
         .iter()
-        .map(|value| -*value)
+        .map(|value| -order * *value)
         .collect::<Vec<_>>();
-    for (&vertex, coefficient) in singularities
-        .indices()
-        .iter()
-        .zip(singularities.coefficients())
-    {
-        let index = coefficient
+    for (&vertex, coefficient) in charges.indices().iter().zip(charges.coefficients()) {
+        let charge = coefficient
             .to_f64()
             .filter(|value| value.is_finite())
             .ok_or(SurfaceError::Unrepresentable)?;
-        load_values[vertex] += std::f64::consts::TAU * index;
+        load_values[vertex] += std::f64::consts::TAU * charge;
     }
     let load_space =
         Binary64Space::<Chain>::full(Arc::clone(topology), 0).map_err(|_| SolveError::Numerical)?;
@@ -1256,6 +1258,7 @@ fn solve_coexact_direction_adjustment(
 )]
 fn add_harmonic_direction_adjustment(
     surface: &Arc<TriangleSurface>,
+    symmetry_order: NonZeroU32,
     metric: &PositiveMetric,
     harmonic_basis: &HarmonicOneFormBasis,
     dual_cycles: &IntegralDualCycleBasis,
@@ -1274,6 +1277,7 @@ fn add_harmonic_direction_adjustment(
         .chunks_exact(2)
         .map(|value| value[1].atan2(value[0]))
         .collect::<Vec<_>>();
+    let order = f64::from(symmetry_order.get());
     let mut harmonic_dual = Vec::new();
     harmonic_dual
         .try_reserve_exact(rank)
@@ -1291,7 +1295,7 @@ fn add_harmonic_direction_adjustment(
         let turns = generator_turns[row]
             .to_f64()
             .ok_or(SurfaceError::Unrepresentable)?;
-        target[(row, 0)] = std::f64::consts::TAU * turns - base_angle - coexact_period;
+        target[(row, 0)] = std::f64::consts::TAU * turns - order * base_angle - coexact_period;
         for column in 0..rank {
             periods[(row, column)] =
                 dual_period(surface, dual_cycles, row, &harmonic_dual[column])?;
@@ -1323,10 +1327,13 @@ fn add_harmonic_direction_adjustment(
     }
     let operation_count =
         u32::try_from(deviations.len().saturating_add(rank).saturating_add(1)).unwrap_or(u32::MAX);
-    let period_limit = 8192.0 * f64::EPSILON * f64::from(operation_count);
+    let period_limit = 8192.0 * f64::EPSILON * f64::from(operation_count) * order;
+    if period_limit >= std::f64::consts::PI {
+        return Err(SolveError::Numerical.into());
+    }
     for (row, &turns) in generator_turns.iter().enumerate() {
         let turns = turns.to_f64().ok_or(SurfaceError::Unrepresentable)?;
-        let observed = dual_period(surface, dual_cycles, row, &levi_civita_angles)?
+        let observed = order * dual_period(surface, dual_cycles, row, &levi_civita_angles)?
             + dual_period(surface, dual_cycles, row, deviations)?;
         if (observed - std::f64::consts::TAU * turns).abs() > period_limit {
             return Err(SolveError::Numerical.into());
@@ -1336,14 +1343,14 @@ fn add_harmonic_direction_adjustment(
 }
 
 impl TriangleSurface {
-    /// Construct the minimum-energy ordinary direction field with exact indices and turns.
+    /// Construct a minimum-energy symmetric direction field with exact charges and turns.
     ///
-    /// The supplied degree-zero integral cochain fixes singularity indices. Generator turns
-    /// are lifted integer holonomies in the order of `dual_cycles`; `anchor_phase` fixes the
-    /// remaining global rotation only.
+    /// The supplied degree-zero integral cochain fixes power charges. Generator turns are
+    /// lifted power holonomies in the order of `dual_cycles`; `anchor_angle` fixes the
+    /// remaining global rotation modulo the supplied symmetry order.
     ///
     /// # Errors
-    /// Rejects foreign inputs, an index sum different from Euler characteristic, mismatched
+    /// Rejects foreign inputs, a charge sum different from order times Euler characteristic, mismatched
     /// generator dimensions, exhausted resources, cancellation, or failed certification.
     #[expect(
         clippy::too_many_arguments,
@@ -1351,12 +1358,13 @@ impl TriangleSurface {
     )]
     pub fn minimum_energy_direction_field(
         self: &Arc<Self>,
+        symmetry_order: NonZeroU32,
         metric: &PositiveMetric,
         harmonic_basis: &HarmonicOneFormBasis,
         dual_cycles: &IntegralDualCycleBasis,
-        singularities: &IntegralCochain,
+        charges: &IntegralCochain,
         generator_turns: &[i64],
-        anchor_phase: f64,
+        anchor_angle: f64,
         executor: &NativeExecutor,
         storage: StorageLimit,
         work: WorkLimit,
@@ -1370,15 +1378,15 @@ impl TriangleSurface {
         {
             return Err(SolveError::ProblemMismatch.into());
         }
-        let singularity_space = topology
+        let charge_space = topology
             .chain_complex()
             .dual()
             .space(0)
             .map_err(SurfaceError::from)?;
-        if !singularities.space().same_based_space(&singularity_space)
+        if !charges.space().same_based_space(&charge_space)
             || harmonic_basis.rank() != dual_cycles.rank()
             || generator_turns.len() != dual_cycles.rank()
-            || !anchor_phase.is_finite()
+            || !anchor_angle.is_finite()
         {
             return Err(SolveError::ProblemMismatch.into());
         }
@@ -1397,14 +1405,17 @@ impl TriangleSurface {
             .and_then(|value| value.checked_sub(i128::try_from(edge_count).ok()?))
             .and_then(|value| value.checked_add(i128::try_from(self.face_count()).ok()?))
             .ok_or(SurfaceError::Overflow)?;
-        if exact_singularity_sum(singularities) != num_bigint::BigInt::from(euler) {
+        let expected_charge =
+            num_bigint::BigInt::from(symmetry_order.get()) * num_bigint::BigInt::from(euler);
+        if exact_charge_sum(charges) != expected_charge {
             return Err(SolveError::ProblemMismatch.into());
         }
 
         let mut deviations = solve_coexact_direction_adjustment(
             self,
+            symmetry_order,
             metric,
-            singularities,
+            charges,
             *executor,
             storage,
             work,
@@ -1412,6 +1423,7 @@ impl TriangleSurface {
         )?;
         add_harmonic_direction_adjustment(
             self,
+            symmetry_order,
             metric,
             harmonic_basis,
             dual_cycles,
@@ -1422,11 +1434,13 @@ impl TriangleSurface {
         )?;
         check_cancelled(cancellation)?;
         let field = self
-            .connection(&deviations)?
+            .connection(symmetry_order, &deviations)?
             .require_integrable(dual_cycles)?
-            .direction_field(anchor_phase)?;
-        let observed = field.singularity_indices()?;
-        if !same_integral_coordinates(observed.indices(), singularities) {
+            .direction_field(anchor_angle)?;
+        let observed = field.singularities()?;
+        if observed.symmetry_order() != symmetry_order
+            || !same_integral_coordinates(observed.charges(), charges)
+        {
             return Err(SolveError::Numerical.into());
         }
         Ok(field)

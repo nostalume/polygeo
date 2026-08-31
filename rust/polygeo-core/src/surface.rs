@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use num_bigint::BigInt;
@@ -786,16 +787,17 @@ impl TriangleSurface {
     pub fn levi_civita_connection(
         self: &Arc<Self>,
     ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
-        self.connection(&vec![0.0; self.edge_count()])
+        self.connection(NonZeroU32::MIN, &vec![0.0; self.edge_count()])
     }
 
-    /// Compose canonical Levi-Civita transport with one deviation per dual edge.
+    /// Construct order-`N` Levi-Civita power transport with one deviation per dual edge.
     ///
     /// # Errors
     ///
     /// Rejects boundary, disconnection, shape, nonfinite, or representation failures.
     pub fn connection(
         self: &Arc<Self>,
+        symmetry_order: NonZeroU32,
         deviations: &[f64],
     ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
         self.require_closed()?;
@@ -829,10 +831,15 @@ impl TriangleSurface {
                 dot(rotated, row3(second, target)?),
             ])?;
             let deviation = [deviation_angle.cos(), deviation_angle.sin()];
-            transports.extend(normalize_complex(complex_multiply(base, deviation))?);
+            let powered_base = complex_power(base, i64::from(symmetry_order.get()))?;
+            transports.extend(normalize_complex(complex_multiply(
+                powered_base,
+                deviation,
+            ))?);
         }
         Ok(Arc::new(SurfaceConnection {
             surface: Arc::clone(self),
+            symmetry_order,
             transports: transports.into(),
             evidence: OnceCell::new(),
         }))
@@ -1132,18 +1139,24 @@ pub struct HolonomyEvidence {
     limit: f64,
 }
 
-/// Exact ordinary field singularities admitted from binary64 angle evidence.
+/// Exact symmetric-field singularities admitted from binary64 angle evidence.
 #[derive(Clone, Debug)]
 pub struct DirectionFieldSingularities {
-    indices: IntegralCochain,
+    symmetry_order: NonZeroU32,
+    charges: IntegralCochain,
     maximum_quantization_residual: f64,
     residual_limit: f64,
 }
 
 impl DirectionFieldSingularities {
     #[must_use]
-    pub const fn indices(&self) -> &IntegralCochain {
-        &self.indices
+    pub const fn symmetry_order(&self) -> NonZeroU32 {
+        self.symmetry_order
+    }
+
+    #[must_use]
+    pub const fn charges(&self) -> &IntegralCochain {
+        &self.charges
     }
 
     #[must_use]
@@ -1184,6 +1197,7 @@ struct IntegrabilityEvidence {
 /// One normalized unit-complex transport per canonical dual edge.
 pub struct SurfaceConnection {
     surface: Arc<TriangleSurface>,
+    symmetry_order: NonZeroU32,
     transports: Arc<[f64]>,
     evidence: OnceCell<Result<IntegrabilityEvidence, SurfaceError>>,
 }
@@ -1192,6 +1206,7 @@ impl fmt::Debug for SurfaceConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SurfaceConnection")
+            .field("symmetry_order", &self.symmetry_order)
             .field("edges", &(self.transports.len() / 2))
             .finish_non_exhaustive()
     }
@@ -1204,6 +1219,11 @@ impl SurfaceConnection {
     }
 
     #[must_use]
+    pub const fn symmetry_order(&self) -> NonZeroU32 {
+        self.symmetry_order
+    }
+
+    #[must_use]
     pub fn transports(&self) -> &[f64] {
         &self.transports
     }
@@ -1213,29 +1233,6 @@ impl SurfaceConnection {
             .get()
             .and_then(|evidence| evidence.as_ref().ok())
             .ok_or(SurfaceError::NotIntegrable)
-    }
-
-    /// Compose two connections over the same admitted surface owner pointwise.
-    ///
-    /// # Errors
-    ///
-    /// Rejects distinct surface owners or unrepresentable products.
-    pub fn compose(self: &Arc<Self>, after: &Arc<Self>) -> Result<Arc<Self>, SurfaceError> {
-        if !Arc::ptr_eq(&self.surface, &after.surface) {
-            return Err(SurfaceError::OwnerMismatch);
-        }
-        let mut transports = Vec::with_capacity(self.transports.len());
-        for edge in 0..self.surface.edge_count() {
-            transports.extend(normalize_complex(complex_multiply(
-                complex_at(&after.transports, edge)?,
-                complex_at(&self.transports, edge)?,
-            ))?);
-        }
-        Ok(Arc::new(Self {
-            surface: Arc::clone(&self.surface),
-            transports: transports.into(),
-            evidence: OnceCell::new(),
-        }))
     }
 
     /// Compute local and primitive-generator circular holonomy errors.
@@ -1422,15 +1419,16 @@ impl IntegrableConnection {
     /// # Errors
     ///
     /// Rejects a nonfinite anchor or unavailable admitted evidence.
-    pub fn direction_field(&self, anchor_phase: f64) -> Result<FaceDirectionField, SurfaceError> {
-        if !anchor_phase.is_finite() {
+    pub fn direction_field(&self, anchor_angle: f64) -> Result<FaceDirectionField, SurfaceError> {
+        if !anchor_angle.is_finite() {
             return Err(SurfaceError::NonFinite);
         }
         let evidence = self.connection.admitted_evidence()?;
-        let anchor = [anchor_phase.cos(), anchor_phase.sin()];
-        let mut directions = Vec::with_capacity(evidence.phases.len());
+        let power_anchor = f64::from(self.connection.symmetry_order.get()) * anchor_angle;
+        let anchor = [power_anchor.cos(), power_anchor.sin()];
+        let mut power_directions = Vec::with_capacity(evidence.phases.len());
         for phase in evidence.phases.chunks_exact(2) {
-            directions.extend(normalize_complex(complex_multiply(
+            power_directions.extend(normalize_complex(complex_multiply(
                 phase
                     .try_into()
                     .map_err(|_| SurfaceError::Unrepresentable)?,
@@ -1439,7 +1437,7 @@ impl IntegrableConnection {
         }
         Ok(FaceDirectionField {
             connection: Arc::clone(&self.connection),
-            directions: directions.into(),
+            power_directions: power_directions.into(),
         })
     }
 
@@ -1470,7 +1468,7 @@ impl IntegrableConnection {
 #[derive(Clone, Debug)]
 pub struct FaceDirectionField {
     connection: Arc<SurfaceConnection>,
-    directions: Arc<[f64]>,
+    power_directions: Arc<[f64]>,
 }
 
 impl FaceDirectionField {
@@ -1480,21 +1478,29 @@ impl FaceDirectionField {
     }
 
     #[must_use]
-    pub fn directions(&self) -> &[f64] {
-        &self.directions
+    pub fn symmetry_order(&self) -> NonZeroU32 {
+        self.connection.symmetry_order()
     }
 
-    /// Calculate exact ordinary singularity indices with quantization evidence.
+    #[must_use]
+    pub fn power_directions(&self) -> &[f64] {
+        &self.power_directions
+    }
+
+    /// Calculate exact symmetric-field singularity charges with quantization evidence.
     ///
     /// # Errors
     ///
     /// Rejects unavailable surface geometry, indeterminate binary64 rounding, or
-    /// a result that violates the exact closed-surface index law.
-    pub fn singularity_indices(&self) -> Result<DirectionFieldSingularities, SurfaceError> {
+    /// a result that violates the exact closed-surface charge law.
+    pub fn singularities(&self) -> Result<DirectionFieldSingularities, SurfaceError> {
         let surface = &self.connection.surface;
         let topology = surface.realization.topology();
         let curvature = surface.gaussian_curvature_measure()?;
-        let levi_civita = surface.levi_civita_connection()?;
+        let symmetry_order = self.symmetry_order();
+        let order = f64::from(symmetry_order.get());
+        let levi_civita_power =
+            surface.connection(symmetry_order, &vec![0.0; surface.edge_count()])?;
         let dual = dual_edges(topology)?;
         let incidence = topology.boundary(1)?;
         let mut entries = Vec::new();
@@ -1512,18 +1518,18 @@ impl FaceDirectionField {
             terms
                 .try_reserve_exact(stop - start + 1)
                 .map_err(|_| SurfaceError::Overflow)?;
-            terms.push((1.0, curvature.coefficients()[vertex]));
+            terms.push((order, curvature.coefficients()[vertex]));
             for (&edge, &incidence_sign) in incidence.indices()[start..stop]
                 .iter()
                 .zip(&incidence.data()[start..stop])
             {
                 let (source, target, source_sign) = dual.edge(edge)?;
                 let expected = complex_multiply(
-                    complex_at(levi_civita.transports(), edge)?,
-                    complex_at(&self.directions, source)?,
+                    complex_at(levi_civita_power.transports(), edge)?,
+                    complex_at(&self.power_directions, source)?,
                 );
                 let mismatch = complex_multiply(
-                    complex_at(&self.directions, target)?,
+                    complex_at(&self.power_directions, target)?,
                     complex_conjugate(expected),
                 );
                 let traversal = -i64::from(source_sign) * i64::from(incidence_sign);
@@ -1534,29 +1540,31 @@ impl FaceDirectionField {
                 adaptive_product_value(terms.into_iter()).ok_or(SurfaceError::Unrepresentable)?;
             let raw = numerator / (2.0 * std::f64::consts::PI);
             let rounded = raw.round();
-            let index = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
+            let charge = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
             maximum_residual = maximum_residual.max((raw - rounded).abs());
-            if index != 0 {
-                entries.push((vertex, BigInt::from(index)));
+            if charge != 0 {
+                entries.push((vertex, BigInt::from(charge)));
             }
-            total += index;
+            total += charge;
         }
-        let operation_count = u32::try_from(maximum_valence.saturating_add(2)).unwrap_or(u32::MAX);
-        let residual_limit = 4096.0 * f64::EPSILON * f64::from(operation_count);
+        let operation_count = u32::try_from(maximum_valence.saturating_add(3)).unwrap_or(u32::MAX);
+        let residual_limit = 4096.0 * f64::EPSILON * f64::from(operation_count) * order;
         let euler = i128::try_from(topology.vertex_count())
             .ok()
             .and_then(|value| value.checked_sub(i128::try_from(surface.edge_count()).ok()?))
             .and_then(|value| value.checked_add(i128::try_from(surface.face_count()).ok()?))
             .ok_or(SurfaceError::Overflow)?;
-        if maximum_residual > residual_limit || total != BigInt::from(euler) {
+        let expected_total = BigInt::from(symmetry_order.get()) * BigInt::from(euler);
+        if residual_limit >= 0.5 || maximum_residual > residual_limit || total != expected_total {
             return Err(SurfaceError::Unrepresentable);
         }
         let space = topology.chain_complex().dual().space(0)?;
-        let indices = space
+        let charges = space
             .element(entries)
             .map_err(|_| SurfaceError::Unrepresentable)?;
         Ok(DirectionFieldSingularities {
-            indices,
+            symmetry_order,
+            charges,
             maximum_quantization_residual: maximum_residual,
             residual_limit,
         })
@@ -1573,17 +1581,27 @@ impl FaceDirectionField {
             .map(|evidence| evidence.crossing_error)
     }
 
-    /// Allocate ambient unit vectors from the retained bundle coordinates.
+    /// Allocate one explicit ambient branch from the retained power coordinates.
     ///
     /// # Errors
     ///
     /// Returns an unavailable-frame or representability failure.
-    pub fn ambient_vectors_copy(&self) -> Result<FaceVectors, SurfaceError> {
+    pub fn ambient_vector_branch_copy(&self, branch: usize) -> Result<FaceVectors, SurfaceError> {
+        let symmetry_order =
+            usize::try_from(self.symmetry_order().get()).map_err(|_| SurfaceError::Overflow)?;
+        if branch >= symmetry_order {
+            return Err(SurfaceError::IndexOutside);
+        }
+        let order = f64::from(self.symmetry_order().get());
+        let branch = branch.to_f64().ok_or(SurfaceError::Unrepresentable)?;
         let first = self.connection.surface.first_frame_axes()?;
         let second = self.connection.surface.second_frame_axes()?;
         let mut values = Vec::with_capacity(3 * self.connection.surface.face_count());
         for face in 0..self.connection.surface.face_count() {
-            let direction = complex_at(&self.directions, face)?;
+            let power_direction = complex_at(&self.power_directions, face)?;
+            let angle = power_direction[1].atan2(power_direction[0]) / order
+                + std::f64::consts::TAU * branch / order;
+            let direction = [angle.cos(), angle.sin()];
             let first = row3(first, face)?;
             let second = row3(second, face)?;
             values.extend([
