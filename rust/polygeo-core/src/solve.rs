@@ -1435,7 +1435,7 @@ impl TriangleSurface {
         check_cancelled(cancellation)?;
         let field = self
             .connection(symmetry_order, &deviations)?
-            .require_integrable(dual_cycles)?
+            .require_integrable()?
             .direction_field(anchor_angle)?;
         let observed = field.singularities()?;
         if observed.symmetry_order() != symmetry_order

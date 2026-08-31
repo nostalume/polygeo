@@ -654,9 +654,8 @@ fn connection_retains_only_transport_and_integrability_shares_owner() {
     let holonomy = flat.holonomy(&cycles).unwrap();
     assert!(holonomy.local_error() <= holonomy.limit());
     assert!(holonomy.generator_error() <= holonomy.limit());
-    let integrable = flat.require_integrable(&cycles).unwrap();
+    let integrable = flat.require_integrable().unwrap();
     assert!(Arc::ptr_eq(integrable.connection(), &flat));
-    assert_eq!(integrable.holonomy().unwrap(), holonomy);
 
     let field = integrable.direction_field(0.25).unwrap();
     assert!(Arc::ptr_eq(field.connection(), &flat));
@@ -672,11 +671,6 @@ fn connection_retains_only_transport_and_integrability_shares_owner() {
 fn direction_field_power_charges_are_exact_and_quantization_checked() {
     let surface = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
     let levi_civita = surface.levi_civita_connection().unwrap();
-    let cycles = surface
-        .realization()
-        .topology()
-        .integral_dual_cycle_basis()
-        .unwrap();
     for order in [1, 2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
         let deviations = levi_civita
             .transports()
@@ -686,7 +680,7 @@ fn direction_field_power_charges_are_exact_and_quantization_checked() {
         let integrable = surface
             .connection(order, &deviations)
             .unwrap()
-            .require_integrable(&cycles)
+            .require_integrable()
             .unwrap();
 
         let singularities = integrable
@@ -951,13 +945,8 @@ fn symmetric_connection_retains_power_order_and_projects_explicit_branches() {
         assert_close(transport[1], 0.0, 2.0e-14);
     }
 
-    let cycles = surface
-        .realization()
-        .topology()
-        .integral_dual_cycle_basis()
-        .unwrap();
     let field = connection
-        .require_integrable(&cycles)
+        .require_integrable()
         .unwrap()
         .direction_field(0.125)
         .unwrap();
@@ -1014,33 +1003,47 @@ fn genus_two_cycle_coordinates_certify_identity_transport() {
     let evidence = identity.holonomy(&cycles).unwrap();
     assert!(evidence.local_error() <= evidence.limit());
     assert!(evidence.generator_error() <= evidence.limit());
-    identity.require_integrable(&cycles).unwrap();
+    identity.require_integrable().unwrap();
 }
 
 #[test]
-fn deterministic_nonintegrability_is_stable_and_boundary_connections_fail() {
+fn deterministic_nonintegrability_is_stable_and_boundary_connections_are_compact() {
     let surface = TriangleSurface::admit(tetrahedron(1.0, [0.0; 3])).unwrap();
     let mut deviations = vec![0.0; surface.edge_count()];
     deviations[0] = 0.25;
     let connection = surface.connection(NonZeroU32::MIN, &deviations).unwrap();
-    let cycles = surface
-        .realization()
-        .topology()
-        .integral_dual_cycle_basis()
-        .unwrap();
     assert_eq!(
-        connection.require_integrable(&cycles).unwrap_err(),
+        connection.require_integrable().unwrap_err(),
         SurfaceError::NotIntegrable
     );
     assert_eq!(
-        connection.require_integrable(&cycles).unwrap_err(),
+        connection.require_integrable().unwrap_err(),
         SurfaceError::NotIntegrable
     );
 
     let disk = TriangleSurface::admit(triangle()).unwrap();
+    let bounded = disk.levi_civita_connection().unwrap();
+    assert!(bounded.interior_edge_indices_copy().is_empty());
+    assert!(bounded.transports().is_empty());
+    let field = bounded
+        .require_integrable()
+        .unwrap()
+        .direction_field(0.0)
+        .unwrap();
+    assert_eq!(field.power_directions(), &[1.0, 0.0]);
+
+    let fan = TriangleSurface::admit(nonplanar_disk()).unwrap();
+    let boundary = fan.realization().topology().boundary(2).unwrap();
+    let expected = (0..fan.edge_count())
+        .filter(|&edge| boundary.indptr()[edge + 1] - boundary.indptr()[edge] == 2)
+        .collect::<Vec<_>>();
+    let bounded = fan.levi_civita_connection().unwrap();
+    assert_eq!(&*bounded.interior_edge_indices_copy(), expected);
+    assert_eq!(bounded.transports().len(), 2 * expected.len());
     assert_eq!(
-        disk.levi_civita_connection().unwrap_err(),
-        SurfaceError::BoundaryPresent
+        fan.connection(NonZeroU32::MIN, &vec![0.0; fan.edge_count()])
+            .unwrap_err(),
+        SurfaceError::FieldShape
     );
 }
 

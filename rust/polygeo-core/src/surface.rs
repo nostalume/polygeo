@@ -827,26 +827,28 @@ impl TriangleSurface {
     ///
     /// # Errors
     ///
-    /// Requires a closed connected surface and representable frames.
+    /// Requires a connected regular surface and representable frames.
     pub fn levi_civita_connection(
         self: &Arc<Self>,
     ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
-        self.connection(NonZeroU32::MIN, &vec![0.0; self.edge_count()])
+        let edge_count = interior_edge_indices(self.realization.topology())?.len();
+        self.connection(NonZeroU32::MIN, &vec![0.0; edge_count])
     }
 
-    /// Construct order-`N` Levi-Civita power transport with one deviation per dual edge.
+    /// Construct order-`N` Levi-Civita power transport with one deviation per interior dual edge.
     ///
     /// # Errors
     ///
-    /// Rejects boundary, disconnection, shape, nonfinite, or representation failures.
+    /// Rejects irregularity, disconnection, shape, nonfinite, or representation failures.
     pub fn connection(
         self: &Arc<Self>,
         symmetry_order: NonZeroU32,
         deviations: &[f64],
     ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
-        self.require_closed()?;
+        self.realization.topology().refine_regular()?;
         self.realization.topology().refine_connected()?;
-        if deviations.len() != self.edge_count() {
+        let interior_edges = interior_edge_indices(self.realization.topology())?;
+        if deviations.len() != interior_edges.len() {
             return Err(SurfaceError::FieldShape);
         }
         if deviations.iter().any(|value| !value.is_finite()) {
@@ -856,8 +858,8 @@ impl TriangleSurface {
         let edges = self.realization.topology().basis(1)?;
         let first = self.first_frame_axes()?;
         let second = self.second_frame_axes()?;
-        let mut transports = Vec::with_capacity(2 * self.edge_count());
-        for (edge, &deviation_angle) in deviations.iter().enumerate() {
+        let mut transports = Vec::with_capacity(2 * interior_edges.len());
+        for (&edge, &deviation_angle) in interior_edges.iter().zip(deviations) {
             let endpoints = edges.row(edge).ok_or(SurfaceError::IndexOutside)?;
             let axis = normalize(subtract(
                 self.point(endpoints[1])?,
@@ -884,6 +886,7 @@ impl TriangleSurface {
         Ok(Arc::new(SurfaceConnection {
             surface: Arc::clone(self),
             symmetry_order,
+            interior_edges: interior_edges.into(),
             transports: transports.into(),
             evidence: OnceCell::new(),
         }))
@@ -1308,6 +1311,18 @@ pub(crate) struct DualEdges<'a> {
 }
 
 impl DualEdges<'_> {
+    fn is_interior(self, edge: usize) -> Result<bool, SurfaceError> {
+        if edge >= self.edge_count {
+            return Err(SurfaceError::IndexOutside);
+        }
+        let count = self.boundary.indptr()[edge + 1] - self.boundary.indptr()[edge];
+        match count {
+            1 => Ok(false),
+            2 => Ok(true),
+            _ => Err(SurfaceError::Unrepresentable),
+        }
+    }
+
     pub(crate) fn edge(self, edge: usize) -> Result<(usize, usize, i8), SurfaceError> {
         if edge >= self.edge_count {
             return Err(SurfaceError::IndexOutside);
@@ -1341,9 +1356,20 @@ pub(crate) fn dual_edges(topology: &ComplexCore) -> Result<DualEdges<'_>, Surfac
         edge_count,
     };
     for edge in 0..edge_count {
-        dual.edge(edge)?;
+        dual.is_interior(edge)?;
     }
     Ok(dual)
+}
+
+fn interior_edge_indices(topology: &ComplexCore) -> Result<Vec<usize>, SurfaceError> {
+    let dual = dual_edges(topology)?;
+    (0..dual.edge_count)
+        .filter_map(|edge| match dual.is_interior(edge) {
+            Ok(true) => Some(Ok(edge)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
 }
 
 /// Compact circular holonomy error bounds for one connection.
@@ -1405,14 +1431,14 @@ impl HolonomyEvidence {
 #[derive(Debug)]
 struct IntegrabilityEvidence {
     phases: Arc<[f64]>,
-    holonomy: HolonomyEvidence,
     crossing_error: f64,
 }
 
-/// One normalized unit-complex transport per canonical dual edge.
+/// One normalized unit-complex transport per selected canonical interior dual edge.
 pub struct SurfaceConnection {
     surface: Arc<TriangleSurface>,
     symmetry_order: NonZeroU32,
+    interior_edges: Arc<[usize]>,
     transports: Arc<[f64]>,
     evidence: OnceCell<Result<IntegrabilityEvidence, SurfaceError>>,
 }
@@ -1443,6 +1469,20 @@ impl SurfaceConnection {
         &self.transports
     }
 
+    /// Copy the canonical primal-edge index of every compact transport row.
+    #[must_use]
+    pub fn interior_edge_indices_copy(&self) -> Box<[usize]> {
+        self.interior_edges.as_ref().into()
+    }
+
+    fn transport(&self, edge: usize) -> Result<[f64; 2], SurfaceError> {
+        let row = self
+            .interior_edges
+            .binary_search(&edge)
+            .map_err(|_| SurfaceError::IndexOutside)?;
+        complex_at(&self.transports, row)
+    }
+
     fn admitted_evidence(&self) -> Result<&IntegrabilityEvidence, SurfaceError> {
         self.evidence
             .get()
@@ -1459,6 +1499,7 @@ impl SurfaceConnection {
         &self,
         cycles: &IntegralDualCycleBasis,
     ) -> Result<HolonomyEvidence, SurfaceError> {
+        self.surface.require_closed()?;
         if !cycles
             .chain_complex()
             .same_owner(&self.surface.realization.topology().chain_complex())
@@ -1466,8 +1507,7 @@ impl SurfaceConnection {
             return Err(SurfaceError::OwnerMismatch);
         }
         let dual = dual_edges(self.surface.realization.topology())?;
-        let local_error =
-            local_holonomy_error(self.surface.realization.topology(), dual, &self.transports)?;
+        let local_error = local_holonomy_error(self, dual)?;
         let mut generator_error = 0.0_f64;
         for index in 0..cycles.rank() {
             let cycle = cycles.cocycle(index).ok_or(SurfaceError::IndexOutside)?;
@@ -1478,7 +1518,7 @@ impl SurfaceConnection {
                 let exponent = -i64::from(source_sign) * coefficient;
                 product = normalize_complex(complex_multiply(
                     product,
-                    complex_power(complex_at(&self.transports, edge)?, exponent)?,
+                    complex_power(self.transport(edge)?, exponent)?,
                 ))?;
             }
             generator_error = generator_error.max(product[1].atan2(product[0]).abs());
@@ -1492,33 +1532,22 @@ impl SurfaceConnection {
         })
     }
 
-    /// Refine an integrable connection without retaining the supplied cycle basis.
+    /// Refine an integrable connection by exhaustive dual-graph propagation.
     ///
     /// # Errors
     ///
-    /// Rejects owner mismatch or circular residual above the fixed limit.
-    pub fn require_integrable(
-        self: &Arc<Self>,
-        cycles: &IntegralDualCycleBasis,
-    ) -> Result<IntegrableConnection, SurfaceError> {
-        if !cycles
-            .chain_complex()
-            .same_owner(&self.surface.realization.topology().chain_complex())
-        {
-            return Err(SurfaceError::OwnerMismatch);
-        }
+    /// Rejects a disconnected dual graph or crossing residual above the fixed limit.
+    pub fn require_integrable(self: &Arc<Self>) -> Result<IntegrableConnection, SurfaceError> {
         let evidence = self.evidence.get_or_init(|| {
-            let holonomy = self.holonomy(cycles)?;
             let (phases, crossing_error) = propagate_phases(self)?;
-            if holonomy.local_error > holonomy.limit
-                || holonomy.generator_error > holonomy.limit
-                || crossing_error > holonomy.limit
-            {
+            let edge_count = u32::try_from(self.interior_edges.len().max(1))
+                .map_err(|_| SurfaceError::Overflow)?;
+            let limit = 128.0 * f64::EPSILON * f64::from(edge_count);
+            if crossing_error > limit {
                 return Err(SurfaceError::NotIntegrable);
             }
             Ok(IntegrabilityEvidence {
                 phases: phases.into(),
-                holonomy,
                 crossing_error,
             })
         });
@@ -1538,10 +1567,10 @@ fn complex_at(values: &[f64], index: usize) -> Result<[f64; 2], SurfaceError> {
 }
 
 fn local_holonomy_error(
-    topology: &ComplexCore,
+    connection: &SurfaceConnection,
     dual: DualEdges<'_>,
-    transports: &[f64],
 ) -> Result<f64, SurfaceError> {
+    let topology = connection.surface.realization.topology();
     let incidence = topology.boundary(1)?;
     let mut maximum = 0.0_f64;
     for vertex in 0..topology.vertex_count() {
@@ -1556,7 +1585,7 @@ fn local_holonomy_error(
             let exponent = -i64::from(source_sign) * i64::from(incidence_sign);
             product = normalize_complex(complex_multiply(
                 product,
-                complex_power(complex_at(transports, edge)?, exponent)?,
+                complex_power(connection.transport(edge)?, exponent)?,
             ))?;
         }
         maximum = maximum.max(product[1].atan2(product[0]).abs());
@@ -1568,10 +1597,10 @@ fn propagate_phases(connection: &SurfaceConnection) -> Result<(Vec<f64>, f64), S
     let dual = dual_edges(connection.surface.realization.topology())?;
     let face_count = connection.surface.face_count();
     let mut adjacency = vec![Vec::new(); face_count];
-    for edge in 0..connection.surface.edge_count() {
+    for (row, &edge) in connection.interior_edges.iter().enumerate() {
         let (source, target, _) = dual.edge(edge)?;
-        adjacency[source].push((target, edge, true));
-        adjacency[target].push((source, edge, false));
+        adjacency[source].push((target, row, true));
+        adjacency[target].push((source, row, false));
     }
     let mut phases = vec![0.0; 2 * face_count];
     phases[0] = 1.0;
@@ -1582,11 +1611,11 @@ fn propagate_phases(connection: &SurfaceConnection) -> Result<(Vec<f64>, f64), S
     while cursor < pending.len() {
         let face = pending[cursor];
         cursor += 1;
-        for &(neighbor, edge, forward) in &adjacency[face] {
+        for &(neighbor, row, forward) in &adjacency[face] {
             if visited[neighbor] {
                 continue;
             }
-            let transport = complex_at(&connection.transports, edge)?;
+            let transport = complex_at(&connection.transports, row)?;
             let phase = complex_at(&phases, face)?;
             let next = normalize_complex(complex_multiply(
                 if forward {
@@ -1605,10 +1634,10 @@ fn propagate_phases(connection: &SurfaceConnection) -> Result<(Vec<f64>, f64), S
         return Err(SurfaceError::Unrepresentable);
     }
     let mut maximum = 0.0_f64;
-    for edge in 0..connection.surface.edge_count() {
+    for (row, &edge) in connection.interior_edges.iter().enumerate() {
         let (source, target, _) = dual.edge(edge)?;
         let expected = complex_multiply(
-            complex_at(&connection.transports, edge)?,
+            complex_at(&connection.transports, row)?,
             complex_at(&phases, source)?,
         );
         let residual = complex_multiply(complex_at(&phases, target)?, complex_conjugate(expected));
@@ -1654,17 +1683,6 @@ impl IntegrableConnection {
             connection: Arc::clone(&self.connection),
             power_directions: power_directions.into(),
         })
-    }
-
-    /// Borrow the cached holonomy evidence that admitted this refinement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an internal admission failure if the evidence is unavailable.
-    pub fn holonomy(&self) -> Result<HolonomyEvidence, SurfaceError> {
-        self.connection
-            .admitted_evidence()
-            .map(|evidence| evidence.holonomy)
     }
 
     /// Borrow the cached crossing residual that admitted this refinement.
