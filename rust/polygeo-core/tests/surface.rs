@@ -87,6 +87,34 @@ fn nonplanar_disk() -> Arc<EuclideanRealization> {
     .unwrap()
 }
 
+fn flat_annulus(sections: usize) -> Arc<EuclideanRealization> {
+    let mut positions = Vec::with_capacity(6 * sections);
+    for radius in [2.0, 1.0] {
+        for section in 0..sections {
+            let angle = 2.0 * PI * f64::from(u32::try_from(section).unwrap())
+                / f64::from(u32::try_from(sections).unwrap());
+            positions.extend([radius * angle.cos(), radius * angle.sin(), 0.0]);
+        }
+    }
+    let mut faces = Vec::with_capacity(6 * sections);
+    for section in 0..sections {
+        let next = (section + 1) % sections;
+        faces.extend([
+            u64::try_from(section).unwrap(),
+            u64::try_from(next).unwrap(),
+            u64::try_from(sections + next).unwrap(),
+            u64::try_from(section).unwrap(),
+            u64::try_from(sections + next).unwrap(),
+            u64::try_from(sections + section).unwrap(),
+        ]);
+    }
+    let topology = ComplexCore::admit(
+        CandidateInput::unsigned(faces, 2 * sections, 3, Some(2 * sections)).unwrap(),
+    )
+    .unwrap();
+    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+}
+
 fn torus(major_sections: usize, minor_sections: usize) -> Arc<EuclideanRealization> {
     let mut positions = Vec::with_capacity(3 * major_sections * minor_sections);
     for major in 0..major_sections {
@@ -694,6 +722,7 @@ fn direction_field_power_charges_are_exact_and_quantization_checked() {
             .singularities()
             .unwrap();
         assert_eq!(singularities.symmetry_order(), order);
+        assert!(singularities.boundary_turns().is_empty());
         assert_eq!(
             singularities.charges().indices(),
             rotated.charges().indices()
@@ -714,6 +743,63 @@ fn direction_field_power_charges_are_exact_and_quantization_checked() {
         );
         assert!(singularities.maximum_quantization_residual() <= singularities.residual_limit());
     }
+}
+
+#[test]
+fn bounded_direction_field_exposes_exact_relative_boundary_turn() {
+    let surface = TriangleSurface::admit(triangle()).unwrap();
+    let field = surface
+        .levi_civita_connection()
+        .unwrap()
+        .require_integrable()
+        .unwrap()
+        .direction_field(0.0)
+        .unwrap();
+    let singularities = field.singularities().unwrap();
+    assert!(singularities.charges().coefficients().is_empty());
+    assert_eq!(singularities.boundary_turns(), &[BigInt::from(-1)]);
+}
+
+#[test]
+fn relative_boundary_turns_respect_orientation_and_reject_antipodal_steps() {
+    let surface = TriangleSurface::admit(flat_annulus(16)).unwrap();
+    for order in [1, 2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
+        let connection = surface
+            .connection(
+                order,
+                &vec![0.0; surface.levi_civita_connection().unwrap().transports().len() / 2],
+            )
+            .unwrap()
+            .require_integrable()
+            .unwrap();
+        let singularities = connection
+            .direction_field(0.0)
+            .unwrap()
+            .singularities()
+            .unwrap();
+        assert!(singularities.charges().coefficients().is_empty());
+        assert_eq!(
+            singularities.boundary_turns(),
+            &[-BigInt::from(order.get()), BigInt::from(order.get())]
+        );
+    }
+
+    let surface = TriangleSurface::admit(flat_annulus(4)).unwrap();
+    let order = NonZeroU32::new(2).unwrap();
+    let field = surface
+        .connection(
+            order,
+            &vec![0.0; surface.levi_civita_connection().unwrap().transports().len() / 2],
+        )
+        .unwrap()
+        .require_integrable()
+        .unwrap()
+        .direction_field(0.0)
+        .unwrap();
+    assert_eq!(
+        field.singularities().unwrap_err(),
+        SurfaceError::Unrepresentable
+    );
 }
 
 #[test]

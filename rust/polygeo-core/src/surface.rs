@@ -1137,6 +1137,22 @@ fn boundary_edge_geometry(
     Ok((face, tangent, length))
 }
 
+fn boundary_edge_power_direction(
+    surface: &TriangleSurface,
+    symmetry_order: NonZeroU32,
+    edge: usize,
+) -> Result<(usize, [f64; 2], f64), SurfaceError> {
+    let (face, tangent, length) = boundary_edge_geometry(surface, edge)?;
+    let direction = complex_power(
+        normalize_complex([
+            dot(tangent, row3(surface.first_frame_axes()?, face)?),
+            dot(tangent, row3(surface.second_frame_axes()?, face)?),
+        ])?,
+        i64::from(symmetry_order.get()),
+    )?;
+    Ok((face, direction, length))
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct BoundaryTargetAccumulator {
     length_scale: f64,
@@ -1158,17 +1174,9 @@ fn boundary_face_power_directions(
         accumulators[face].length_scale = accumulators[face].length_scale.max(length);
     }
 
-    let first_axes = surface.first_frame_axes()?;
-    let second_axes = surface.second_frame_axes()?;
     for &edge in edges {
-        let (face, tangent, length) = boundary_edge_geometry(surface, edge)?;
-        let direction = complex_power(
-            normalize_complex([
-                dot(tangent, row3(first_axes, face)?),
-                dot(tangent, row3(second_axes, face)?),
-            ])?,
-            i64::from(symmetry_order.get()),
-        )?;
+        let (face, direction, length) =
+            boundary_edge_power_direction(surface, symmetry_order, edge)?;
         let accumulator = &mut accumulators[face];
         let weight = length / accumulator.length_scale;
         for (axis, direction) in direction.into_iter().enumerate() {
@@ -1385,6 +1393,7 @@ pub struct HolonomyEvidence {
 pub struct DirectionFieldSingularities {
     symmetry_order: NonZeroU32,
     charges: IntegralCochain,
+    boundary_turns: Box<[BigInt]>,
     maximum_quantization_residual: f64,
     residual_limit: f64,
 }
@@ -1398,6 +1407,11 @@ impl DirectionFieldSingularities {
     #[must_use]
     pub const fn charges(&self) -> &IntegralCochain {
         &self.charges
+    }
+
+    #[must_use]
+    pub fn boundary_turns(&self) -> &[BigInt] {
+        &self.boundary_turns
     }
 
     #[must_use]
@@ -1704,6 +1718,123 @@ pub struct FaceDirectionField {
     power_directions: Arc<[f64]>,
 }
 
+fn interior_direction_charges(
+    field: &FaceDirectionField,
+    levi_civita_power: &SurfaceConnection,
+    boundary_vertices: &[bool],
+    entries: &mut Vec<(usize, BigInt)>,
+) -> Result<(BigInt, f64, usize), SurfaceError> {
+    let surface = &field.connection.surface;
+    let topology = surface.realization.topology();
+    let curvature = surface.gaussian_curvature_measure()?;
+    let incidence = topology.boundary(1)?;
+    let dual = dual_edges(topology)?;
+    let order = f64::from(field.symmetry_order().get());
+    let mut total = BigInt::from(0);
+    let mut maximum_residual = 0.0_f64;
+    let mut maximum_valence = 0_usize;
+    for vertex in 0..topology.vertex_count() {
+        if *boundary_vertices
+            .get(vertex)
+            .ok_or(SurfaceError::IndexOutside)?
+        {
+            continue;
+        }
+        let start = incidence.indptr()[vertex];
+        let stop = incidence.indptr()[vertex + 1];
+        maximum_valence = maximum_valence.max(stop - start);
+        let mut terms = Vec::new();
+        terms
+            .try_reserve_exact(stop - start + 1)
+            .map_err(|_| SurfaceError::Overflow)?;
+        terms.push((order, curvature.coefficients()[vertex]));
+        for (&edge, &incidence_sign) in incidence.indices()[start..stop]
+            .iter()
+            .zip(&incidence.data()[start..stop])
+        {
+            let (source, target, source_sign) = dual.edge(edge)?;
+            let expected = complex_multiply(
+                levi_civita_power.transport(edge)?,
+                complex_at(&field.power_directions, source)?,
+            );
+            let mismatch = complex_multiply(
+                complex_at(&field.power_directions, target)?,
+                complex_conjugate(expected),
+            );
+            let traversal = -i64::from(source_sign) * i64::from(incidence_sign);
+            let traversal = traversal.to_f64().ok_or(SurfaceError::Unrepresentable)?;
+            terms.push((-traversal, mismatch[1].atan2(mismatch[0])));
+        }
+        let (numerator, _) =
+            adaptive_product_value(terms.into_iter()).ok_or(SurfaceError::Unrepresentable)?;
+        let raw = numerator / std::f64::consts::TAU;
+        let rounded = raw.round();
+        let charge = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
+        maximum_residual = maximum_residual.max((raw - rounded).abs());
+        if charge != 0 {
+            entries.push((vertex, BigInt::from(charge)));
+        }
+        total += charge;
+    }
+    Ok((total, maximum_residual, maximum_valence))
+}
+
+fn relative_boundary_turns(
+    field: &FaceDirectionField,
+) -> Result<(Vec<BigInt>, BigInt, f64, usize), SurfaceError> {
+    let surface = &field.connection.surface;
+    let (offsets, edges) = oriented_boundary_components(surface.realization.topology())?;
+    let mut residuals = Vec::with_capacity(2 * edges.len());
+    for &edge in &edges {
+        let (face, tangent_power, _) =
+            boundary_edge_power_direction(surface, field.symmetry_order(), edge)?;
+        residuals.extend(normalize_complex(complex_multiply(
+            complex_at(&field.power_directions, face)?,
+            complex_conjugate(tangent_power),
+        ))?);
+    }
+
+    let order = f64::from(field.symmetry_order().get());
+    let antipodal_limit = 256.0 * f64::EPSILON * order;
+    let mut turns = Vec::with_capacity(offsets.len().saturating_sub(1));
+    let mut total = BigInt::from(0);
+    let mut maximum_residual = 0.0_f64;
+    let mut maximum_edges = 0_usize;
+    for component in offsets.windows(2) {
+        let start = component[0];
+        let stop = component[1];
+        if start == stop {
+            return Err(SurfaceError::Unrepresentable);
+        }
+        maximum_edges = maximum_edges.max(stop - start);
+        let mut terms = Vec::new();
+        terms
+            .try_reserve_exact(stop - start)
+            .map_err(|_| SurfaceError::Overflow)?;
+        for row in start..stop {
+            let next = if row + 1 == stop { start } else { row + 1 };
+            let increment = normalize_complex(complex_multiply(
+                complex_at(&residuals, next)?,
+                complex_conjugate(complex_at(&residuals, row)?),
+            ))?;
+            let angle = increment[1].atan2(increment[0]);
+            if std::f64::consts::PI - angle.abs() <= antipodal_limit {
+                return Err(SurfaceError::Unrepresentable);
+            }
+            terms.push((1.0, angle));
+        }
+        let (numerator, _) =
+            adaptive_product_value(terms.into_iter()).ok_or(SurfaceError::Unrepresentable)?;
+        let raw = numerator / std::f64::consts::TAU;
+        let rounded = raw.round();
+        let turn = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
+        maximum_residual = maximum_residual.max((raw - rounded).abs());
+        turns.push(BigInt::from(turn));
+        total += turn;
+    }
+    Ok((turns, total, maximum_residual, maximum_edges))
+}
+
 impl FaceDirectionField {
     #[must_use]
     pub const fn connection(&self) -> &Arc<SurfaceConnection> {
@@ -1725,62 +1856,33 @@ impl FaceDirectionField {
     /// # Errors
     ///
     /// Rejects unavailable surface geometry, indeterminate binary64 rounding, or
-    /// a result that violates the exact closed-surface charge law.
+    /// a result that violates the exact relative charge law.
     pub fn singularities(&self) -> Result<DirectionFieldSingularities, SurfaceError> {
         let surface = &self.connection.surface;
         let topology = surface.realization.topology();
-        let curvature = surface.gaussian_curvature_measure()?;
         let symmetry_order = self.symmetry_order();
         let order = f64::from(symmetry_order.get());
-        let levi_civita_power =
-            surface.connection(symmetry_order, &vec![0.0; surface.edge_count()])?;
-        let dual = dual_edges(topology)?;
-        let incidence = topology.boundary(1)?;
+        let regular = topology.refine_regular()?;
+        let boundary_vertices = regular.boundary_mask(0)?;
+        let levi_civita_power = surface.connection(
+            symmetry_order,
+            &vec![0.0; self.connection.interior_edges.len()],
+        )?;
         let mut entries = Vec::new();
         entries
             .try_reserve_exact(topology.vertex_count())
             .map_err(|_| SurfaceError::Overflow)?;
-        let mut maximum_residual = 0.0_f64;
-        let mut maximum_valence = 0_usize;
-        let mut total = BigInt::from(0);
-        for vertex in 0..topology.vertex_count() {
-            let start = incidence.indptr()[vertex];
-            let stop = incidence.indptr()[vertex + 1];
-            maximum_valence = maximum_valence.max(stop - start);
-            let mut terms = Vec::new();
-            terms
-                .try_reserve_exact(stop - start + 1)
-                .map_err(|_| SurfaceError::Overflow)?;
-            terms.push((order, curvature.coefficients()[vertex]));
-            for (&edge, &incidence_sign) in incidence.indices()[start..stop]
-                .iter()
-                .zip(&incidence.data()[start..stop])
-            {
-                let (source, target, source_sign) = dual.edge(edge)?;
-                let expected = complex_multiply(
-                    complex_at(levi_civita_power.transports(), edge)?,
-                    complex_at(&self.power_directions, source)?,
-                );
-                let mismatch = complex_multiply(
-                    complex_at(&self.power_directions, target)?,
-                    complex_conjugate(expected),
-                );
-                let traversal = -i64::from(source_sign) * i64::from(incidence_sign);
-                let traversal = traversal.to_f64().ok_or(SurfaceError::Unrepresentable)?;
-                terms.push((-traversal, mismatch[1].atan2(mismatch[0])));
-            }
-            let (numerator, _) =
-                adaptive_product_value(terms.into_iter()).ok_or(SurfaceError::Unrepresentable)?;
-            let raw = numerator / (2.0 * std::f64::consts::PI);
-            let rounded = raw.round();
-            let charge = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
-            maximum_residual = maximum_residual.max((raw - rounded).abs());
-            if charge != 0 {
-                entries.push((vertex, BigInt::from(charge)));
-            }
-            total += charge;
-        }
-        let operation_count = u32::try_from(maximum_valence.saturating_add(3)).unwrap_or(u32::MAX);
+        let (charge_total, charge_residual, maximum_valence) =
+            interior_direction_charges(self, &levi_civita_power, &boundary_vertices, &mut entries)?;
+        let (boundary_turns, boundary_total, boundary_residual, maximum_boundary_edges) =
+            relative_boundary_turns(self)?;
+        let maximum_residual = charge_residual.max(boundary_residual);
+        let operation_count = u32::try_from(
+            maximum_valence
+                .saturating_add(3)
+                .max(maximum_boundary_edges.saturating_add(3)),
+        )
+        .unwrap_or(u32::MAX);
         let residual_limit = 4096.0 * f64::EPSILON * f64::from(operation_count) * order;
         let euler = i128::try_from(topology.vertex_count())
             .ok()
@@ -1788,7 +1890,10 @@ impl FaceDirectionField {
             .and_then(|value| value.checked_add(i128::try_from(surface.face_count()).ok()?))
             .ok_or(SurfaceError::Overflow)?;
         let expected_total = BigInt::from(symmetry_order.get()) * BigInt::from(euler);
-        if residual_limit >= 0.5 || maximum_residual > residual_limit || total != expected_total {
+        if residual_limit >= 0.5
+            || maximum_residual > residual_limit
+            || charge_total - boundary_total != expected_total
+        {
             return Err(SurfaceError::Unrepresentable);
         }
         let space = topology.chain_complex().dual().space(0)?;
@@ -1798,6 +1903,7 @@ impl FaceDirectionField {
         Ok(DirectionFieldSingularities {
             symmetry_order,
             charges,
+            boundary_turns: boundary_turns.into_boxed_slice(),
             maximum_quantization_residual: maximum_residual,
             residual_limit,
         })
