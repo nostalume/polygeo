@@ -95,14 +95,23 @@ results contain newly admitted realizations and never mutate their source.
 face vector field uses the single `EntityVectors` carrier; `VertexVectors` and
 `FaceVectors` are aliases. Normals, gradients, curvature, frames, connections,
 dual-cycle evidence, holonomy, integrability, and direction fields retain the
-same native surface/realization spine. Array observations use explicit
-`*_numpy_copy()` names.
+same native surface/realization spine. A positive runtime symmetry order lifts
+Levi-Civita transport and face coordinates into one branch-free power
+representation; ordinary, line, and cross fields do not create separate
+carriers. Array observations use explicit `*_numpy_copy()` names, and ambient
+vectors are requested one explicit local branch at a time.
 
-Ordinary direction-field synthesis composes those same objects. An exact
-degree-zero cochain prescribes singularities, exact dual cycles order integer
+Singularity observation stays in power coordinates: integer charges carry the
+field order, local angle quantization evidence, and the exact closed-surface law
+`sum(charges) = symmetry_order * Euler(surface)`. The geometric index is the
+rational interpretation `charge / symmetry_order`, not a second coefficient
+carrier.
+
+Symmetric direction-field synthesis composes those same objects. An exact
+degree-zero cochain prescribes power charges, exact dual cycles order integer
 generator turns, and period-normalized harmonic one-forms provide global
 freedom. One compatible Poisson load and a temporary period solve publish the
-existing `FaceDirectionField`; exact indices and compact quantization evidence
+existing `FaceDirectionField`; exact charges and compact quantization evidence
 remain observable afterward.
 
 ## Optional effects
