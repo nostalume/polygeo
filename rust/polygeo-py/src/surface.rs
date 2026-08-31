@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use polygeo_core::{
@@ -157,13 +157,19 @@ impl PyTriangleSurface {
     fn levi_civita_connection(&self) -> PyResult<PySurfaceConnection> {
         connection(self.inner.levi_civita_connection())
     }
-    fn connection(&self, deviations: &Bound<'_, PyAny>) -> PyResult<PySurfaceConnection> {
+    fn connection(
+        &self,
+        symmetry_order: u32,
+        deviations: &Bound<'_, PyAny>,
+    ) -> PyResult<PySurfaceConnection> {
+        let symmetry_order = NonZeroU32::new(symmetry_order)
+            .ok_or_else(|| PyValueError::new_err("symmetry_order must be positive"))?;
         let deviations = deviations.extract::<PyReadonlyArray1<'_, f64>>()?;
         let deviations = deviations.as_array().iter().copied().collect::<Vec<_>>();
-        connection(self.inner.connection(&deviations))
+        connection(self.inner.connection(symmetry_order, &deviations))
     }
 
-    #[pyo3(signature = (metric, harmonic_basis, dual_cycles, singularities, generator_turns, anchor_phase, *, executor=None, storage=None, work=None, cancellation=None))]
+    #[pyo3(signature = (symmetry_order, metric, harmonic_basis, dual_cycles, charges, generator_turns, anchor_angle, *, executor=None, storage=None, work=None, cancellation=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the binding preserves the explicit native call boundary"
@@ -171,21 +177,22 @@ impl PyTriangleSurface {
     fn minimum_energy_direction_field(
         &self,
         py: Python<'_>,
+        symmetry_order: u32,
         metric: &PyPositiveMetric,
         harmonic_basis: &crate::solve::PyHarmonicOneFormBasis,
         dual_cycles: &PyIntegralDualCycleBasis,
-        singularities: &NativeChainElement,
+        charges: &NativeChainElement,
         generator_turns: Vec<i64>,
-        anchor_phase: f64,
+        anchor_angle: f64,
         executor: Option<&crate::solve::PyNativeExecutor>,
         storage: Option<&crate::solve::PyStorageLimit>,
         work: Option<&crate::solve::PyWorkLimit>,
         cancellation: Option<&crate::solve::PyCancellationToken>,
     ) -> PyResult<PyFaceDirectionField> {
-        let ExactElement::IntegerCochain(singularities) = &singularities.inner else {
-            return Err(PyValueError::new_err(
-                "singularities must be an integral cochain",
-            ));
+        let symmetry_order = NonZeroU32::new(symmetry_order)
+            .ok_or_else(|| PyValueError::new_err("symmetry_order must be positive"))?;
+        let ExactElement::IntegerCochain(charges) = &charges.inner else {
+            return Err(PyValueError::new_err("charges must be an integral cochain"));
         };
         let (executor, storage, work) = crate::solve::policies(executor, storage, work);
         let cancellation = cancellation
@@ -196,15 +203,16 @@ impl PyTriangleSurface {
         let metric = metric.inner.clone();
         let harmonic_basis = harmonic_basis.inner.clone();
         let dual_cycles = dual_cycles.inner.clone();
-        let singularities = singularities.clone();
+        let charges = charges.clone();
         py.detach(move || {
             surface.minimum_energy_direction_field(
+                symmetry_order,
                 &metric,
                 &harmonic_basis,
                 &dual_cycles,
-                &singularities,
+                &charges,
                 &generator_turns,
-                anchor_phase,
+                anchor_angle,
                 &executor,
                 storage,
                 work,
@@ -361,6 +369,10 @@ impl PySurfaceConnection {
             inner: Arc::clone(self.inner.surface()),
         }
     }
+    #[getter]
+    fn symmetry_order(&self) -> u32 {
+        self.inner.symmetry_order().get()
+    }
     fn transports_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         project_rows(
             py,
@@ -368,9 +380,6 @@ impl PySurfaceConnection {
             self.inner.surface().edge_count(),
             2,
         )
-    }
-    fn compose(&self, after: &Self) -> PyResult<Self> {
-        connection(self.inner.compose(&after.inner))
     }
     fn holonomy(&self, cycles: &PyIntegralDualCycleBasis) -> PyResult<PyHolonomyEvidence> {
         Ok(PyHolonomyEvidence {
@@ -472,11 +481,11 @@ impl PyIntegrableConnection {
             inner: Arc::clone(self.inner.connection()),
         }
     }
-    fn direction_field(&self, anchor_phase: f64) -> PyResult<PyFaceDirectionField> {
+    fn direction_field(&self, anchor_angle: f64) -> PyResult<PyFaceDirectionField> {
         Ok(PyFaceDirectionField {
             inner: self
                 .inner
-                .direction_field(anchor_phase)
+                .direction_field(anchor_angle)
                 .map_err(surface_error)?,
         })
     }
@@ -505,20 +514,24 @@ impl PyFaceDirectionField {
             inner: Arc::clone(self.inner.connection()),
         }
     }
-    fn directions_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[getter]
+    fn symmetry_order(&self) -> u32 {
+        self.inner.symmetry_order().get()
+    }
+    fn power_directions_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         project_rows(
             py,
-            self.inner.directions(),
+            self.inner.power_directions(),
             self.inner.connection().surface().face_count(),
             2,
         )
     }
-    fn ambient_vectors_numpy_copy(&self) -> PyResult<PyEntityVectors> {
-        field(self.inner.ambient_vectors_copy())
+    fn ambient_vector_branch_numpy_copy(&self, branch: usize) -> PyResult<PyEntityVectors> {
+        field(self.inner.ambient_vector_branch_copy(branch))
     }
-    fn singularity_indices(&self) -> PyResult<PyDirectionFieldSingularities> {
+    fn singularities(&self) -> PyResult<PyDirectionFieldSingularities> {
         Ok(PyDirectionFieldSingularities {
-            inner: self.inner.singularity_indices().map_err(surface_error)?,
+            inner: self.inner.singularities().map_err(surface_error)?,
         })
     }
     #[getter]
@@ -540,9 +553,13 @@ struct PyDirectionFieldSingularities {
 #[pymethods]
 impl PyDirectionFieldSingularities {
     #[getter]
-    fn indices(&self) -> NativeChainElement {
+    fn symmetry_order(&self) -> u32 {
+        self.inner.symmetry_order().get()
+    }
+    #[getter]
+    fn charges(&self) -> NativeChainElement {
         NativeChainElement {
-            inner: ExactElement::IntegerCochain(self.inner.indices().clone()),
+            inner: ExactElement::IntegerCochain(self.inner.charges().clone()),
         }
     }
     #[getter]

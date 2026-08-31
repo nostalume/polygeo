@@ -317,16 +317,50 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     connection = surface.levi_civita_connection()
     evidence = connection.holonomy(cycles)
     assert cycles.rank == 0
+    assert connection.symmetry_order == 1
     assert np.isfinite(evidence.local_error)
     assert evidence.limit > 0.0
+    transports = connection.transports_numpy_copy()
+    powered = surface.connection(2, np.zeros(transports.shape[0]))
+    assert powered.symmetry_order == 2
+    np.testing.assert_allclose(
+        powered.transports_numpy_copy(),
+        np.column_stack(
+            (
+                transports[:, 0] ** 2 - transports[:, 1] ** 2,
+                2.0 * transports[:, 0] * transports[:, 1],
+            )
+        ),
+        atol=2.0e-14,
+    )
+    with pytest.raises(ValueError, match="symmetry_order must be positive"):
+        surface.connection(0, np.zeros(transports.shape[0]))
+    flat_power = surface.connection(
+        2, -2.0 * np.arctan2(transports[:, 1], transports[:, 0])
+    )
+    power_field = flat_power.require_integrable(cycles).direction_field(0.0)
+    power_singularities = power_field.singularities()
+    assert power_singularities.symmetry_order == 2
+    assert sum(power_singularities.charges.to_python_copy()[1]) == 4
+    assert (
+        power_singularities.maximum_quantization_residual
+        <= power_singularities.residual_limit
+    )
 
     homology = polygeo.analyze_integral_homology(complex_.chain_complex(), [1])
     harmonic = realization.positive_metric().harmonic_one_form_basis(homology[1])
-    requested = complex_.chain_complex().dual()[0].element({0: 1, 1: 1})
+    requested = complex_.chain_complex().dual()[0].element({0: 1, 1: 1, 2: 1, 3: 1})
     direction = surface.minimum_energy_direction_field(
-        realization.positive_metric(), harmonic, cycles, requested, [], 0.25
+        2, realization.positive_metric(), harmonic, cycles, requested, [], 0.25
     )
-    singularities = direction.singularity_indices()
+    assert direction.symmetry_order == 2
+    assert direction.power_directions_numpy_copy().shape == (4, 2)
+    assert direction.ambient_vector_branch_numpy_copy(0).vectors_numpy_copy().shape == (
+        4,
+        3,
+    )
+    singularities = direction.singularities()
     assert isinstance(singularities, polygeo.DirectionFieldSingularities)
-    assert singularities.indices.to_python_copy() == requested.to_python_copy()
+    assert singularities.symmetry_order == 2
+    assert singularities.charges.to_python_copy() == requested.to_python_copy()
     assert singularities.maximum_quantization_residual <= singularities.residual_limit

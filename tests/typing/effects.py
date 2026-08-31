@@ -6,6 +6,7 @@ from plotly.graph_objects import Figure
 from polygeo import (
     Binary64Cochain,
     Binary64Element,
+    DirectionFieldSingularities,
     EntityVectors,
     EuclideanRealization,
     FaceDirectionField,
@@ -63,15 +64,18 @@ def surface_effects(
     metric: PositiveMetric,
     harmonic: HarmonicOneFormBasis,
     cycles: IntegralDualCycleBasis,
-    singularities: IntegralCochain[Literal[0]],
+    charges: IntegralCochain[Literal[0]],
 ) -> None:
     assert_type(
         surface.least_squares_conformal_map((0, 1)),
         LeastSquaresConformalMapSolution,
     )
-    assert_type(
-        surface.minimum_energy_direction_field(
-            metric, harmonic, cycles, singularities, (), 0.0
-        ),
-        FaceDirectionField,
+    direction = surface.minimum_energy_direction_field(
+        2, metric, harmonic, cycles, charges, (), 0.0
     )
+    assert_type(direction, FaceDirectionField)
+    assert_type(direction.symmetry_order, int)
+    assert_type(direction.ambient_vector_branch_numpy_copy(0), EntityVectors)
+    singularity_evidence = direction.singularities()
+    assert_type(singularity_evidence, DirectionFieldSingularities)
+    assert_type(singularity_evidence.symmetry_order, int)
