@@ -346,6 +346,7 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     power_singularities = power_field.singularities()
     assert power_singularities.symmetry_order == 2
     assert sum(power_singularities.charges.to_python_copy()[1]) == 4
+    assert power_singularities.boundary_turns_copy() == ()
     assert (
         power_singularities.maximum_quantization_residual
         <= power_singularities.residual_limit

@@ -9,12 +9,13 @@ use polygeo_core::{
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyModule};
+use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 
 use crate::form::{Element, PyBinary64Element};
 use crate::realization::{NativeEuclideanRealization, PyPositiveMetric, PyRealizationLimit};
 use crate::{
-    ExactElement, NativeChainElement, classified_exception, filled_array_1d, filled_array_2d,
+    ExactElement, NativeChainElement, bigint_tuple, classified_exception, filled_array_1d,
+    filled_array_2d,
 };
 
 create_exception!(_polygeo_native, SurfaceErrorPy, PyValueError);
@@ -565,6 +566,9 @@ impl PyDirectionFieldSingularities {
         NativeChainElement {
             inner: ExactElement::IntegerCochain(self.inner.charges().clone()),
         }
+    }
+    fn boundary_turns_copy(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        bigint_tuple(py, self.inner.boundary_turns())
     }
     #[getter]
     fn maximum_quantization_residual(&self) -> f64 {
