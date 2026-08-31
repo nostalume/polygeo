@@ -101,11 +101,16 @@ representation; ordinary, line, and cross fields do not create separate
 carriers. Array observations use explicit `*_numpy_copy()` names, and ambient
 vectors are requested one explicit local branch at a time.
 
-Singularity observation stays in power coordinates: integer charges carry the
-field order, local angle quantization evidence, and the exact closed-surface law
-`sum(charges) = symmetry_order * Euler(surface)`. The geometric index is the
-rational interpretation `charge / symmetry_order`, not a second coefficient
-carrier.
+Singularity observation stays in power coordinates: interior integer charges,
+ordered exact boundary turns, and local quantization evidence satisfy
+`sum(charges) - sum(boundary_turns) = symmetry_order * Euler(surface)`. Closed
+surfaces have no boundary turns. The geometric index remains the rational
+interpretation `charge / symmetry_order`, not a second coefficient carrier.
+
+Boundary-aligned fields use the same face carrier and compact interior transport.
+A relaxed connection-Dirichlet extension selects one representable phase-lift
+sector; a second scalar Dirichlet solve minimizes connection deviation within
+that sector. This is not a global minimum over singularity configurations.
 
 Symmetric direction-field synthesis composes those same objects. An exact
 degree-zero cochain prescribes power charges, exact dual cycles order integer
