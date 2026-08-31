@@ -377,24 +377,28 @@ impl PySurfaceConnection {
         project_rows(
             py,
             self.inner.transports(),
-            self.inner.surface().edge_count(),
+            self.inner.transports().len() / 2,
             2,
         )
+    }
+    fn interior_edge_indices_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let values = self.inner.interior_edge_indices_copy();
+        filled_array_1d(py, values.len(), |output: &mut [i64]| {
+            for (target, &value) in output.iter_mut().zip(&values) {
+                *target =
+                    i64::try_from(value).map_err(|_| polygeo_core::TopologyError::IndexOverflow)?;
+            }
+            Ok(())
+        })
     }
     fn holonomy(&self, cycles: &PyIntegralDualCycleBasis) -> PyResult<PyHolonomyEvidence> {
         Ok(PyHolonomyEvidence {
             inner: self.inner.holonomy(&cycles.inner).map_err(surface_error)?,
         })
     }
-    fn require_integrable(
-        &self,
-        cycles: &PyIntegralDualCycleBasis,
-    ) -> PyResult<PyIntegrableConnection> {
+    fn require_integrable(&self) -> PyResult<PyIntegrableConnection> {
         Ok(PyIntegrableConnection {
-            inner: self
-                .inner
-                .require_integrable(&cycles.inner)
-                .map_err(surface_error)?,
+            inner: self.inner.require_integrable().map_err(surface_error)?,
         })
     }
 }

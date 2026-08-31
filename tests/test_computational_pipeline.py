@@ -321,6 +321,10 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     assert np.isfinite(evidence.local_error)
     assert evidence.limit > 0.0
     transports = connection.transports_numpy_copy()
+    np.testing.assert_array_equal(
+        connection.interior_edge_indices_numpy_copy(),
+        np.arange(realization.complex.simplex_count(1)),
+    )
     powered = surface.connection(2, np.zeros(transports.shape[0]))
     assert powered.symmetry_order == 2
     np.testing.assert_allclose(
@@ -338,7 +342,7 @@ def test_triangle_surface_uses_one_field_carrier_and_explicit_copies() -> None:
     flat_power = surface.connection(
         2, -2.0 * np.arctan2(transports[:, 1], transports[:, 0])
     )
-    power_field = flat_power.require_integrable(cycles).direction_field(0.0)
+    power_field = flat_power.require_integrable().direction_field(0.0)
     power_singularities = power_field.singularities()
     assert power_singularities.symmetry_order == 2
     assert sum(power_singularities.charges.to_python_copy()[1]) == 4
