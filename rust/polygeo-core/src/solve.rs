@@ -29,7 +29,9 @@ use num_traits::ToPrimitive;
 
 use crate::incidence::{IncidenceAxis, independent_incidence};
 use crate::problem::{adaptive_product_sign, adaptive_product_sum, adaptive_product_value};
-use crate::surface::dual_edges;
+use crate::surface::{
+    complex_at, complex_conjugate, complex_multiply, complex_power, dual_edges, normalize_complex,
+};
 use crate::{
     Binary64Chain, Binary64Cochain, Binary64Element, Binary64Space, CanonicalSelection, Chain,
     Cochain, DirichletEvidence, DirichletProblem, DirichletSolution, EuclideanRealization,
@@ -1446,6 +1448,39 @@ impl TriangleSurface {
         Ok(field)
     }
 
+    /// Construct a boundary-aligned symmetric field minimizing connection deviation
+    /// within the lift sector selected by its relaxed Dirichlet extension.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a closed or incompatible surface, ambiguous targets or phase lifts,
+    /// exhausted resources, cancellation, factorization, or failed certification.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mathematical inputs and execution policies remain explicit"
+    )]
+    pub fn boundary_aligned_direction_field(
+        self: &Arc<Self>,
+        symmetry_order: NonZeroU32,
+        metric: &PositiveMetric,
+        boundary_angle_offset: f64,
+        executor: &NativeExecutor,
+        storage: StorageLimit,
+        work: WorkLimit,
+        cancellation: &CancellationToken,
+    ) -> Result<FaceDirectionField, SurfaceComputationError> {
+        boundary_aligned_direction_field(
+            self,
+            symmetry_order,
+            metric,
+            boundary_angle_offset,
+            *executor,
+            storage,
+            work,
+            cancellation,
+        )
+    }
+
     /// Compute one bounded least-squares conformal parameterization of an oriented disk.
     ///
     /// The two distinct boundary anchors map to `(0, 0)` and `(1, 0)` in caller order.
@@ -1491,6 +1526,432 @@ impl TriangleSurface {
         )
         .map_err(SurfaceComputationError::Solve)
     }
+}
+
+fn require_boundary_direction_field_resources(
+    face_count: usize,
+    edge_count: usize,
+    storage: StorageLimit,
+    work: WorkLimit,
+) -> Result<(), SolveError> {
+    let relaxed_rank = face_count.checked_mul(2).ok_or(SolveError::ResourceLimit)?;
+    let scalar_cells = face_count
+        .checked_mul(18)
+        .and_then(|value| value.checked_add(edge_count.saturating_mul(24)))
+        .ok_or(SolveError::ResourceLimit)?;
+    let temporaries = logical_bytes(scalar_cells, size_of::<f64>())?;
+    let factor_peak = matrix_bytes(relaxed_rank)?
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(temporaries))
+        .ok_or(SolveError::ResourceLimit)?;
+    require_storage(storage, 0, factor_peak)?;
+    let required_work = cubic_work(relaxed_rank)?
+        .checked_add(cubic_work(face_count)?)
+        .and_then(|value| value.checked_add(u64::try_from(scalar_cells).ok()?))
+        .ok_or(SolveError::ResourceLimit)?;
+    require_work(work, required_work)
+}
+
+fn solve_weighted_positive_system(
+    rank: usize,
+    triplets: &[Triplet<usize, usize, f64>],
+    scale: f64,
+    values: &mut [f64],
+    executor: NativeExecutor,
+    cancellation: &CancellationToken,
+) -> Result<(), SolveError> {
+    if values.len() != rank {
+        return Err(SolveError::Numerical);
+    }
+    if rank == 0 {
+        return Ok(());
+    }
+    let factor = factor_sparse_triplets(rank, triplets, scale, executor, cancellation)?;
+    let requirement = factor_solve_requirement(&factor, executor, 1);
+    let mut buffer = MemBuffer::try_new(requirement).map_err(|_| SolveError::Allocation)?;
+    for value in values.iter_mut() {
+        *value /= scale;
+    }
+    solve_factor(
+        &factor,
+        MatMut::from_column_major_slice_mut(values, rank, 1),
+        executor,
+        MemStack::new(&mut buffer),
+    );
+    check_cancelled(cancellation)?;
+    values
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(())
+        .ok_or(SolveError::Numerical)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one atomic computation keeps both temporary factors and their lift certificate local"
+)]
+fn boundary_aligned_direction_field(
+    surface: &Arc<TriangleSurface>,
+    symmetry_order: NonZeroU32,
+    metric: &PositiveMetric,
+    boundary_angle_offset: f64,
+    executor: NativeExecutor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<FaceDirectionField, SurfaceComputationError> {
+    if !Arc::ptr_eq(metric.realization(), surface.realization()) {
+        return Err(SolveError::ProblemMismatch.into());
+    }
+    let topology = surface.realization().topology();
+    topology.refine_connected().map_err(SurfaceError::from)?;
+    topology
+        .refine_regular()
+        .map_err(SurfaceError::from)?
+        .with_boundary()
+        .map_err(SurfaceError::from)?;
+    let face_count = surface.face_count();
+    let edge_count = surface.edge_count();
+    require_boundary_direction_field_resources(face_count, edge_count, storage, work)?;
+    check_cancelled(cancellation)?;
+
+    let targets = surface.boundary_direction_targets(symmetry_order, boundary_angle_offset)?;
+    if targets.component_offsets.len() < 2
+        || targets.component_offsets.last().copied() != Some(targets.component_edges.len())
+        || targets.power_directions.len() != targets.faces.len().saturating_mul(2)
+    {
+        return Err(SolveError::Numerical.into());
+    }
+    let mut boundary_faces = vec![false; face_count];
+    let mut directions = vec![0.0_f64; 2 * face_count];
+    for (row, &face) in targets.faces.iter().enumerate() {
+        let boundary = boundary_faces
+            .get_mut(face)
+            .ok_or(SurfaceError::IndexOutside)?;
+        if std::mem::replace(boundary, true) {
+            return Err(SolveError::Numerical.into());
+        }
+        let direction = complex_at(&targets.power_directions, row)?;
+        directions[2 * face..2 * face + 2].copy_from_slice(&direction);
+    }
+    drop(targets);
+    let free = boundary_faces
+        .iter()
+        .enumerate()
+        .filter_map(|(face, &boundary)| (!boundary).then_some(face))
+        .collect::<Vec<_>>();
+    let positions = selected_positions(face_count, &free)?;
+    drop(boundary_faces);
+
+    let levi_civita = surface.levi_civita_connection()?;
+    let interior_edges = levi_civita.interior_edge_indices_copy();
+    let mut levi_civita_power = Vec::with_capacity(levi_civita.transports().len());
+    for transport in levi_civita.transports().chunks_exact(2) {
+        levi_civita_power.extend(complex_power(
+            transport.try_into().map_err(|_| SolveError::Numerical)?,
+            i64::from(symmetry_order.get()),
+        )?);
+    }
+    let dual = dual_edges(topology)?;
+    let hodge = metric
+        .hodge_coefficients_slice(1)
+        .map_err(|_| SolveError::Numerical)?;
+    let mut weights = Vec::with_capacity(interior_edges.len());
+    for &edge in &interior_edges {
+        let coefficient = *hodge.get(edge).ok_or(SolveError::Numerical)?;
+        let weight = 1.0 / coefficient;
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(SolveError::Numerical.into());
+        }
+        weights.push(weight);
+    }
+
+    let mut diagonal = vec![0.0_f64; free.len()];
+    for (&edge, &weight) in interior_edges.iter().zip(&weights) {
+        let (source, target, _) = dual.edge(edge)?;
+        if let Some(position) = positions[source] {
+            diagonal[position] += weight;
+        }
+        if let Some(position) = positions[target] {
+            diagonal[position] += weight;
+        }
+    }
+    let scale = diagonal.iter().copied().fold(0.0_f64, f64::max);
+    if !free.is_empty() && (!scale.is_finite() || scale <= 0.0) {
+        return Err(SolveError::Factorization.into());
+    }
+
+    let relaxed_rank = free.len().saturating_mul(2);
+    let mut relaxed_triplets =
+        Vec::with_capacity(relaxed_rank.saturating_add(interior_edges.len().saturating_mul(8)));
+    for (position, &value) in diagonal.iter().enumerate() {
+        for axis in 0..2 {
+            relaxed_triplets.push(Triplet::new(
+                2 * position + axis,
+                2 * position + axis,
+                value / scale,
+            ));
+        }
+    }
+    let mut relaxed = vec![0.0_f64; relaxed_rank];
+    for (row, (&edge, &weight)) in interior_edges.iter().zip(&weights).enumerate() {
+        let (source, target, _) = dual.edge(edge)?;
+        let transport = complex_at(&levi_civita_power, row)?;
+        let rotation = [[transport[0], -transport[1]], [transport[1], transport[0]]];
+        match (positions[source], positions[target]) {
+            (Some(source_position), Some(target_position)) => {
+                for (target_axis, rotation_row) in rotation.iter().enumerate() {
+                    for (source_axis, &coefficient) in rotation_row.iter().enumerate() {
+                        relaxed_triplets.push(Triplet::new(
+                            2 * source_position + source_axis,
+                            2 * target_position + target_axis,
+                            -weight * coefficient / scale,
+                        ));
+                        relaxed_triplets.push(Triplet::new(
+                            2 * target_position + target_axis,
+                            2 * source_position + source_axis,
+                            -weight * coefficient / scale,
+                        ));
+                    }
+                }
+            }
+            (Some(source_position), None) => {
+                let target_direction = complex_at(&directions, target)?;
+                for (target_axis, rotation_row) in rotation.iter().enumerate() {
+                    for (source_axis, &coefficient) in rotation_row.iter().enumerate() {
+                        relaxed[2 * source_position + source_axis] +=
+                            weight * coefficient * target_direction[target_axis];
+                    }
+                }
+            }
+            (None, Some(target_position)) => {
+                let source_direction = complex_at(&directions, source)?;
+                for (target_axis, rotation_row) in rotation.iter().enumerate() {
+                    for (source_axis, &coefficient) in rotation_row.iter().enumerate() {
+                        relaxed[2 * target_position + target_axis] +=
+                            weight * coefficient * source_direction[source_axis];
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    solve_weighted_positive_system(
+        relaxed_rank,
+        &relaxed_triplets,
+        scale,
+        &mut relaxed,
+        executor,
+        cancellation,
+    )?;
+    for (&face, value) in free.iter().zip(relaxed.chunks_exact(2)) {
+        directions[2 * face..2 * face + 2].copy_from_slice(value);
+    }
+
+    let mut relaxed_gradient = vec![0.0_f64; relaxed_rank];
+    let mut relaxed_scale = 0.0_f64;
+    for (row, (&edge, &weight)) in interior_edges.iter().zip(&weights).enumerate() {
+        let (source, target, _) = dual.edge(edge)?;
+        let transport = complex_at(&levi_civita_power, row)?;
+        let source_direction = complex_at(&directions, source)?;
+        let target_direction = complex_at(&directions, target)?;
+        let expected = complex_multiply(transport, source_direction);
+        let difference = [
+            target_direction[0] - expected[0],
+            target_direction[1] - expected[1],
+        ];
+        relaxed_scale = relaxed_scale.max(weight * difference[0].abs());
+        relaxed_scale = relaxed_scale.max(weight * difference[1].abs());
+        if let Some(position) = positions[source] {
+            relaxed_gradient[2 * position] -=
+                weight * (transport[0] * difference[0] + transport[1] * difference[1]);
+            relaxed_gradient[2 * position + 1] -=
+                weight * (-transport[1] * difference[0] + transport[0] * difference[1]);
+        }
+        if let Some(position) = positions[target] {
+            relaxed_gradient[2 * position] += weight * difference[0];
+            relaxed_gradient[2 * position + 1] += weight * difference[1];
+        }
+    }
+    let relaxed_error = relaxed_gradient
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    let relaxed_residual = if relaxed_scale == 0.0 {
+        relaxed_error
+    } else {
+        relaxed_error / relaxed_scale
+    };
+    if !relaxed_residual.is_finite() || relaxed_residual > 1.0e-10 {
+        return Err(SolveError::Numerical.into());
+    }
+
+    let magnitude_scale = directions
+        .chunks_exact(2)
+        .map(|value| value[0].hypot(value[1]))
+        .fold(0.0_f64, f64::max);
+    let nonzero_limit = 4096.0
+        * f64::EPSILON
+        * f64::from(u32::try_from(face_count.max(1)).unwrap_or(u32::MAX))
+        * magnitude_scale.max(1.0);
+    for direction in directions.chunks_exact_mut(2) {
+        let normalized = normalize_complex([direction[0], direction[1]])?;
+        if direction[0].hypot(direction[1]) <= nonzero_limit {
+            return Err(SolveError::Numerical.into());
+        }
+        direction.copy_from_slice(&normalized);
+    }
+    drop(relaxed_triplets);
+    drop(relaxed);
+    drop(relaxed_gradient);
+
+    let order = f64::from(symmetry_order.get());
+    let antipodal_limit = 256.0 * f64::EPSILON * order;
+    let mut lifts = Vec::with_capacity(interior_edges.len());
+    for row in 0..interior_edges.len() {
+        let edge = interior_edges[row];
+        let (source, target, _) = dual.edge(edge)?;
+        let expected = complex_multiply(
+            complex_at(&levi_civita_power, row)?,
+            complex_at(&directions, source)?,
+        );
+        let mismatch = complex_multiply(
+            complex_at(&directions, target)?,
+            complex_conjugate(expected),
+        );
+        let angle = mismatch[1].atan2(mismatch[0]);
+        if std::f64::consts::PI - angle.abs() <= antipodal_limit {
+            return Err(SurfaceError::Unrepresentable.into());
+        }
+        lifts.push(angle);
+    }
+
+    let mut angle_triplets = Vec::with_capacity(
+        free.len()
+            .saturating_add(interior_edges.len().saturating_mul(2)),
+    );
+    for (position, &value) in diagonal.iter().enumerate() {
+        angle_triplets.push(Triplet::new(position, position, value / scale));
+    }
+    let mut angles = vec![0.0_f64; free.len()];
+    for ((&edge, &weight), &lift) in interior_edges.iter().zip(&weights).zip(&lifts) {
+        let (source, target, _) = dual.edge(edge)?;
+        if let Some(position) = positions[source] {
+            angles[position] += weight * lift;
+        }
+        if let Some(position) = positions[target] {
+            angles[position] -= weight * lift;
+        }
+        if let (Some(source_position), Some(target_position)) =
+            (positions[source], positions[target])
+        {
+            angle_triplets.push(Triplet::new(
+                source_position,
+                target_position,
+                -weight / scale,
+            ));
+            angle_triplets.push(Triplet::new(
+                target_position,
+                source_position,
+                -weight / scale,
+            ));
+        }
+    }
+    solve_weighted_positive_system(
+        free.len(),
+        &angle_triplets,
+        scale,
+        &mut angles,
+        executor,
+        cancellation,
+    )?;
+
+    let mut angle_gradient = vec![0.0_f64; free.len()];
+    let mut angle_scale = 0.0_f64;
+    for ((&edge, &weight), &lift) in interior_edges.iter().zip(&weights).zip(&lifts) {
+        let (source, target, _) = dual.edge(edge)?;
+        let source_angle = positions[source].map_or(0.0, |position| angles[position]);
+        let target_angle = positions[target].map_or(0.0, |position| angles[position]);
+        let deviation = lift + target_angle - source_angle;
+        angle_scale = angle_scale.max(weight * deviation.abs());
+        if let Some(position) = positions[source] {
+            angle_gradient[position] -= weight * deviation;
+        }
+        if let Some(position) = positions[target] {
+            angle_gradient[position] += weight * deviation;
+        }
+    }
+    let angle_error = angle_gradient
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    let angle_residual = if angle_scale == 0.0 {
+        angle_error
+    } else {
+        angle_error / angle_scale
+    };
+    if !angle_residual.is_finite() || angle_residual > 1.0e-10 {
+        return Err(SolveError::Numerical.into());
+    }
+    drop(angle_triplets);
+    drop(angle_gradient);
+
+    for (&face, &angle) in free.iter().zip(&angles) {
+        let correction = [angle.cos(), angle.sin()];
+        let direction = complex_multiply(complex_at(&directions, face)?, correction);
+        directions[2 * face..2 * face + 2].copy_from_slice(&normalize_complex(direction)?);
+    }
+    let mut deviations = Vec::with_capacity(interior_edges.len());
+    for (row, (&edge, &lift)) in interior_edges.iter().zip(&lifts).enumerate() {
+        let (source, target, _) = dual.edge(edge)?;
+        let source_angle = positions[source].map_or(0.0, |position| angles[position]);
+        let target_angle = positions[target].map_or(0.0, |position| angles[position]);
+        let lifted = lift + target_angle - source_angle;
+        if std::f64::consts::PI - lifted.abs() <= antipodal_limit {
+            return Err(SurfaceError::Unrepresentable.into());
+        }
+        let expected = complex_multiply(
+            complex_at(&levi_civita_power, row)?,
+            complex_at(&directions, source)?,
+        );
+        let mismatch = complex_multiply(
+            complex_at(&directions, target)?,
+            complex_conjugate(expected),
+        );
+        let principal = mismatch[1].atan2(mismatch[0]);
+        let branch_limit = 8192.0 * f64::EPSILON * order;
+        if (principal - lifted).abs() > branch_limit {
+            return Err(SolveError::Numerical.into());
+        }
+        deviations.push(principal);
+    }
+
+    check_cancelled(cancellation)?;
+    let anchor = complex_at(&directions, 0)?;
+    let anchor_angle = anchor[1].atan2(anchor[0]) / order;
+    let field = surface
+        .connection(symmetry_order, &deviations)?
+        .require_integrable()?
+        .direction_field(anchor_angle)?;
+    let field_limit = 8192.0
+        * f64::EPSILON
+        * order
+        * f64::from(u32::try_from(interior_edges.len().max(1)).unwrap_or(u32::MAX));
+    for face in 0..face_count {
+        let observed = complex_at(field.power_directions(), face)?;
+        let expected = complex_at(&directions, face)?;
+        if (observed[0] - expected[0])
+            .abs()
+            .max((observed[1] - expected[1]).abs())
+            > field_limit
+        {
+            return Err(SolveError::Numerical.into());
+        }
+    }
+    field.singularities()?;
+    check_cancelled(cancellation)?;
+    Ok(field)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3245,14 +3706,29 @@ fn factor_sparse(
             triplets.push(Triplet::new(diagonal, diagonal, masses[vertex] / scale));
         }
     }
-    let matrix = SparseColMat::try_new_from_triplets(free.len(), free.len(), &triplets).map_err(
-        |error| match error {
+    factor_sparse_triplets(free.len(), &triplets, scale, executor, cancellation)
+}
+
+fn factor_sparse_triplets(
+    rank: usize,
+    triplets: &[Triplet<usize, usize, f64>],
+    scale: f64,
+    executor: NativeExecutor,
+    cancellation: &CancellationToken,
+) -> Result<Factor, SolveError> {
+    if rank == 0 {
+        return Ok(Factor::Analytic);
+    }
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(SolveError::Factorization);
+    }
+    let matrix =
+        SparseColMat::try_new_from_triplets(rank, rank, triplets).map_err(|error| match error {
             CreationError::Generic(FaerError::OutOfMemory) => SolveError::Allocation,
             CreationError::Generic(FaerError::IndexOverflow)
             | CreationError::OutOfBounds { .. } => SolveError::ResourceLimit,
             CreationError::Generic(_) => SolveError::Numerical,
-        },
-    )?;
+        })?;
     let symbolic = factorize_symbolic_cholesky(
         matrix.symbolic(),
         Side::Lower,

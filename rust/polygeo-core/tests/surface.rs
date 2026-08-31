@@ -71,6 +71,30 @@ fn triangle() -> Arc<EuclideanRealization> {
     .unwrap()
 }
 
+fn radial_disk(sections: usize) -> Arc<EuclideanRealization> {
+    let mut positions = Vec::with_capacity(3 * (sections + 1));
+    for section in 0..sections {
+        let angle = 2.0 * PI * f64::from(u32::try_from(section).unwrap())
+            / f64::from(u32::try_from(sections).unwrap());
+        positions.extend([angle.cos(), angle.sin(), 0.0]);
+    }
+    positions.extend([0.0; 3]);
+    let center = u64::try_from(sections).unwrap();
+    let mut faces = Vec::with_capacity(3 * sections);
+    for section in 0..sections {
+        faces.extend([
+            u64::try_from(section).unwrap(),
+            u64::try_from((section + 1) % sections).unwrap(),
+            center,
+        ]);
+    }
+    let topology = ComplexCore::admit(
+        CandidateInput::unsigned(faces, sections, 3, Some(sections + 1)).unwrap(),
+    )
+    .unwrap();
+    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+}
+
 fn nonplanar_disk() -> Arc<EuclideanRealization> {
     let topology = ComplexCore::admit(
         CandidateInput::unsigned([0_u64, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4], 4, 3, Some(5)).unwrap(),
@@ -87,12 +111,67 @@ fn nonplanar_disk() -> Arc<EuclideanRealization> {
     .unwrap()
 }
 
+fn acute_disk(subdivisions: usize, scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
+    let mut indices = vec![vec![usize::MAX; subdivisions + 1]; subdivisions + 1];
+    let vertex_count = (subdivisions + 1) * (subdivisions + 2) / 2;
+    let mut positions = Vec::with_capacity(3 * vertex_count);
+    let mut vertex = 0_usize;
+    for (first, row) in indices.iter_mut().enumerate().take(subdivisions + 1) {
+        for (second, slot) in row.iter_mut().enumerate().take(subdivisions - first + 1) {
+            *slot = vertex;
+            vertex += 1;
+            let mut x = f64::from(u32::try_from(first).unwrap())
+                + 0.5 * f64::from(u32::try_from(second).unwrap());
+            let mut y = 0.5_f64.sqrt() * 1.5_f64.sqrt() * f64::from(u32::try_from(second).unwrap());
+            let third = subdivisions - first - second;
+            if first > 0 && second > 0 && third > 0 {
+                let denominator = f64::from(u32::try_from(subdivisions.pow(3)).unwrap());
+                let perturbation =
+                    f64::from(u32::try_from(first * second * third).unwrap()) / denominator;
+                x += 0.11 * perturbation;
+                y += 0.07 * perturbation * f64::from(u32::try_from(first + 1).unwrap())
+                    / f64::from(u32::try_from(subdivisions + 1).unwrap());
+            }
+            positions.extend([
+                scale * x + translation[0],
+                scale * y + translation[1],
+                translation[2],
+            ]);
+        }
+    }
+    let mut faces = Vec::with_capacity(3 * subdivisions * subdivisions);
+    for first in 0..subdivisions {
+        for second in 0..subdivisions - first {
+            faces.extend([
+                u64::try_from(indices[first][second]).unwrap(),
+                u64::try_from(indices[first + 1][second]).unwrap(),
+                u64::try_from(indices[first][second + 1]).unwrap(),
+            ]);
+            if first + second + 1 < subdivisions {
+                faces.extend([
+                    u64::try_from(indices[first + 1][second]).unwrap(),
+                    u64::try_from(indices[first + 1][second + 1]).unwrap(),
+                    u64::try_from(indices[first][second + 1]).unwrap(),
+                ]);
+            }
+        }
+    }
+    let topology = ComplexCore::admit(
+        CandidateInput::unsigned(faces, subdivisions * subdivisions, 3, Some(vertex_count))
+            .unwrap(),
+    )
+    .unwrap();
+    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+}
+
 fn flat_annulus(sections: usize) -> Arc<EuclideanRealization> {
     let mut positions = Vec::with_capacity(6 * sections);
-    for radius in [2.0, 1.0] {
+    let step = 2.0 * PI / f64::from(u32::try_from(sections).unwrap());
+    for (ring, radius) in [2.0, 1.0].into_iter().enumerate() {
         for section in 0..sections {
-            let angle = 2.0 * PI * f64::from(u32::try_from(section).unwrap())
-                / f64::from(u32::try_from(sections).unwrap());
+            let angle = step
+                * (f64::from(u32::try_from(section).unwrap())
+                    + if ring == 0 { 0.0 } else { -0.15 });
             positions.extend([radius * angle.cos(), radius * angle.sin(), 0.0]);
         }
     }
@@ -799,6 +878,258 @@ fn relative_boundary_turns_respect_orientation_and_reject_antipodal_steps() {
     assert_eq!(
         field.singularities().unwrap_err(),
         SurfaceError::Unrepresentable
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one behavior cluster covers the fixed-sector laws and adjacent atomic failures"
+)]
+fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
+    let realization = acute_disk(4, 1.0, [0.0; 3]);
+    let metric = realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let surface = TriangleSurface::admit(realization).unwrap();
+    for order in [NonZeroU32::MIN] {
+        for offset in [0.0, PI / 2.0] {
+            let field = surface
+                .boundary_aligned_direction_field(
+                    order,
+                    &metric,
+                    offset,
+                    &NativeExecutor::sequential(),
+                    StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                    WorkLimit::new(u64::MAX),
+                    &CancellationToken::new(),
+                )
+                .unwrap_or_else(|error| panic!("order {order}, offset {offset} failed: {error:?}"));
+            let singularities = field.singularities().unwrap();
+            assert_eq!(field.symmetry_order(), order);
+            assert_eq!(singularities.boundary_turns(), &[BigInt::from(0)]);
+            assert_eq!(
+                singularities
+                    .charges()
+                    .coefficients()
+                    .iter()
+                    .cloned()
+                    .sum::<BigInt>(),
+                BigInt::from(order.get())
+            );
+        }
+    }
+
+    let resolved_realization = radial_disk(16);
+    let resolved_metric = resolved_realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let resolved_surface = TriangleSurface::admit(resolved_realization).unwrap();
+    for order in [2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
+        for offset in [0.0, PI / 2.0] {
+            let field = resolved_surface
+                .boundary_aligned_direction_field(
+                    order,
+                    &resolved_metric,
+                    offset,
+                    &NativeExecutor::sequential(),
+                    StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                    WorkLimit::new(u64::MAX),
+                    &CancellationToken::new(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("resolved order {order}, offset {offset} failed: {error:?}")
+                });
+            let singularities = field.singularities().unwrap();
+            assert_eq!(singularities.boundary_turns(), &[BigInt::from(0)]);
+            assert_eq!(
+                singularities
+                    .charges()
+                    .coefficients()
+                    .iter()
+                    .cloned()
+                    .sum::<BigInt>(),
+                BigInt::from(order.get())
+            );
+        }
+    }
+
+    let annulus_realization = flat_annulus(16);
+    let annulus_metric = annulus_realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let annulus_surface = TriangleSurface::admit(annulus_realization).unwrap();
+    for order in [1, 2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
+        let field = annulus_surface
+            .boundary_aligned_direction_field(
+                order,
+                &annulus_metric,
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let singularities = field.singularities().unwrap();
+        assert!(singularities.charges().coefficients().is_empty());
+        assert_eq!(
+            singularities.boundary_turns(),
+            &[BigInt::from(0), BigInt::from(0)]
+        );
+    }
+
+    let transformed = acute_disk(4, 3.7, [8.0, -3.0, 2.0]);
+    let transformed_metric = transformed
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let transformed_surface = TriangleSurface::admit(transformed).unwrap();
+    let order = NonZeroU32::MIN;
+    let policies = || {
+        (
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            CancellationToken::new(),
+        )
+    };
+    let (storage, work, cancellation) = policies();
+    let reference = surface
+        .boundary_aligned_direction_field(
+            order,
+            &metric,
+            0.37,
+            &NativeExecutor::sequential(),
+            storage,
+            work,
+            &cancellation,
+        )
+        .unwrap();
+    let (storage, work, cancellation) = policies();
+    let observed = transformed_surface
+        .boundary_aligned_direction_field(
+            order,
+            &transformed_metric,
+            0.37,
+            &NativeExecutor::sequential(),
+            storage,
+            work,
+            &cancellation,
+        )
+        .unwrap();
+    for (&left, &right) in reference
+        .power_directions()
+        .iter()
+        .zip(observed.power_directions())
+    {
+        assert_close(left, right, 2.0e-11);
+    }
+
+    assert_eq!(
+        surface
+            .boundary_aligned_direction_field(
+                order,
+                &metric,
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(0, 0).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ResourceLimit)
+    );
+    assert_eq!(
+        surface
+            .boundary_aligned_direction_field(
+                order,
+                &metric,
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(0),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ResourceLimit)
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert_eq!(
+        surface
+            .boundary_aligned_direction_field(
+                order,
+                &metric,
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &cancellation,
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::Cancelled)
+    );
+    assert_eq!(
+        surface
+            .boundary_aligned_direction_field(
+                order,
+                &transformed_metric,
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .solve(),
+        Some(SolveError::ProblemMismatch)
+    );
+    assert_eq!(
+        surface
+            .boundary_aligned_direction_field(
+                order,
+                &metric,
+                f64::NAN,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .surface(),
+        Some(SurfaceError::NonFinite)
+    );
+    let closed_realization = tetrahedron(1.0, [0.0; 3]);
+    let closed_metric = closed_realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let closed_surface = TriangleSurface::admit(closed_realization).unwrap();
+    assert!(
+        closed_surface
+            .boundary_aligned_direction_field(
+                order,
+                &closed_metric,
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .surface()
+            .is_some()
     );
 }
 

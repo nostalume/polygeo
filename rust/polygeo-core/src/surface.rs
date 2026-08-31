@@ -372,15 +372,11 @@ struct SurfaceRows {
 }
 
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by bounded field construction")
-)]
 pub(crate) struct BoundaryDirectionTargets {
-    component_offsets: Box<[usize]>,
-    component_edges: Box<[usize]>,
-    faces: Box<[usize]>,
-    power_directions: Box<[f64]>,
+    pub(crate) component_offsets: Box<[usize]>,
+    pub(crate) component_edges: Box<[usize]>,
+    pub(crate) faces: Box<[usize]>,
+    pub(crate) power_directions: Box<[f64]>,
 }
 
 /// One admitted oriented triangle-manifold realization in ambient dimension three.
@@ -546,10 +542,6 @@ impl TriangleSurface {
         Ok(&self.surface_rows()?.second)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by bounded field construction")
-    )]
     pub(crate) fn boundary_direction_targets(
         &self,
         symmetry_order: NonZeroU32,
@@ -1277,14 +1269,14 @@ fn rodrigues(value: [f64; 3], axis: [f64; 3], angle: f64) -> [f64; 3] {
     ]
 }
 
-fn complex_multiply(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
+pub(crate) fn complex_multiply(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
     [
         left[0] * right[0] - left[1] * right[1],
         left[0] * right[1] + left[1] * right[0],
     ]
 }
 
-fn normalize_complex(value: [f64; 2]) -> Result<[f64; 2], SurfaceError> {
+pub(crate) fn normalize_complex(value: [f64; 2]) -> Result<[f64; 2], SurfaceError> {
     let magnitude = value[0].hypot(value[1]);
     if magnitude == 0.0 || !magnitude.is_finite() {
         return Err(SurfaceError::Unrepresentable);
@@ -1297,17 +1289,24 @@ fn normalize_complex(value: [f64; 2]) -> Result<[f64; 2], SurfaceError> {
         .ok_or(SurfaceError::Unrepresentable)
 }
 
-fn complex_conjugate(value: [f64; 2]) -> [f64; 2] {
+pub(crate) fn complex_conjugate(value: [f64; 2]) -> [f64; 2] {
     [value[0], -value[1]]
 }
 
-fn complex_power(mut value: [f64; 2], exponent: i64) -> Result<[f64; 2], SurfaceError> {
+pub(crate) fn complex_power(mut value: [f64; 2], exponent: i64) -> Result<[f64; 2], SurfaceError> {
     if exponent < 0 {
         value = complex_conjugate(value);
     }
     let mut result = [1.0, 0.0];
-    for _ in 0..exponent.unsigned_abs() {
-        result = normalize_complex(complex_multiply(result, value))?;
+    let mut remaining = exponent.unsigned_abs();
+    while remaining != 0 {
+        if remaining & 1 != 0 {
+            result = normalize_complex(complex_multiply(result, value))?;
+        }
+        remaining >>= 1;
+        if remaining != 0 {
+            value = normalize_complex(complex_multiply(value, value))?;
+        }
     }
     Ok(result)
 }
@@ -1572,7 +1571,7 @@ impl SurfaceConnection {
     }
 }
 
-fn complex_at(values: &[f64], index: usize) -> Result<[f64; 2], SurfaceError> {
+pub(crate) fn complex_at(values: &[f64], index: usize) -> Result<[f64; 2], SurfaceError> {
     let start = index.checked_mul(2).ok_or(SurfaceError::Overflow)?;
     values
         .get(start..start + 2)
