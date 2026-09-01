@@ -808,35 +808,16 @@ impl TriangleSurface {
     pub fn levi_civita_connection(
         self: &Arc<Self>,
     ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
-        let edge_count = interior_edge_indices(self.realization.topology())?.len();
-        self.connection(NonZeroU32::MIN, &vec![0.0; edge_count])
-    }
-
-    /// Construct order-`N` Levi-Civita power transport with one deviation per interior dual edge.
-    ///
-    /// # Errors
-    ///
-    /// Rejects irregularity, disconnection, shape, nonfinite, or representation failures.
-    pub fn connection(
-        self: &Arc<Self>,
-        symmetry_order: NonZeroU32,
-        deviations: &[f64],
-    ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
         self.realization.topology().refine_regular()?;
         self.realization.topology().refine_connected()?;
-        let interior_edges = interior_edge_indices(self.realization.topology())?;
-        if deviations.len() != interior_edges.len() {
-            return Err(SurfaceError::FieldShape);
-        }
-        if deviations.iter().any(|value| !value.is_finite()) {
-            return Err(SurfaceError::NonFinite);
-        }
+        let interior_edges: Arc<[usize]> =
+            interior_edge_indices(self.realization.topology())?.into();
         let dual = dual_edges(self.realization.topology())?;
         let edges = self.realization.topology().basis(1)?;
         let first = self.first_frame_axes()?;
         let second = self.second_frame_axes()?;
         let mut transports = Vec::with_capacity(2 * interior_edges.len());
-        for (&edge, &deviation_angle) in interior_edges.iter().zip(deviations) {
+        for &edge in interior_edges.iter() {
             let endpoints = edges.row(edge).ok_or(SurfaceError::IndexOutside)?;
             let axis = normalize(subtract(
                 self.point(endpoints[1])?,
@@ -849,24 +830,32 @@ impl TriangleSurface {
             let angle = dot(axis, cross(source_normal, target_normal))
                 .atan2(dot(source_normal, target_normal));
             let rotated = rodrigues(row3(first, source)?, axis, angle);
-            let base = normalize_complex([
+            transports.extend(normalize_complex([
                 dot(rotated, row3(first, target)?),
                 dot(rotated, row3(second, target)?),
-            ])?;
-            let deviation = [deviation_angle.cos(), deviation_angle.sin()];
-            let powered_base = complex_power(base, i64::from(symmetry_order.get()))?;
-            transports.extend(normalize_complex(complex_multiply(
-                powered_base,
-                deviation,
-            ))?);
+            ])?);
         }
         Ok(Arc::new(SurfaceConnection {
             surface: Arc::clone(self),
-            symmetry_order,
-            interior_edges: interior_edges.into(),
+            symmetry_order: NonZeroU32::MIN,
+            interior_edges,
             transports: transports.into(),
             evidence: OnceCell::new(),
         }))
+    }
+
+    /// Construct order-`N` Levi-Civita power transport with one deviation per interior dual edge.
+    ///
+    /// # Errors
+    ///
+    /// Rejects irregularity, disconnection, shape, nonfinite, or representation failures.
+    pub fn connection(
+        self: &Arc<Self>,
+        symmetry_order: NonZeroU32,
+        deviations: &[f64],
+    ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
+        self.levi_civita_connection()?
+            .with_powered_deviations(symmetry_order, deviations)
     }
 
     fn require_closed(&self) -> Result<(), SurfaceError> {
@@ -1296,6 +1285,17 @@ pub(crate) fn complex_power(mut value: [f64; 2], exponent: i64) -> Result<[f64; 
     Ok(result)
 }
 
+pub(crate) fn powered_transport(
+    base: [f64; 2],
+    order: NonZeroU32,
+    deviation: f64,
+) -> Result<[f64; 2], SurfaceError> {
+    normalize_complex(complex_multiply(
+        complex_power(base, i64::from(order.get()))?,
+        [deviation.cos(), deviation.sin()],
+    ))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DualEdges<'a> {
     boundary: &'a CanonicalBoundary,
@@ -1436,7 +1436,7 @@ struct IntegrabilityEvidence {
 pub struct SurfaceConnection {
     surface: Arc<TriangleSurface>,
     symmetry_order: NonZeroU32,
-    interior_edges: Arc<[usize]>,
+    pub(crate) interior_edges: Arc<[usize]>,
     transports: Arc<[f64]>,
     evidence: OnceCell<Result<IntegrabilityEvidence, SurfaceError>>,
 }
@@ -1471,6 +1471,37 @@ impl SurfaceConnection {
     #[must_use]
     pub fn interior_edge_indices_copy(&self) -> Box<[usize]> {
         self.interior_edges.as_ref().into()
+    }
+
+    pub(crate) fn with_powered_deviations(
+        self: &Arc<Self>,
+        symmetry_order: NonZeroU32,
+        deviations: &[f64],
+    ) -> Result<Arc<Self>, SurfaceError> {
+        if deviations.len() != self.interior_edges.len() {
+            return Err(SurfaceError::FieldShape);
+        }
+        let transports: Vec<f64> = deviations
+            .iter()
+            .enumerate()
+            .map(|(row, &deviation)| {
+                powered_transport(
+                    complex_at(&self.transports, row)?,
+                    symmetry_order,
+                    deviation,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(Arc::new(Self {
+            surface: Arc::clone(&self.surface),
+            symmetry_order,
+            interior_edges: Arc::clone(&self.interior_edges),
+            transports: transports.into(),
+            evidence: OnceCell::new(),
+        }))
     }
 
     fn transport(&self, edge: usize) -> Result<[f64; 2], SurfaceError> {
@@ -1704,7 +1735,7 @@ pub struct FaceDirectionField {
 
 fn interior_direction_charges(
     field: &FaceDirectionField,
-    levi_civita_power: &SurfaceConnection,
+    levi_civita: &SurfaceConnection,
     boundary_vertices: &[bool],
     entries: &mut Vec<(usize, BigInt)>,
 ) -> Result<(BigInt, f64, usize), SurfaceError> {
@@ -1738,7 +1769,7 @@ fn interior_direction_charges(
         {
             let (source, target, source_sign) = dual.edge(edge)?;
             let expected = complex_multiply(
-                levi_civita_power.transport(edge)?,
+                powered_transport(levi_civita.transport(edge)?, field.symmetry_order(), 0.0)?,
                 complex_at(&field.power_directions, source)?,
             );
             let mismatch = complex_multiply(
@@ -1848,16 +1879,13 @@ impl FaceDirectionField {
         let order = f64::from(symmetry_order.get());
         let regular = topology.refine_regular()?;
         let boundary_vertices = regular.boundary_mask(0)?;
-        let levi_civita_power = surface.connection(
-            symmetry_order,
-            &vec![0.0; self.connection.interior_edges.len()],
-        )?;
+        let levi_civita = surface.levi_civita_connection()?;
         let mut entries = Vec::new();
         entries
             .try_reserve_exact(topology.vertex_count())
             .map_err(|_| SurfaceError::Overflow)?;
         let (charge_total, charge_residual, maximum_valence) =
-            interior_direction_charges(self, &levi_civita_power, &boundary_vertices, &mut entries)?;
+            interior_direction_charges(self, &levi_civita, &boundary_vertices, &mut entries)?;
         let (boundary_turns, boundary_total, boundary_residual, maximum_boundary_edges) =
             relative_boundary_turns(self)?;
         let maximum_residual = charge_residual.max(boundary_residual);

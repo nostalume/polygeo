@@ -30,7 +30,8 @@ use num_traits::ToPrimitive;
 use crate::incidence::{IncidenceAxis, independent_incidence};
 use crate::problem::{adaptive_product_sign, adaptive_product_sum, adaptive_product_value};
 use crate::surface::{
-    complex_at, complex_conjugate, complex_multiply, complex_power, dual_edges, normalize_complex,
+    complex_at, complex_conjugate, complex_multiply, dual_edges, normalize_complex,
+    powered_transport,
 };
 use crate::{
     Binary64Chain, Binary64Cochain, Binary64Element, Binary64Space, CanonicalSelection, Chain,
@@ -39,8 +40,8 @@ use crate::{
     HodgeDecomposition, HodgeProblem, HomologyGroup, IntegralCochain, IntegralDualCycleBasis,
     LeastSquaresConformalMapEvidence, LeastSquaresConformalMapSolution, LinearOperator,
     MeanZeroPoisson, NondegenerateCapability, PairingCapability, PoissonSolution, PositiveMetric,
-    Problem, RealizationError, RealizationLimit, StorageLimit, SurfaceError, TriangleSurface,
-    WorkLimit,
+    Problem, RealizationError, RealizationLimit, StorageLimit, SurfaceConnection, SurfaceError,
+    TriangleSurface, WorkLimit,
 };
 
 type EdgeEndpoints = [(usize, i64); 2];
@@ -1259,7 +1260,7 @@ fn solve_coexact_direction_adjustment(
     reason = "the private kernel mirrors explicit mathematical and execution inputs"
 )]
 fn add_harmonic_direction_adjustment(
-    surface: &Arc<TriangleSurface>,
+    levi_civita: &SurfaceConnection,
     symmetry_order: NonZeroU32,
     metric: &PositiveMetric,
     harmonic_basis: &HarmonicOneFormBasis,
@@ -1273,8 +1274,8 @@ fn add_harmonic_direction_adjustment(
     if rank == 0 {
         return Ok(());
     }
-    let levi_civita_angles = surface
-        .levi_civita_connection()?
+    let surface = levi_civita.surface();
+    let levi_civita_angles = levi_civita
         .transports()
         .chunks_exact(2)
         .map(|value| value[1].atan2(value[0]))
@@ -1423,8 +1424,9 @@ impl TriangleSurface {
             work,
             cancellation,
         )?;
+        let levi_civita = self.levi_civita_connection()?;
         add_harmonic_direction_adjustment(
-            self,
+            &levi_civita,
             symmetry_order,
             metric,
             harmonic_basis,
@@ -1435,8 +1437,8 @@ impl TriangleSurface {
             cancellation,
         )?;
         check_cancelled(cancellation)?;
-        let field = self
-            .connection(symmetry_order, &deviations)?
+        let field = levi_civita
+            .with_powered_deviations(symmetry_order, &deviations)?
             .require_integrable()?
             .direction_field(anchor_angle)?;
         let observed = field.singularities()?;
@@ -1642,12 +1644,13 @@ fn boundary_aligned_direction_field(
     drop(boundary_faces);
 
     let levi_civita = surface.levi_civita_connection()?;
-    let interior_edges = levi_civita.interior_edge_indices_copy();
+    let interior_edges = levi_civita.interior_edges.as_ref();
     let mut levi_civita_power = Vec::with_capacity(levi_civita.transports().len());
     for transport in levi_civita.transports().chunks_exact(2) {
-        levi_civita_power.extend(complex_power(
+        levi_civita_power.extend(powered_transport(
             transport.try_into().map_err(|_| SolveError::Numerical)?,
-            i64::from(symmetry_order.get()),
+            symmetry_order,
+            0.0,
         )?);
     }
     let dual = dual_edges(topology)?;
@@ -1655,7 +1658,7 @@ fn boundary_aligned_direction_field(
         .hodge_coefficients_slice(1)
         .map_err(|_| SolveError::Numerical)?;
     let mut weights = Vec::with_capacity(interior_edges.len());
-    for &edge in &interior_edges {
+    for &edge in interior_edges {
         let coefficient = *hodge.get(edge).ok_or(SolveError::Numerical)?;
         let weight = 1.0 / coefficient;
         if !weight.is_finite() || weight <= 0.0 {
@@ -1806,8 +1809,7 @@ fn boundary_aligned_direction_field(
     let order = f64::from(symmetry_order.get());
     let antipodal_limit = 256.0 * f64::EPSILON * order;
     let mut lifts = Vec::with_capacity(interior_edges.len());
-    for row in 0..interior_edges.len() {
-        let edge = interior_edges[row];
+    for (row, &edge) in interior_edges.iter().enumerate() {
         let (source, target, _) = dual.edge(edge)?;
         let expected = complex_multiply(
             complex_at(&levi_civita_power, row)?,
@@ -1927,8 +1929,8 @@ fn boundary_aligned_direction_field(
     check_cancelled(cancellation)?;
     let anchor = complex_at(&directions, 0)?;
     let anchor_angle = anchor[1].atan2(anchor[0]) / order;
-    let field = surface
-        .connection(symmetry_order, &deviations)?
+    let field = levi_civita
+        .with_powered_deviations(symmetry_order, &deviations)?
         .require_integrable()?
         .direction_field(anchor_angle)?;
     let field_limit = 8192.0
