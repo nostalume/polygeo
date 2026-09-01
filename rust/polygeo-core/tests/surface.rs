@@ -5,9 +5,9 @@ use std::sync::Arc;
 use num_bigint::BigInt;
 use polygeo_core::{
     Binary64CochainSpace, Binary64Element, CancellationToken, CandidateInput, ComplexCore,
-    EuclideanRealization, HomologyLimit, IntegralHomology, NativeExecutor, NondegenerateCapability,
-    PairingCapability, RealizationLimit, SolveError, StorageLimit, SurfaceError, TriangleSurface,
-    WorkLimit,
+    EuclideanRealization, FaceDirectionField, HomologyLimit, IntegralHomology, NativeExecutor,
+    NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit, SolveError,
+    StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
 };
 
 fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
@@ -269,6 +269,84 @@ fn norm(vector: &[f64]) -> f64 {
 
 fn assert_close(left: f64, right: f64, tolerance: f64) {
     assert!((left - right).abs() <= tolerance, "{left} != {right}");
+}
+
+fn assert_boundary_alignment(
+    surface: &TriangleSurface,
+    field: &FaceDirectionField,
+    boundary_angle_offset: f64,
+) {
+    let topology = surface.realization().topology();
+    let edges = topology.basis(1).unwrap();
+    let boundary = topology.boundary(2).unwrap();
+    let positions = surface.realization().positions();
+    let first = surface.first_frame_axes().unwrap();
+    let second = surface.second_frame_axes().unwrap();
+    let order = f64::from(field.symmetry_order().get());
+    let mut targets = vec![[0.0_f64; 2]; surface.face_count()];
+    for edge in 0..edges.row_count() {
+        let start = boundary.indptr()[edge];
+        let stop = boundary.indptr()[edge + 1];
+        if stop - start != 1 {
+            continue;
+        }
+        let endpoints = edges.row(edge).unwrap();
+        let (source, target) = if boundary.data()[start] == 1 {
+            (endpoints[0], endpoints[1])
+        } else {
+            (endpoints[1], endpoints[0])
+        };
+        let displacement = [
+            positions[3 * target] - positions[3 * source],
+            positions[3 * target + 1] - positions[3 * source + 1],
+            positions[3 * target + 2] - positions[3 * source + 2],
+        ];
+        let length = norm(&displacement);
+        let face = boundary.indices()[start];
+        let tangent = displacement.map(|value| value / length);
+        let first = &first[3 * face..3 * face + 3];
+        let second = &second[3 * face..3 * face + 3];
+        let real = tangent.iter().zip(first).map(|(x, y)| x * y).sum::<f64>();
+        let imaginary = tangent.iter().zip(second).map(|(x, y)| x * y).sum::<f64>();
+        let angle = order * (imaginary.atan2(real) + boundary_angle_offset);
+        targets[face][0] += length * angle.cos();
+        targets[face][1] += length * angle.sin();
+    }
+    for (face, target) in targets.into_iter().enumerate() {
+        let magnitude = target[0].hypot(target[1]);
+        if magnitude == 0.0 {
+            continue;
+        }
+        assert_close(
+            field.power_directions()[2 * face],
+            target[0] / magnitude,
+            5.0e-11,
+        );
+        assert_close(
+            field.power_directions()[2 * face + 1],
+            target[1] / magnitude,
+            5.0e-11,
+        );
+    }
+}
+
+fn boundary_field(
+    surface: &Arc<TriangleSurface>,
+    metric: &PositiveMetric,
+    order: NonZeroU32,
+    offset: f64,
+) -> FaceDirectionField {
+    surface
+        .boundary_aligned_direction_field(
+            order,
+            metric,
+            offset,
+            &NativeExecutor::sequential(),
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+        .unwrap()
 }
 
 fn assert_lscm_failures(surface: &TriangleSurface) {
@@ -896,19 +974,10 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
     let surface = TriangleSurface::admit(realization).unwrap();
     for order in [NonZeroU32::MIN] {
         for offset in [0.0, PI / 2.0] {
-            let field = surface
-                .boundary_aligned_direction_field(
-                    order,
-                    &metric,
-                    offset,
-                    &NativeExecutor::sequential(),
-                    StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                    WorkLimit::new(u64::MAX),
-                    &CancellationToken::new(),
-                )
-                .unwrap_or_else(|error| panic!("order {order}, offset {offset} failed: {error:?}"));
+            let field = boundary_field(&surface, &metric, order, offset);
             let singularities = field.singularities().unwrap();
             assert_eq!(field.symmetry_order(), order);
+            assert_boundary_alignment(&surface, &field, offset);
             assert_eq!(singularities.boundary_turns(), &[BigInt::from(0)]);
             assert_eq!(
                 singularities
@@ -931,20 +1000,9 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
     let resolved_surface = TriangleSurface::admit(resolved_realization).unwrap();
     for order in [2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
         for offset in [0.0, PI / 2.0] {
-            let field = resolved_surface
-                .boundary_aligned_direction_field(
-                    order,
-                    &resolved_metric,
-                    offset,
-                    &NativeExecutor::sequential(),
-                    StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                    WorkLimit::new(u64::MAX),
-                    &CancellationToken::new(),
-                )
-                .unwrap_or_else(|error| {
-                    panic!("resolved order {order}, offset {offset} failed: {error:?}")
-                });
+            let field = boundary_field(&resolved_surface, &resolved_metric, order, offset);
             let singularities = field.singularities().unwrap();
+            assert_boundary_alignment(&resolved_surface, &field, offset);
             assert_eq!(singularities.boundary_turns(), &[BigInt::from(0)]);
             assert_eq!(
                 singularities
@@ -966,18 +1024,9 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
         .unwrap();
     let annulus_surface = TriangleSurface::admit(annulus_realization).unwrap();
     for order in [1, 2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
-        let field = annulus_surface
-            .boundary_aligned_direction_field(
-                order,
-                &annulus_metric,
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap();
+        let field = boundary_field(&annulus_surface, &annulus_metric, order, 0.0);
         let singularities = field.singularities().unwrap();
+        assert_boundary_alignment(&annulus_surface, &field, 0.0);
         assert!(singularities.charges().coefficients().is_empty());
         assert_eq!(
             singularities.boundary_turns(),
@@ -993,37 +1042,8 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
         .unwrap();
     let transformed_surface = TriangleSurface::admit(transformed).unwrap();
     let order = NonZeroU32::MIN;
-    let policies = || {
-        (
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
-            CancellationToken::new(),
-        )
-    };
-    let (storage, work, cancellation) = policies();
-    let reference = surface
-        .boundary_aligned_direction_field(
-            order,
-            &metric,
-            0.37,
-            &NativeExecutor::sequential(),
-            storage,
-            work,
-            &cancellation,
-        )
-        .unwrap();
-    let (storage, work, cancellation) = policies();
-    let observed = transformed_surface
-        .boundary_aligned_direction_field(
-            order,
-            &transformed_metric,
-            0.37,
-            &NativeExecutor::sequential(),
-            storage,
-            work,
-            &cancellation,
-        )
-        .unwrap();
+    let reference = boundary_field(&surface, &metric, order, 0.37);
+    let observed = boundary_field(&transformed_surface, &transformed_metric, order, 0.37);
     for (&left, &right) in reference
         .power_directions()
         .iter()
@@ -1108,6 +1128,28 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
             .unwrap_err()
             .surface(),
         Some(SurfaceError::NonFinite)
+    );
+    let ambiguous_realization = acute_disk(1, 1.0, [0.0; 3]);
+    let ambiguous_metric = ambiguous_realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let ambiguous_surface = TriangleSurface::admit(ambiguous_realization).unwrap();
+    assert_eq!(
+        ambiguous_surface
+            .boundary_aligned_direction_field(
+                NonZeroU32::MIN,
+                &ambiguous_metric,
+                0.0,
+                &NativeExecutor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+                &CancellationToken::new(),
+            )
+            .unwrap_err()
+            .surface(),
+        Some(SurfaceError::Unrepresentable)
     );
     let closed_realization = tetrahedron(1.0, [0.0; 3]);
     let closed_metric = closed_realization

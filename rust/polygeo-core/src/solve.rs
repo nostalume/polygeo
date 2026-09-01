@@ -1616,26 +1616,23 @@ fn boundary_aligned_direction_field(
     require_boundary_direction_field_resources(face_count, edge_count, storage, work)?;
     check_cancelled(cancellation)?;
 
-    let targets = surface.boundary_direction_targets(symmetry_order, boundary_angle_offset)?;
-    if targets.component_offsets.len() < 2
-        || targets.component_offsets.last().copied() != Some(targets.component_edges.len())
-        || targets.power_directions.len() != targets.faces.len().saturating_mul(2)
-    {
+    let (target_faces, target_directions) =
+        surface.boundary_power_directions(symmetry_order, boundary_angle_offset)?;
+    if target_directions.len() != target_faces.len().saturating_mul(2) {
         return Err(SolveError::Numerical.into());
     }
     let mut boundary_faces = vec![false; face_count];
     let mut directions = vec![0.0_f64; 2 * face_count];
-    for (row, &face) in targets.faces.iter().enumerate() {
+    for (row, &face) in target_faces.iter().enumerate() {
         let boundary = boundary_faces
             .get_mut(face)
             .ok_or(SurfaceError::IndexOutside)?;
         if std::mem::replace(boundary, true) {
             return Err(SolveError::Numerical.into());
         }
-        let direction = complex_at(&targets.power_directions, row)?;
+        let direction = complex_at(&target_directions, row)?;
         directions[2 * face..2 * face + 2].copy_from_slice(&direction);
     }
-    drop(targets);
     let free = boundary_faces
         .iter()
         .enumerate()
