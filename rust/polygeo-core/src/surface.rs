@@ -1747,7 +1747,7 @@ fn interior_direction_charges(
     let order = f64::from(field.symmetry_order().get());
     let mut total = BigInt::from(0);
     let mut maximum_residual = 0.0_f64;
-    let mut maximum_valence = 0_usize;
+    let (mut maximum_valence, mut terms) = (0_usize, Vec::new());
     for vertex in 0..topology.vertex_count() {
         if *boundary_vertices
             .get(vertex)
@@ -1758,9 +1758,9 @@ fn interior_direction_charges(
         let start = incidence.indptr()[vertex];
         let stop = incidence.indptr()[vertex + 1];
         maximum_valence = maximum_valence.max(stop - start);
-        let mut terms = Vec::new();
+        terms.clear();
         terms
-            .try_reserve_exact(stop - start + 1)
+            .try_reserve(stop - start + 1)
             .map_err(|_| SurfaceError::Overflow)?;
         terms.push((order, curvature.coefficients()[vertex]));
         for (&edge, &incidence_sign) in incidence.indices()[start..stop]
@@ -1781,7 +1781,7 @@ fn interior_direction_charges(
             terms.push((-traversal, mismatch[1].atan2(mismatch[0])));
         }
         let (numerator, _) =
-            adaptive_product_value(terms.into_iter()).ok_or(SurfaceError::Unrepresentable)?;
+            adaptive_product_value(terms.iter().copied()).ok_or(SurfaceError::Unrepresentable)?;
         let raw = numerator / std::f64::consts::TAU;
         let rounded = raw.round();
         let charge = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
@@ -1814,7 +1814,7 @@ fn relative_boundary_turns(
     let mut turns = Vec::with_capacity(offsets.len().saturating_sub(1));
     let mut total = BigInt::from(0);
     let mut maximum_residual = 0.0_f64;
-    let mut maximum_edges = 0_usize;
+    let (mut maximum_edges, mut terms) = (0_usize, Vec::new());
     for component in offsets.windows(2) {
         let start = component[0];
         let stop = component[1];
@@ -1822,9 +1822,9 @@ fn relative_boundary_turns(
             return Err(SurfaceError::Unrepresentable);
         }
         maximum_edges = maximum_edges.max(stop - start);
-        let mut terms = Vec::new();
+        terms.clear();
         terms
-            .try_reserve_exact(stop - start)
+            .try_reserve(stop - start)
             .map_err(|_| SurfaceError::Overflow)?;
         for row in start..stop {
             let next = if row + 1 == stop { start } else { row + 1 };
@@ -1839,7 +1839,7 @@ fn relative_boundary_turns(
             terms.push((1.0, angle));
         }
         let (numerator, _) =
-            adaptive_product_value(terms.into_iter()).ok_or(SurfaceError::Unrepresentable)?;
+            adaptive_product_value(terms.iter().copied()).ok_or(SurfaceError::Unrepresentable)?;
         let raw = numerator / std::f64::consts::TAU;
         let rounded = raw.round();
         let turn = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
@@ -1866,7 +1866,7 @@ impl FaceDirectionField {
         &self.power_directions
     }
 
-    /// Calculate exact symmetric-field singularity charges with quantization evidence.
+    /// Calculate exact charges with O(E log E) compact lookup and quantization evidence.
     ///
     /// # Errors
     ///

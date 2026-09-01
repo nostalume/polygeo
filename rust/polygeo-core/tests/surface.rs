@@ -5,9 +5,9 @@ use std::sync::Arc;
 use num_bigint::BigInt;
 use polygeo_core::{
     Binary64CochainSpace, Binary64Element, CancellationToken, CandidateInput, ComplexCore,
-    EuclideanRealization, FaceDirectionField, HomologyLimit, IntegralHomology, NativeExecutor,
-    NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit, SolveError,
-    StorageLimit, SurfaceError, TriangleSurface, WorkLimit,
+    EuclideanRealization, FaceDirectionField, HomologyLimit, IntegralCochain, IntegralHomology,
+    NativeExecutor, NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit,
+    SolveError, StorageLimit, SurfaceComputationError, SurfaceError, TriangleSurface, WorkLimit,
 };
 
 fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
@@ -336,17 +336,37 @@ fn boundary_field(
     order: NonZeroU32,
     offset: f64,
 ) -> FaceDirectionField {
-    surface
-        .boundary_aligned_direction_field(
-            order,
-            metric,
-            offset,
-            &NativeExecutor::sequential(),
+    boundary_field_result(
+        surface,
+        metric,
+        order,
+        offset,
+        (
             StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
             WorkLimit::new(u64::MAX),
             &CancellationToken::new(),
-        )
-        .unwrap()
+        ),
+    )
+    .unwrap()
+}
+
+fn boundary_field_result(
+    surface: &Arc<TriangleSurface>,
+    metric: &PositiveMetric,
+    order: NonZeroU32,
+    offset: f64,
+    execution: (StorageLimit, WorkLimit, &CancellationToken),
+) -> Result<FaceDirectionField, SurfaceComputationError> {
+    let (storage, work, cancellation) = execution;
+    surface.boundary_aligned_direction_field(
+        order,
+        metric,
+        offset,
+        &NativeExecutor::sequential(),
+        storage,
+        work,
+        cancellation,
+    )
 }
 
 fn assert_lscm_failures(surface: &TriangleSurface) {
@@ -960,10 +980,6 @@ fn relative_boundary_turns_respect_orientation_and_reject_antipodal_steps() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one behavior cluster covers the fixed-sector laws and adjacent atomic failures"
-)]
 fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
     let realization = acute_disk(4, 1.0, [0.0; 3]);
     let metric = realization
@@ -1051,82 +1067,59 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
     {
         assert_close(left, right, 2.0e-11);
     }
+}
 
-    assert_eq!(
-        surface
-            .boundary_aligned_direction_field(
-                order,
-                &metric,
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(0, 0).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
+#[test]
+fn boundary_aligned_direction_field_rejects_invalid_execution_and_domains() {
+    let realization = acute_disk(4, 1.0, [0.0; 3]);
+    let metric = realization
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let surface = TriangleSurface::admit(realization).unwrap();
+    let transformed = acute_disk(4, 3.7, [8.0, -3.0, 2.0]);
+    let transformed_metric = transformed
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
+    let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
+    let work = WorkLimit::new(u64::MAX);
+    let active = CancellationToken::new();
+    let solve_error = |metric, execution| {
+        boundary_field_result(&surface, metric, NonZeroU32::MIN, 0.0, execution)
             .unwrap_err()
-            .solve(),
+            .solve()
+    };
+    assert_eq!(
+        solve_error(&metric, (StorageLimit::new(0, 0).unwrap(), work, &active)),
         Some(SolveError::ResourceLimit)
     );
     assert_eq!(
-        surface
-            .boundary_aligned_direction_field(
-                order,
-                &metric,
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(0),
-                &CancellationToken::new(),
-            )
-            .unwrap_err()
-            .solve(),
+        solve_error(&metric, (storage, WorkLimit::new(0), &active)),
         Some(SolveError::ResourceLimit)
     );
     let cancellation = CancellationToken::new();
     cancellation.cancel();
     assert_eq!(
-        surface
-            .boundary_aligned_direction_field(
-                order,
-                &metric,
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &cancellation,
-            )
-            .unwrap_err()
-            .solve(),
+        solve_error(&metric, (storage, work, &cancellation)),
         Some(SolveError::Cancelled)
     );
     assert_eq!(
-        surface
-            .boundary_aligned_direction_field(
-                order,
-                &transformed_metric,
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap_err()
-            .solve(),
+        solve_error(&transformed_metric, (storage, work, &active)),
         Some(SolveError::ProblemMismatch)
     );
     assert_eq!(
-        surface
-            .boundary_aligned_direction_field(
-                order,
-                &metric,
-                f64::NAN,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap_err()
-            .surface(),
+        boundary_field_result(
+            &surface,
+            &metric,
+            NonZeroU32::MIN,
+            f64::NAN,
+            (storage, work, &active),
+        )
+        .unwrap_err()
+        .surface(),
         Some(SurfaceError::NonFinite)
     );
     let ambiguous_realization = acute_disk(1, 1.0, [0.0; 3]);
@@ -1137,18 +1130,15 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
         .unwrap();
     let ambiguous_surface = TriangleSurface::admit(ambiguous_realization).unwrap();
     assert_eq!(
-        ambiguous_surface
-            .boundary_aligned_direction_field(
-                NonZeroU32::MIN,
-                &ambiguous_metric,
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap_err()
-            .surface(),
+        boundary_field_result(
+            &ambiguous_surface,
+            &ambiguous_metric,
+            NonZeroU32::MIN,
+            0.0,
+            (storage, work, &active),
+        )
+        .unwrap_err()
+        .surface(),
         Some(SurfaceError::Unrepresentable)
     );
     let closed_realization = tetrahedron(1.0, [0.0; 3]);
@@ -1159,27 +1149,20 @@ fn boundary_aligned_direction_field_satisfies_the_relative_disk_law() {
         .unwrap();
     let closed_surface = TriangleSurface::admit(closed_realization).unwrap();
     assert!(
-        closed_surface
-            .boundary_aligned_direction_field(
-                order,
-                &closed_metric,
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap_err()
-            .surface()
-            .is_some()
+        boundary_field_result(
+            &closed_surface,
+            &closed_metric,
+            NonZeroU32::MIN,
+            0.0,
+            (storage, work, &active),
+        )
+        .unwrap_err()
+        .surface()
+        .is_some()
     );
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one behavior cluster covers valid orders and adjacent atomic failures"
-)]
 fn minimum_energy_direction_field_realizes_exact_sphere_power_charges() {
     let realization = octahedron();
     let metric = realization
@@ -1215,6 +1198,21 @@ fn minimum_energy_direction_field_realizes_exact_sphere_power_charges() {
         .dual()
         .space(0)
         .unwrap();
+    let solve = |order, requested: &IntegralCochain, storage| {
+        surface.minimum_energy_direction_field(
+            order,
+            &metric,
+            &harmonic,
+            &cycles,
+            requested,
+            &[],
+            0.25,
+            &NativeExecutor::sequential(),
+            storage,
+            WorkLimit::new(u64::MAX),
+            &CancellationToken::new(),
+        )
+    };
     for order in [1, 2, 4].map(|value| NonZeroU32::new(value).unwrap()) {
         let requested = match order.get() {
             1 => charge_space.element([(0, 1.into()), (1, 1.into())]),
@@ -1230,21 +1228,12 @@ fn minimum_energy_direction_field_realizes_exact_sphere_power_charges() {
             _ => unreachable!(),
         }
         .unwrap();
-        let field = surface
-            .minimum_energy_direction_field(
-                order,
-                &metric,
-                &harmonic,
-                &cycles,
-                &requested,
-                &[],
-                0.25,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap_or_else(|error| panic!("order {order} failed: {error:?}"));
+        let field = solve(
+            order,
+            &requested,
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+        )
+        .unwrap_or_else(|error| panic!("order {order} failed: {error:?}"));
 
         assert_eq!(field.symmetry_order(), order);
         let observed = field.singularities().unwrap();
@@ -1254,44 +1243,26 @@ fn minimum_energy_direction_field_realizes_exact_sphere_power_charges() {
 
     let invalid = charge_space.element([(0, BigInt::from(1))]).unwrap();
     assert_eq!(
-        surface
-            .minimum_energy_direction_field(
-                NonZeroU32::new(2).unwrap(),
-                &metric,
-                &harmonic,
-                &cycles,
-                &invalid,
-                &[],
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap_err()
-            .solve(),
+        solve(
+            NonZeroU32::new(2).unwrap(),
+            &invalid,
+            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+        )
+        .unwrap_err()
+        .solve(),
         Some(SolveError::ProblemMismatch)
     );
     let requested = charge_space
-        .element([(0, BigInt::from(1)), (1, BigInt::from(1))])
+        .element([(0, 1.into()), (1, 1.into())])
         .unwrap();
     assert_eq!(
-        surface
-            .minimum_energy_direction_field(
-                NonZeroU32::MIN,
-                &metric,
-                &harmonic,
-                &cycles,
-                &requested,
-                &[],
-                0.0,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(0, 0).unwrap(),
-                WorkLimit::new(u64::MAX),
-                &CancellationToken::new(),
-            )
-            .unwrap_err()
-            .solve(),
+        solve(
+            NonZeroU32::MIN,
+            &requested,
+            StorageLimit::new(0, 0).unwrap(),
+        )
+        .unwrap_err()
+        .solve(),
         Some(SolveError::ResourceLimit)
     );
 }
