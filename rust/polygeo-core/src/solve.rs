@@ -1471,14 +1471,29 @@ impl TriangleSurface {
         work: WorkLimit,
         cancellation: &CancellationToken,
     ) -> Result<FaceDirectionField, SurfaceComputationError> {
+        if !Arc::ptr_eq(metric.realization(), self.realization()) {
+            return Err(SolveError::ProblemMismatch.into());
+        }
+        let topology = self.realization().topology();
+        topology.refine_connected().map_err(SurfaceError::from)?;
+        topology
+            .refine_regular()
+            .map_err(SurfaceError::from)?
+            .with_boundary()
+            .map_err(SurfaceError::from)?;
+        require_boundary_direction_field_resources(
+            self.face_count(),
+            self.edge_count(),
+            storage,
+            work,
+        )?;
+        check_cancelled(cancellation)?;
         boundary_aligned_direction_field(
             self,
             symmetry_order,
             metric,
             boundary_angle_offset,
             *executor,
-            storage,
-            work,
             cancellation,
         )
     }
@@ -1588,36 +1603,299 @@ fn solve_weighted_positive_system(
         .ok_or(SolveError::Numerical)
 }
 
+fn relative_max_residual(gradient: &[f64], scale: f64) -> Result<f64, SolveError> {
+    let error = gradient.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let residual = if scale == 0.0 { error } else { error / scale };
+    residual
+        .is_finite()
+        .then_some(residual)
+        .ok_or(SolveError::Numerical)
+}
+
+fn certified_connection_angle(
+    transport: [f64; 2],
+    source: [f64; 2],
+    target: [f64; 2],
+    antipodal_limit: f64,
+) -> Result<f64, SurfaceError> {
+    let expected = complex_multiply(transport, source);
+    let mismatch = normalize_complex(complex_multiply(target, complex_conjugate(expected)))?;
+    let angle = mismatch[1].atan2(mismatch[0]);
+    if std::f64::consts::PI - angle.abs() <= antipodal_limit {
+        return Err(SurfaceError::Unrepresentable);
+    }
+    Ok(angle)
+}
+
 #[expect(
     clippy::too_many_arguments,
-    clippy::too_many_lines,
-    reason = "one atomic computation keeps both temporary factors and their lift certificate local"
+    reason = "one edge contribution keeps its mathematical rows and output buffers explicit"
 )]
+fn add_relaxed_edge(
+    positions: &[Option<usize>],
+    directions: &[f64],
+    source: usize,
+    target: usize,
+    transport: [f64; 2],
+    weight: f64,
+    scale: f64,
+    triplets: &mut Vec<Triplet<usize, usize, f64>>,
+    values: &mut [f64],
+) -> Result<(), SurfaceError> {
+    let rotation = [[transport[0], -transport[1]], [transport[1], transport[0]]];
+    match (positions[source], positions[target]) {
+        (Some(source), Some(target)) => {
+            for (target_axis, row) in rotation.iter().enumerate() {
+                for (source_axis, &coefficient) in row.iter().enumerate() {
+                    triplets.push(Triplet::new(
+                        2 * source + source_axis,
+                        2 * target + target_axis,
+                        -weight * coefficient / scale,
+                    ));
+                    triplets.push(Triplet::new(
+                        2 * target + target_axis,
+                        2 * source + source_axis,
+                        -weight * coefficient / scale,
+                    ));
+                }
+            }
+        }
+        (Some(source), None) => {
+            let target = complex_at(directions, target)?;
+            let value = complex_multiply(complex_conjugate(transport), target);
+            values[2 * source] += weight * value[0];
+            values[2 * source + 1] += weight * value[1];
+        }
+        (None, Some(target)) => {
+            let source = complex_at(directions, source)?;
+            let value = complex_multiply(transport, source);
+            values[2 * target] += weight * value[0];
+            values[2 * target + 1] += weight * value[1];
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+impl TriangleSurface {
+    fn relaxed_boundary_extension(
+        &self,
+        levi_civita: &SurfaceConnection,
+        powered_base: (NonZeroU32, &[f64]),
+        weights: &[f64],
+        free_rows: (&[usize], &[Option<usize>], &[f64]),
+        directions: &mut [f64],
+        execution: (NativeExecutor, &CancellationToken),
+    ) -> Result<(), SurfaceComputationError> {
+        let (executor, cancellation) = execution;
+        let (_, levi_civita_power) = powered_base;
+        let (free, positions, diagonal) = free_rows;
+        let interior_edges = levi_civita.interior_edges.as_ref();
+        let dual = dual_edges(self.realization().topology())?;
+        let scale = diagonal.iter().copied().fold(0.0_f64, f64::max);
+        if !diagonal.is_empty() && (!scale.is_finite() || scale <= 0.0) {
+            return Err(SolveError::Factorization.into());
+        }
+        let rank = 2 * free.len();
+        let mut triplets =
+            Vec::with_capacity(rank.saturating_add(interior_edges.len().saturating_mul(8)));
+        for (position, &value) in diagonal.iter().enumerate() {
+            for axis in 0..2 {
+                triplets.push(Triplet::new(
+                    2 * position + axis,
+                    2 * position + axis,
+                    value / scale,
+                ));
+            }
+        }
+        let mut relaxed = vec![0.0_f64; rank];
+        for (row, (&edge, &weight)) in interior_edges.iter().zip(weights).enumerate() {
+            let (source, target, _) = dual.edge(edge)?;
+            add_relaxed_edge(
+                positions,
+                directions,
+                source,
+                target,
+                complex_at(levi_civita_power, row)?,
+                weight,
+                scale,
+                &mut triplets,
+                &mut relaxed,
+            )?;
+        }
+        solve_weighted_positive_system(
+            rank,
+            &triplets,
+            scale,
+            &mut relaxed,
+            executor,
+            cancellation,
+        )?;
+        for (&face, value) in free.iter().zip(relaxed.chunks_exact(2)) {
+            directions[2 * face..2 * face + 2].copy_from_slice(value);
+        }
+
+        let mut gradient = vec![0.0_f64; rank];
+        let mut gradient_scale = 0.0_f64;
+        for (row, (&edge, &weight)) in interior_edges.iter().zip(weights).enumerate() {
+            let (source, target, _) = dual.edge(edge)?;
+            let transport = complex_at(levi_civita_power, row)?;
+            let expected = complex_multiply(transport, complex_at(directions, source)?);
+            let target_direction = complex_at(directions, target)?;
+            let difference = [
+                target_direction[0] - expected[0],
+                target_direction[1] - expected[1],
+            ];
+            gradient_scale = gradient_scale.max(weight * difference[0].abs());
+            gradient_scale = gradient_scale.max(weight * difference[1].abs());
+            if let Some(position) = positions[source] {
+                let difference = complex_multiply(complex_conjugate(transport), difference);
+                gradient[2 * position] -= weight * difference[0];
+                gradient[2 * position + 1] -= weight * difference[1];
+            }
+            if let Some(position) = positions[target] {
+                gradient[2 * position] += weight * difference[0];
+                gradient[2 * position + 1] += weight * difference[1];
+            }
+        }
+        if relative_max_residual(&gradient, gradient_scale)? > 1.0e-10 {
+            return Err(SolveError::Numerical.into());
+        }
+        let magnitude_scale = directions
+            .chunks_exact(2)
+            .map(|value| value[0].hypot(value[1]))
+            .fold(0.0_f64, f64::max);
+        let nonzero_limit = 4096.0
+            * f64::EPSILON
+            * f64::from(u32::try_from(self.face_count().max(1)).unwrap_or(u32::MAX))
+            * magnitude_scale.max(1.0);
+        for direction in directions.chunks_exact_mut(2) {
+            let magnitude = direction[0].hypot(direction[1]);
+            if magnitude <= nonzero_limit {
+                return Err(SolveError::Numerical.into());
+            }
+            direction.copy_from_slice(&normalize_complex([direction[0], direction[1]])?);
+        }
+        Ok(())
+    }
+
+    fn fixed_sector_deviations(
+        &self,
+        levi_civita: &SurfaceConnection,
+        powered_base: (NonZeroU32, &[f64]),
+        weights: &[f64],
+        free_rows: (&[usize], &[Option<usize>], &[f64]),
+        directions: &mut [f64],
+        execution: (NativeExecutor, &CancellationToken),
+    ) -> Result<Vec<f64>, SurfaceComputationError> {
+        let (executor, cancellation) = execution;
+        let (symmetry_order, levi_civita_power) = powered_base;
+        let (free, positions, diagonal) = free_rows;
+        let interior_edges = levi_civita.interior_edges.as_ref();
+        let dual = dual_edges(self.realization().topology())?;
+        let order = f64::from(symmetry_order.get());
+        let antipodal_limit = 256.0 * f64::EPSILON * order;
+        let scale = diagonal.iter().copied().fold(0.0_f64, f64::max);
+        let mut lifts = Vec::with_capacity(interior_edges.len());
+        for (row, &edge) in interior_edges.iter().enumerate() {
+            let (source, target, _) = dual.edge(edge)?;
+            lifts.push(certified_connection_angle(
+                complex_at(levi_civita_power, row)?,
+                complex_at(directions, source)?,
+                complex_at(directions, target)?,
+                antipodal_limit,
+            )?);
+        }
+
+        let mut triplets = Vec::with_capacity(
+            diagonal
+                .len()
+                .saturating_add(interior_edges.len().saturating_mul(2)),
+        );
+        for (position, &value) in diagonal.iter().enumerate() {
+            triplets.push(Triplet::new(position, position, value / scale));
+        }
+        let mut angles = vec![0.0_f64; free.len()];
+        for ((&edge, &weight), &lift) in interior_edges.iter().zip(weights).zip(&lifts) {
+            let (source, target, _) = dual.edge(edge)?;
+            if let Some(position) = positions[source] {
+                angles[position] += weight * lift;
+            }
+            if let Some(position) = positions[target] {
+                angles[position] -= weight * lift;
+            }
+            if let (Some(source), Some(target)) = (positions[source], positions[target]) {
+                triplets.push(Triplet::new(source, target, -weight / scale));
+                triplets.push(Triplet::new(target, source, -weight / scale));
+            }
+        }
+        solve_weighted_positive_system(
+            free.len(),
+            &triplets,
+            scale,
+            &mut angles,
+            executor,
+            cancellation,
+        )?;
+
+        let mut gradient = vec![0.0_f64; free.len()];
+        let mut gradient_scale = 0.0_f64;
+        let mut selected_lifts = Vec::with_capacity(interior_edges.len());
+        for ((&edge, &weight), &lift) in interior_edges.iter().zip(weights).zip(&lifts) {
+            let (source, target, _) = dual.edge(edge)?;
+            let source_angle = positions[source].map_or(0.0, |position| angles[position]);
+            let target_angle = positions[target].map_or(0.0, |position| angles[position]);
+            let selected = lift + target_angle - source_angle;
+            selected_lifts.push(selected);
+            gradient_scale = gradient_scale.max(weight * selected.abs());
+            if let Some(position) = positions[source] {
+                gradient[position] -= weight * selected;
+            }
+            if let Some(position) = positions[target] {
+                gradient[position] += weight * selected;
+            }
+        }
+        if relative_max_residual(&gradient, gradient_scale)? > 1.0e-10 {
+            return Err(SolveError::Numerical.into());
+        }
+        for (&face, &angle) in free.iter().zip(&angles) {
+            let correction = [angle.cos(), angle.sin()];
+            let direction = complex_multiply(complex_at(directions, face)?, correction);
+            directions[2 * face..2 * face + 2].copy_from_slice(&normalize_complex(direction)?);
+        }
+
+        let branch_limit = 8192.0 * f64::EPSILON * order;
+        let mut deviations = Vec::with_capacity(interior_edges.len());
+        for (row, (&edge, &selected)) in interior_edges.iter().zip(&selected_lifts).enumerate() {
+            if std::f64::consts::PI - selected.abs() <= antipodal_limit {
+                return Err(SurfaceError::Unrepresentable.into());
+            }
+            let (source, target, _) = dual.edge(edge)?;
+            let principal = certified_connection_angle(
+                complex_at(levi_civita_power, row)?,
+                complex_at(directions, source)?,
+                complex_at(directions, target)?,
+                antipodal_limit,
+            )?;
+            if (principal - selected).abs() > branch_limit {
+                return Err(SolveError::Numerical.into());
+            }
+            deviations.push(principal);
+        }
+        Ok(deviations)
+    }
+}
+
 fn boundary_aligned_direction_field(
     surface: &Arc<TriangleSurface>,
     symmetry_order: NonZeroU32,
     metric: &PositiveMetric,
     boundary_angle_offset: f64,
     executor: NativeExecutor,
-    storage: StorageLimit,
-    work: WorkLimit,
     cancellation: &CancellationToken,
 ) -> Result<FaceDirectionField, SurfaceComputationError> {
-    if !Arc::ptr_eq(metric.realization(), surface.realization()) {
-        return Err(SolveError::ProblemMismatch.into());
-    }
     let topology = surface.realization().topology();
-    topology.refine_connected().map_err(SurfaceError::from)?;
-    topology
-        .refine_regular()
-        .map_err(SurfaceError::from)?
-        .with_boundary()
-        .map_err(SurfaceError::from)?;
     let face_count = surface.face_count();
-    let edge_count = surface.edge_count();
-    require_boundary_direction_field_resources(face_count, edge_count, storage, work)?;
-    check_cancelled(cancellation)?;
-
     let (target_faces, target_directions) =
         surface.boundary_power_directions(symmetry_order, boundary_angle_offset)?;
     if target_directions.len() != target_faces.len().saturating_mul(2) {
@@ -1632,16 +1910,14 @@ fn boundary_aligned_direction_field(
         if std::mem::replace(boundary, true) {
             return Err(SolveError::Numerical.into());
         }
-        let direction = complex_at(&target_directions, row)?;
-        directions[2 * face..2 * face + 2].copy_from_slice(&direction);
+        directions[2 * face..2 * face + 2].copy_from_slice(&complex_at(&target_directions, row)?);
     }
     let free = boundary_faces
-        .iter()
+        .into_iter()
         .enumerate()
-        .filter_map(|(face, &boundary)| (!boundary).then_some(face))
+        .filter_map(|(face, boundary)| (!boundary).then_some(face))
         .collect::<Vec<_>>();
     let positions = selected_positions(face_count, &free)?;
-    drop(boundary_faces);
 
     let levi_civita = surface.levi_civita_connection()?;
     let interior_edges = levi_civita.interior_edges.as_ref();
@@ -1658,17 +1934,13 @@ fn boundary_aligned_direction_field(
         .hodge_coefficients_slice(1)
         .map_err(|_| SolveError::Numerical)?;
     let mut weights = Vec::with_capacity(interior_edges.len());
+    let mut diagonal = vec![0.0_f64; free.len()];
     for &edge in interior_edges {
-        let coefficient = *hodge.get(edge).ok_or(SolveError::Numerical)?;
-        let weight = 1.0 / coefficient;
+        let weight = 1.0 / *hodge.get(edge).ok_or(SolveError::Numerical)?;
         if !weight.is_finite() || weight <= 0.0 {
             return Err(SolveError::Numerical.into());
         }
         weights.push(weight);
-    }
-
-    let mut diagonal = vec![0.0_f64; free.len()];
-    for (&edge, &weight) in interior_edges.iter().zip(&weights) {
         let (source, target, _) = dual.edge(edge)?;
         if let Some(position) = positions[source] {
             diagonal[position] += weight;
@@ -1677,256 +1949,27 @@ fn boundary_aligned_direction_field(
             diagonal[position] += weight;
         }
     }
-    let scale = diagonal.iter().copied().fold(0.0_f64, f64::max);
-    if !free.is_empty() && (!scale.is_finite() || scale <= 0.0) {
-        return Err(SolveError::Factorization.into());
-    }
-
-    let relaxed_rank = free.len().saturating_mul(2);
-    let mut relaxed_triplets =
-        Vec::with_capacity(relaxed_rank.saturating_add(interior_edges.len().saturating_mul(8)));
-    for (position, &value) in diagonal.iter().enumerate() {
-        for axis in 0..2 {
-            relaxed_triplets.push(Triplet::new(
-                2 * position + axis,
-                2 * position + axis,
-                value / scale,
-            ));
-        }
-    }
-    let mut relaxed = vec![0.0_f64; relaxed_rank];
-    for (row, (&edge, &weight)) in interior_edges.iter().zip(&weights).enumerate() {
-        let (source, target, _) = dual.edge(edge)?;
-        let transport = complex_at(&levi_civita_power, row)?;
-        let rotation = [[transport[0], -transport[1]], [transport[1], transport[0]]];
-        match (positions[source], positions[target]) {
-            (Some(source_position), Some(target_position)) => {
-                for (target_axis, rotation_row) in rotation.iter().enumerate() {
-                    for (source_axis, &coefficient) in rotation_row.iter().enumerate() {
-                        relaxed_triplets.push(Triplet::new(
-                            2 * source_position + source_axis,
-                            2 * target_position + target_axis,
-                            -weight * coefficient / scale,
-                        ));
-                        relaxed_triplets.push(Triplet::new(
-                            2 * target_position + target_axis,
-                            2 * source_position + source_axis,
-                            -weight * coefficient / scale,
-                        ));
-                    }
-                }
-            }
-            (Some(source_position), None) => {
-                let target_direction = complex_at(&directions, target)?;
-                for (target_axis, rotation_row) in rotation.iter().enumerate() {
-                    for (source_axis, &coefficient) in rotation_row.iter().enumerate() {
-                        relaxed[2 * source_position + source_axis] +=
-                            weight * coefficient * target_direction[target_axis];
-                    }
-                }
-            }
-            (None, Some(target_position)) => {
-                let source_direction = complex_at(&directions, source)?;
-                for (target_axis, rotation_row) in rotation.iter().enumerate() {
-                    for (source_axis, &coefficient) in rotation_row.iter().enumerate() {
-                        relaxed[2 * target_position + target_axis] +=
-                            weight * coefficient * source_direction[source_axis];
-                    }
-                }
-            }
-            (None, None) => {}
-        }
-    }
-    solve_weighted_positive_system(
-        relaxed_rank,
-        &relaxed_triplets,
-        scale,
-        &mut relaxed,
-        executor,
-        cancellation,
+    let powered_base = (symmetry_order, levi_civita_power.as_slice());
+    let free_rows = (free.as_slice(), positions.as_slice(), diagonal.as_slice());
+    surface.relaxed_boundary_extension(
+        &levi_civita,
+        powered_base,
+        &weights,
+        free_rows,
+        &mut directions,
+        (executor, cancellation),
     )?;
-    for (&face, value) in free.iter().zip(relaxed.chunks_exact(2)) {
-        directions[2 * face..2 * face + 2].copy_from_slice(value);
-    }
-
-    let mut relaxed_gradient = vec![0.0_f64; relaxed_rank];
-    let mut relaxed_scale = 0.0_f64;
-    for (row, (&edge, &weight)) in interior_edges.iter().zip(&weights).enumerate() {
-        let (source, target, _) = dual.edge(edge)?;
-        let transport = complex_at(&levi_civita_power, row)?;
-        let source_direction = complex_at(&directions, source)?;
-        let target_direction = complex_at(&directions, target)?;
-        let expected = complex_multiply(transport, source_direction);
-        let difference = [
-            target_direction[0] - expected[0],
-            target_direction[1] - expected[1],
-        ];
-        relaxed_scale = relaxed_scale.max(weight * difference[0].abs());
-        relaxed_scale = relaxed_scale.max(weight * difference[1].abs());
-        if let Some(position) = positions[source] {
-            relaxed_gradient[2 * position] -=
-                weight * (transport[0] * difference[0] + transport[1] * difference[1]);
-            relaxed_gradient[2 * position + 1] -=
-                weight * (-transport[1] * difference[0] + transport[0] * difference[1]);
-        }
-        if let Some(position) = positions[target] {
-            relaxed_gradient[2 * position] += weight * difference[0];
-            relaxed_gradient[2 * position + 1] += weight * difference[1];
-        }
-    }
-    let relaxed_error = relaxed_gradient
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0, f64::max);
-    let relaxed_residual = if relaxed_scale == 0.0 {
-        relaxed_error
-    } else {
-        relaxed_error / relaxed_scale
-    };
-    if !relaxed_residual.is_finite() || relaxed_residual > 1.0e-10 {
-        return Err(SolveError::Numerical.into());
-    }
-
-    let magnitude_scale = directions
-        .chunks_exact(2)
-        .map(|value| value[0].hypot(value[1]))
-        .fold(0.0_f64, f64::max);
-    let nonzero_limit = 4096.0
-        * f64::EPSILON
-        * f64::from(u32::try_from(face_count.max(1)).unwrap_or(u32::MAX))
-        * magnitude_scale.max(1.0);
-    for direction in directions.chunks_exact_mut(2) {
-        let normalized = normalize_complex([direction[0], direction[1]])?;
-        if direction[0].hypot(direction[1]) <= nonzero_limit {
-            return Err(SolveError::Numerical.into());
-        }
-        direction.copy_from_slice(&normalized);
-    }
-    drop(relaxed_triplets);
-    drop(relaxed);
-    drop(relaxed_gradient);
-
-    let order = f64::from(symmetry_order.get());
-    let antipodal_limit = 256.0 * f64::EPSILON * order;
-    let mut lifts = Vec::with_capacity(interior_edges.len());
-    for (row, &edge) in interior_edges.iter().enumerate() {
-        let (source, target, _) = dual.edge(edge)?;
-        let expected = complex_multiply(
-            complex_at(&levi_civita_power, row)?,
-            complex_at(&directions, source)?,
-        );
-        let mismatch = complex_multiply(
-            complex_at(&directions, target)?,
-            complex_conjugate(expected),
-        );
-        let angle = mismatch[1].atan2(mismatch[0]);
-        if std::f64::consts::PI - angle.abs() <= antipodal_limit {
-            return Err(SurfaceError::Unrepresentable.into());
-        }
-        lifts.push(angle);
-    }
-
-    let mut angle_triplets = Vec::with_capacity(
-        free.len()
-            .saturating_add(interior_edges.len().saturating_mul(2)),
-    );
-    for (position, &value) in diagonal.iter().enumerate() {
-        angle_triplets.push(Triplet::new(position, position, value / scale));
-    }
-    let mut angles = vec![0.0_f64; free.len()];
-    for ((&edge, &weight), &lift) in interior_edges.iter().zip(&weights).zip(&lifts) {
-        let (source, target, _) = dual.edge(edge)?;
-        if let Some(position) = positions[source] {
-            angles[position] += weight * lift;
-        }
-        if let Some(position) = positions[target] {
-            angles[position] -= weight * lift;
-        }
-        if let (Some(source_position), Some(target_position)) =
-            (positions[source], positions[target])
-        {
-            angle_triplets.push(Triplet::new(
-                source_position,
-                target_position,
-                -weight / scale,
-            ));
-            angle_triplets.push(Triplet::new(
-                target_position,
-                source_position,
-                -weight / scale,
-            ));
-        }
-    }
-    solve_weighted_positive_system(
-        free.len(),
-        &angle_triplets,
-        scale,
-        &mut angles,
-        executor,
-        cancellation,
+    let deviations = surface.fixed_sector_deviations(
+        &levi_civita,
+        powered_base,
+        &weights,
+        free_rows,
+        &mut directions,
+        (executor, cancellation),
     )?;
-
-    let mut angle_gradient = vec![0.0_f64; free.len()];
-    let mut angle_scale = 0.0_f64;
-    for ((&edge, &weight), &lift) in interior_edges.iter().zip(&weights).zip(&lifts) {
-        let (source, target, _) = dual.edge(edge)?;
-        let source_angle = positions[source].map_or(0.0, |position| angles[position]);
-        let target_angle = positions[target].map_or(0.0, |position| angles[position]);
-        let deviation = lift + target_angle - source_angle;
-        angle_scale = angle_scale.max(weight * deviation.abs());
-        if let Some(position) = positions[source] {
-            angle_gradient[position] -= weight * deviation;
-        }
-        if let Some(position) = positions[target] {
-            angle_gradient[position] += weight * deviation;
-        }
-    }
-    let angle_error = angle_gradient
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0, f64::max);
-    let angle_residual = if angle_scale == 0.0 {
-        angle_error
-    } else {
-        angle_error / angle_scale
-    };
-    if !angle_residual.is_finite() || angle_residual > 1.0e-10 {
-        return Err(SolveError::Numerical.into());
-    }
-    drop(angle_triplets);
-    drop(angle_gradient);
-
-    for (&face, &angle) in free.iter().zip(&angles) {
-        let correction = [angle.cos(), angle.sin()];
-        let direction = complex_multiply(complex_at(&directions, face)?, correction);
-        directions[2 * face..2 * face + 2].copy_from_slice(&normalize_complex(direction)?);
-    }
-    let mut deviations = Vec::with_capacity(interior_edges.len());
-    for (row, (&edge, &lift)) in interior_edges.iter().zip(&lifts).enumerate() {
-        let (source, target, _) = dual.edge(edge)?;
-        let source_angle = positions[source].map_or(0.0, |position| angles[position]);
-        let target_angle = positions[target].map_or(0.0, |position| angles[position]);
-        let lifted = lift + target_angle - source_angle;
-        if std::f64::consts::PI - lifted.abs() <= antipodal_limit {
-            return Err(SurfaceError::Unrepresentable.into());
-        }
-        let expected = complex_multiply(
-            complex_at(&levi_civita_power, row)?,
-            complex_at(&directions, source)?,
-        );
-        let mismatch = complex_multiply(
-            complex_at(&directions, target)?,
-            complex_conjugate(expected),
-        );
-        let principal = mismatch[1].atan2(mismatch[0]);
-        let branch_limit = 8192.0 * f64::EPSILON * order;
-        if (principal - lifted).abs() > branch_limit {
-            return Err(SolveError::Numerical.into());
-        }
-        deviations.push(principal);
-    }
 
     check_cancelled(cancellation)?;
+    let order = f64::from(symmetry_order.get());
     let anchor = complex_at(&directions, 0)?;
     let anchor_angle = anchor[1].atan2(anchor[0]) / order;
     let field = levi_civita
