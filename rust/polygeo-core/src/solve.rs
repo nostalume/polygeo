@@ -925,15 +925,7 @@ fn project_harmonic_seeds(
         .codifferential(1)
         .map_err(|_| SolveError::Numerical)?;
     let vertex_riesz = metric.riesz(0).map_err(|_| SolveError::Numerical)?;
-    let mut seed_values = Vec::new();
-    seed_values
-        .try_reserve_exact(rank)
-        .map_err(|_| SolveError::Allocation)?;
-    let mut problems = Vec::new();
-    problems
-        .try_reserve_exact(rank)
-        .map_err(|_| SolveError::Allocation)?;
-    for index in 0..rank {
+    let make_seed_problem = |index| -> Result<_, SolveError> {
         let exact = seeds.cocycle(index).ok_or(SolveError::Numerical)?;
         let seed = Binary64Element::realize_integral(edge_space.clone(), exact)
             .map_err(|_| SolveError::Numerical)?;
@@ -946,19 +938,22 @@ fn project_harmonic_seeds(
         let problem = metric
             .mean_zero_poisson_load(load)
             .map_err(|_| SolveError::Numerical)?;
-        seed_values.push(seed);
-        problems.push(problem);
-    }
+        Ok((seed, problem))
+    };
+    let first = make_seed_problem(0)?;
     let prepared =
-        problems[0].prepare_with_cancellation(&executor, internal_storage, work, cancellation)?;
+        first
+            .1
+            .prepare_with_cancellation(&executor, internal_storage, work, cancellation)?;
     let mut harmonic_seeds = Vec::new();
     harmonic_seeds
         .try_reserve_exact(rank)
         .map_err(|_| SolveError::Allocation)?;
-    for (seed, problem) in seed_values.iter().zip(&problems) {
+    for pair in std::iter::once(Ok(first)).chain((1..rank).map(make_seed_problem)) {
+        let (seed, problem) = pair?;
         check_cancelled(cancellation)?;
-        let mut workspace = prepared.workspace_for(problem, internal_storage)?;
-        let solution = prepared.solve_cancellable(problem, &mut workspace, work, cancellation)?;
+        let mut workspace = prepared.workspace_for(&problem, internal_storage)?;
+        let solution = prepared.solve_cancellable(&problem, &mut workspace, work, cancellation)?;
         let exact = solution
             .potential()
             .exterior_derivative()
