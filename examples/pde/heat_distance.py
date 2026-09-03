@@ -314,6 +314,9 @@ def _(TriangleSurface, np):
         masses = metric.hodge_coefficients_numpy_copy(0)
         initial = np.zeros(geometry.topology.vertex_count, dtype=np.float64)
         initial[source_indices] = 1.0 / (source_indices.size * masses[source_indices])
+        impulse_mass_error = abs(float(masses @ initial) - 1.0)
+        if impulse_mass_error > 16.0 * np.finfo(np.float64).eps:
+            raise RuntimeError("heat impulse does not have unit integrated mass")
 
         edge_lengths = geometry.primal_measures_numpy_copy(1)
         length_scale = np.max(edge_lengths)
@@ -328,8 +331,22 @@ def _(TriangleSurface, np):
             heat_problem, heat_prepared.workspace_for(heat_problem)
         )
 
-        inward_direction = surface.gradient(heat.value).normalized()
+        heat_gradient = surface.gradient(heat.value)
+        heat_gradient_lengths = np.linalg.norm(
+            heat_gradient.values_numpy_copy(), axis=1
+        )
+        if not np.all(np.isfinite(heat_gradient_lengths)) or np.any(
+            heat_gradient_lengths == 0.0
+        ):
+            raise RuntimeError("heat gradient has no defined face direction")
+        inward_direction = heat_gradient.normalized()
         poisson_load = surface.divergence(inward_direction)
+        poisson_load_values = poisson_load.coefficients_numpy_copy()
+        poisson_compatibility_error = abs(float(np.sum(poisson_load_values))) / max(
+            float(np.sum(np.abs(poisson_load_values))), 1.0
+        )
+        if poisson_compatibility_error > 128.0 * np.finfo(np.float64).eps:
+            raise RuntimeError("integrated divergence load is incompatible")
         poisson_problem = metric.mean_zero_poisson_load(poisson_load)
         poisson_prepared = poisson_problem.prepare()
         poisson = poisson_prepared.solve(
@@ -345,6 +362,9 @@ def _(TriangleSurface, np):
         evidence = {
             "mean_edge_length": float(mean_edge_length),
             "time_step": float(time_step),
+            "impulse_mass_error": impulse_mass_error,
+            "minimum_heat_gradient_norm": float(np.min(heat_gradient_lengths)),
+            "poisson_compatibility_error": poisson_compatibility_error,
             "heat_residual_bound": heat.residual_bound,
             "poisson_residual_bound": poisson.residual_bound,
             "mean_eikonal_defect": float(np.mean(np.abs(gradient_lengths - 1.0))),
@@ -398,6 +418,11 @@ def _(heat_method_distance, icosphere, np):
         raise RuntimeError("heat-method error exceeds the sphere-study bound")
     if fine_evidence["mean_eikonal_defect"] > 0.04:
         raise RuntimeError("heat-method eikonal defect exceeds the study bound")
+    if any(
+        max(row["heat_residual_bound"], row["poisson_residual_bound"]) > 1.0e-10
+        for row in study_rows
+    ):
+        raise RuntimeError("a linear solve exceeds the study residual bound")
 
     finest_geometry, finest_distance = study_outputs[-1]
     return finest_distance, finest_geometry, study_rows
@@ -408,6 +433,9 @@ def _(mo, study_rows):
     solve_rows = "\n".join(
         f"| {int(row['subdivision'])} | {int(row['vertex_count'])} | "
         f"`{row['mean_edge_length']:.4f}` | `{row['time_step']:.4f}` | "
+        f"`{row['impulse_mass_error']:.1e}` | "
+        f"`{row['minimum_heat_gradient_norm']:.3e}` | "
+        f"`{row['poisson_compatibility_error']:.1e}` | "
         f"`{row['heat_residual_bound']:.3e}` | "
         f"`{row['poisson_residual_bound']:.3e}` |"
         for row in study_rows
@@ -419,16 +447,17 @@ def _(mo, study_rows):
         f"`{row['mean_eikonal_defect']:.4f}` |"
         for row in study_rows
     )
-    mo.md(f"""
+    mo.md(rf"""
     ## Evidence
 
-    Each row comes from one completed operator composition. Residual bounds are
-    algebraic certificates; the final three columns are geometric diagnostics.
+    Each row comes from one completed operator composition. Impulse, compatibility,
+    and residual entries are algebraic evidence; the gradient minimum and the final
+    three columns are geometric evidence.
 
     ### Scale and solve certificates
 
-    | Level | Vertices | Mean edge $h$ | $t=h^2$ | Heat residual | Poisson residual |
-    |---:|---:|---:|---:|---:|---:|
+    | Level | Vertices | Mean edge $h$ | $t=h^2$ | Impulse mass error | Min $\lVert\nabla u\rVert$ | Load compatibility | Heat residual | Poisson residual |
+    |---:|---:|---:|---:|---:|---:|---:|---:|---:|
     {solve_rows}
 
     ### Geometric diagnostics
@@ -437,6 +466,8 @@ def _(mo, study_rows):
     |---:|---:|---:|---:|
     {geometry_rows}
 
+    The first table checks every semantic handoff: unit integrated impulse,
+    defined face directions, compatible Poisson load, and both linear solves.
     Both spherical-error summaries and the mean Eikonal defect are smaller on the
     finer mesh. This is the observed behavior of these two fixed experiments, not
     a claim of monotone convergence for arbitrary meshes or time-step choices.
