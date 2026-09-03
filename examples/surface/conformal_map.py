@@ -312,6 +312,22 @@ def _(Geometry, TriangleSurface, disk, np):
         first_target_edge[:, 0] * second_target_edge[:, 1]
         - first_target_edge[:, 1] * second_target_edge[:, 0]
     )
+    residual_limit = 5.0e-4
+    condition_limit = 12.0
+    if solution.observed_rank != solution.required_rank:
+        raise RuntimeError("anchored LSCM system is rank deficient")
+    if not (
+        np.isfinite(solution.residual_bound)
+        and 0.0 <= solution.residual_bound <= residual_limit
+    ):
+        raise RuntimeError("LSCM residual exceeds the fixed-study limit")
+    if not (
+        np.isfinite(solution.condition_indicator)
+        and 1.0 <= solution.condition_indicator <= condition_limit
+    ):
+        raise RuntimeError("LSCM condition estimate exceeds the fixed-study limit")
+    if not solution.minimum_normalized_signed_twice_area > 0.0:
+        raise RuntimeError("certified LSCM orientation witness is nonpositive")
     if not np.all(signed_twice_area > 0.0):
         raise RuntimeError("LSCM target contains a nonpositive oriented face")
     np.testing.assert_array_equal(mapped[list(anchors)], [[0.0, 0.0], [1.0, 0.0]])
@@ -328,7 +344,9 @@ def _(Geometry, TriangleSurface, disk, np):
         "required_rank": solution.required_rank,
         "observed_rank": solution.observed_rank,
         "condition_indicator": solution.condition_indicator,
+        "condition_limit": condition_limit,
         "normalized_conformality_residual": solution.residual_bound,
+        "residual_limit": residual_limit,
         "minimum_native_normalized_signed_twice_area": (
             solution.minimum_normalized_signed_twice_area
         ),
@@ -355,16 +373,18 @@ def _(conformal_map_evidence, mo):
     | Anchor vertex identities | {conformal_map_evidence["anchors"]} | Fixed to $(0,0)$ and $(1,0)$ |
     | Anchor squared source separation | {conformal_map_evidence["anchor_squared_separation"]:.6f} | Maximum among the unordered boundary pairs |
     | Numerical / expected rank | {conformal_map_evidence["observed_rank"]} / {conformal_map_evidence["required_rank"]} | Full reduced column rank detected |
-    | Normalized conformality residual | {conformal_map_evidence["normalized_conformality_residual"]:.6e} | Small, but not zero, discrete CR mismatch |
-    | Condition indicator | {conformal_map_evidence["condition_indicator"]:.6f} | Distinct from approximation error |
+    | Normalized conformality residual | {conformal_map_evidence["normalized_conformality_residual"]:.6e} | At most the declared fixed-study limit {conformal_map_evidence["residual_limit"]:.1e} |
+    | Condition indicator | {conformal_map_evidence["condition_indicator"]:.6f} | At most the declared fixed-study limit {conformal_map_evidence["condition_limit"]:.1f}; distinct from approximation error |
     | Minimum certified normalized signed twice-area | {conformal_map_evidence["minimum_native_normalized_signed_twice_area"]:.6e} | Dimensionless robust orientation witness |
     | Minimum independent raw signed twice-area | {conformal_map_evidence["minimum_independent_signed_twice_area"]:.6e} | Positive; units are target length squared |
     | Exact-predicate fallback faces | {conformal_map_evidence["exact_fallback_faces"]} | No ambiguous sign required exact resolution here |
 
     The two anchor positions were also checked for exact equality after
-    reconstruction. Full rank removes the anchored linear nullspace; the residual
-    quantifies the remaining least-squares mismatch; and the two positive area
-    minima independently support local orientation preservation.
+    reconstruction. The limits above are regression gates for this deterministic
+    fixture, with headroom over its characterized values; they are not universal
+    conformality criteria. Full rank removes the anchored linear nullspace, the
+    residual quantifies the remaining least-squares mismatch, and the two positive
+    area minima independently support local orientation preservation.
     """)
     return
 
