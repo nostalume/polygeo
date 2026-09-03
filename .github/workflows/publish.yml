@@ -1,0 +1,165 @@
+name: Release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Optional vX.Y.Z candidate to validate (dry-run only)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-and-sdist:
+    name: Source and sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup
+        with: { sync: "false" }
+      - name: Require synchronized versions and an exact candidate tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          uv run --no-project python - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+
+          paths = [Path("pyproject.toml"), Path("rust/polygeo-core/Cargo.toml"), Path("rust/polygeo-py/Cargo.toml")]
+          documents = [tomllib.loads(path.read_text(encoding="utf-8")) for path in paths]
+          versions = [documents[0]["project"]["version"], *(document["package"]["version"] for document in documents[1:])]
+          if len(set(versions)) != 1:
+              raise SystemExit(f"package versions differ: {versions}")
+          tag = os.environ["RELEASE_TAG"]
+          if tag and (not re.fullmatch(r"v\d+\.\d+\.\d+", tag) or tag[1:] != versions[0]):
+              raise SystemExit(f"tag {tag!r} does not match version {versions[0]!r}")
+          print(f"verified package version {versions[0]}")
+          PY
+      - name: Dry-run the public Rust crate package
+        run: cargo publish --dry-run --locked --registry crates-io --manifest-path rust/polygeo-core/Cargo.toml
+      - name: Build, inspect, and smoke-test the source distribution
+        shell: bash
+        run: |
+          shopt -s nullglob
+          uv build --sdist --out-dir dist
+          sdists=(dist/*.tar.gz)
+          test "${#sdists[@]}" -eq 1
+          tar -tzf "${sdists[0]}" > "$RUNNER_TEMP/sdist-contents.txt"
+          for required in rust/polygeo-core/README.md rust/polygeo-core/LICENSE rust/polygeo-py/src/array.rs; do
+            grep -q "$required" "$RUNNER_TEMP/sdist-contents.txt"
+          done
+          for module in topology chain form geometry solve field plot mesh; do
+            grep -q "src/polygeo/${module}.py" "$RUNNER_TEMP/sdist-contents.txt"
+          done
+          ! grep -Eq 'rust/polygeo-py/src/(registration|shared)\.rs' "$RUNNER_TEMP/sdist-contents.txt"
+          uv run --isolated --no-project --python 3.14 --with "${sdists[0]}" python -I tests/installed_artifact.py base
+          uv run --isolated --no-project --python 3.14 --with "${sdists[0]}[mesh,plot]" python -I tests/installed_artifact.py extras
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: release-sdist, path: "dist/*.tar.gz", if-no-files-found: error, retention-days: 1 }
+
+  wheels:
+    name: Wheel (${{ matrix.label }})
+    needs: source-and-sdist
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, label: linux-x86_64, target: x86_64, manylinux: "2_28", interpreter: python3.14 }
+          - { os: windows-latest, label: windows-x86_64, target: x86_64-pc-windows-msvc, manylinux: "off", interpreter: python }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup
+        with: { sync: "false" }
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          maturin-version: v1.14.1
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --compatibility pypi --out dist -i ${{ matrix.interpreter }}
+          rust-toolchain: 1.97.1
+      - name: Smoke-test the exact wheel
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          uv run --isolated --no-project --python 3.14 --with "${wheels[0]}" python -I tests/installed_artifact.py base
+          uv run --isolated --no-project --python 3.14 --with "${wheels[0]}[mesh,plot]" python -I tests/installed_artifact.py extras
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "release-${{ matrix.label }}", path: "dist/*.whl", if-no-files-found: error, retention-days: 1 }
+
+  distributions:
+    name: Verified distributions
+    needs: [source-and-sdist, wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup
+        with: { sync: "false" }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { pattern: "release-*", path: incoming }
+      - name: Reject missing, duplicate, or unexpected distributions
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mapfile -t files < <(find incoming -type f)
+          test "${#files[@]}" -eq 3
+          mapfile -t names < <(printf '%s\n' "${files[@]##*/}" | sort -u)
+          test "${#names[@]}" -eq 3
+          mkdir dist
+          cp "${files[@]}" dist/
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          linux=(dist/*manylinux_2_28_x86_64.whl)
+          windows=(dist/*win_amd64.whl)
+          test "${#wheels[@]}" -eq 2
+          test "${#sdists[@]}" -eq 1
+          test "${#linux[@]}" -eq 1
+          test "${#windows[@]}" -eq 1
+          uv tool run --from twine==7.0.0 twine check dist/*
+          sha256sum dist/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: python-distributions, path: "dist/*", if-no-files-found: error, retention-days: 1 }
+
+  publish-core:
+    name: Dormant crates.io publisher
+    if: github.event_name == 'push' # No push trigger until a separately approved activation.
+    needs: distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: crates-io
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with: { toolchain: 1.97.1 }
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - run: cargo publish --locked --registry crates-io --manifest-path rust/polygeo-core/Cargo.toml
+        env: { CARGO_REGISTRY_TOKEN: "${{ steps.auth.outputs.token }}" }
+
+  publish-pypi:
+    name: Dormant PyPI publisher
+    if: github.event_name == 'push' # No push trigger until a separately approved activation.
+    needs: distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: { name: pypi, url: "https://pypi.org/p/polygeo" }
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: python-distributions, path: dist }
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with: { packages-dir: dist/ }
