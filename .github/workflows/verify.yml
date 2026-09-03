@@ -74,8 +74,15 @@ jobs:
           unzip -Z1 "$wheel" | tee "${RUNNER_TEMP}/wheel-contents.txt"
           tar -tzf "$sdist" | tee "${RUNNER_TEMP}/sdist-contents.txt"
           grep -Eq 'polygeo/_polygeo_native.*\.(so|pyd)$' "${RUNNER_TEMP}/wheel-contents.txt"
-          grep -q 'rust/polygeo-py/src/registration.rs' "${RUNNER_TEMP}/sdist-contents.txt"
-          for retired in algorithms geometry operators solvers surface systems; do
+          grep -q 'rust/polygeo-py/src/array.rs' "${RUNNER_TEMP}/sdist-contents.txt"
+          for module in topology chain form geometry solve field plot mesh; do
+            grep -q "polygeo/${module}.py" "${RUNNER_TEMP}/wheel-contents.txt"
+            grep -q "src/polygeo/${module}.py" "${RUNNER_TEMP}/sdist-contents.txt"
+          done
+          for retired in registration shared; do
+            ! grep -q "rust/polygeo-py/src/${retired}.rs" "${RUNNER_TEMP}/sdist-contents.txt"
+          done
+          for retired in algorithms operators solvers surface systems plotting; do
             ! grep -q "polygeo/${retired}.py" "${RUNNER_TEMP}/wheel-contents.txt"
             ! grep -q "src/polygeo/${retired}.py" "${RUNNER_TEMP}/sdist-contents.txt"
           done

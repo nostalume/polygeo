@@ -9,8 +9,8 @@ and triangle-surface geometry.
 ```text
 input arrays or optional mesh
   -> native topology owner
-  -> exact Z/Q spaces or binary64 spaces
-  -> realization and metric
+  -> exact Z/Q chain spaces or binary64 form spaces
+  -> geometry and metric
   -> operator or problem
   -> prepared problem + workspace
   -> native result
@@ -18,10 +18,9 @@ input arrays or optional mesh
 ```
 
 Mathematical and computational roles are separate semantic layers, not
-parallel data structures. Full and selected bases are both `Binary64Space`;
-chain/cochain values are both `Binary64Element`; every represented binary64
-map is `LinearOperator`. Runtime names `Binary64Chain` and `Binary64Cochain` are
-aliases of the same element class.
+parallel data structures. Full and selected bases are both `form.Space`;
+chain/cochain values are both `form.Element`; every represented binary64 map is
+`form.Operator`.
 
 ## Ownership
 
@@ -29,14 +28,15 @@ aliases of the same element class.
 |---|---|
 | `rust/polygeo-core` | Mathematical authority: topology, exact algebra, realizations, binary64 spaces and maps, problems, solvers, and surface algorithms. |
 | `rust/polygeo-py` | Direct native Python carriers, including topology/subset admission, classified failures, GIL release, and explicit copied projections. |
-| root namespace and native stub | Direct exact-algebra and homology exports with their generic static relationships; no runtime alias modules. |
-| native `HalfedgeSurface` / `SurfaceCorrespondence` | Halfedge admission, topology, conversion witnesses, and fresh caller-owned CSR projections. |
+| `polygeo` package | Eight contextual module objects only: `topology`, `chain`, `form`, `geometry`, `solve`, `field`, `plot`, and `mesh`. |
+| native `HalfedgeSurface` / `ChainIsomorphism` | Halfedge admission, topology, direct ordered conversion witnesses, and fresh caller-owned projections. |
 | `mesh.py` | Lazy Trimesh input effect; it immediately admits copied topology and realization owners. |
-| `plotting.py` | Lazy Plotly snapshot adapter; it owns presentation only. |
-| `__init__.py` | Explicit public exports, including identity re-exports of the two optional leaves. |
+| `plot.py` | Lazy Plotly snapshot adapter; it owns presentation only. |
+| `__init__.py` | Imports the eight contextual modules without re-exporting their members. |
 
 Native handles retain only the owners required by their mathematical identity;
-a surface correspondence retains its exact public source and target objects.
+surface conversion returns one ordered chain isomorphism whose source and target
+complexes retain their exact owners.
 Python input is borrowed for admission and copied into native storage. Returned
 NumPy and SciPy objects are caller-owned snapshots.
 
@@ -53,7 +53,7 @@ variance. Exact values have no implicit binary64 or array conversion.
 Requested-degree integral homology is analyzed under an immutable resource
 limit and retains its exact owner.
 
-## Binary64 layer
+## Forms
 
 `complex.binary64_chain_space(k)` and
 `complex.binary64_cochain_space(k)` derive direct native spaces. Passing
@@ -67,33 +67,35 @@ native source and target identities and reject foreign values.
 
 ## Geometry, metrics, and problems
 
-`EuclideanRealization` owns finite positions and admitted primal geometry;
-`Geometry` is an alias of that class. Projection names state allocation:
+`geometry.Geometry` owns finite positions and admitted primal geometry.
+Projection names state allocation:
 `positions_numpy_copy()`, `primal_measures_numpy_copy()`, and
 `dual_measures_numpy_copy()`.
 
-`realization.positive_metric()` admits represented positive Hodge weights and
+`geometry.metric()` admits represented positive Hodge weights and
 constructs metric maps, reusable problem variants, or direct bounded analyses.
 Every reusable problem follows the same lifecycle:
 
 ```text
-problem.prepare(limits, cancellation)
+problem.prepare(policy, cancellation)
   -> prepared.workspace_for(problem)
-  -> prepared.solve(problem, workspace, limits, cancellation)
+  -> prepared.solve(problem, workspace, cancellation)
 ```
 
 Preparation and solving release the GIL. One-shot harmonic-basis, frozen-flow,
 and LSCM computations execute directly instead of publishing unusable preparation
-objects. Storage and work limits are explicit; cancellation is cooperative. A
-result is published only after complete certification. Harmonic bases retain
+objects. A prepared computation retains its executor, storage, and work policy;
+cancellation remains a separate cooperative input. A result is published only
+after complete certification. Harmonic bases retain
 existing binary64 cochains normalized to exact homology periods; flow and LSCM
 results contain newly admitted realizations and never mutate their source.
 
 ## Triangle surfaces
 
-`TriangleSurface.admit(realization)` is the surface authority. Every vertex or
-face vector field uses the single `EntityVectors` carrier; `VertexVectors` and
-`FaceVectors` are aliases. Normals, gradients, curvature, frames, connections,
+`TriangleSurface.admit(geometry)` is the surface authority. Every vertex or
+face vector field uses the single support-indexed `geometry.VectorField[Degree]`
+carrier; `VertexField` and `FaceField` select degrees zero and two without
+retained core tags. Normals, gradients, curvature, frames, connections,
 dual-cycle evidence, holonomy, integrability, and direction fields retain the
 same native surface/realization spine. A positive runtime symmetry order lifts
 Levi-Civita transport and face coordinates into one branch-free power
@@ -116,15 +118,16 @@ Symmetric direction-field synthesis composes those same objects. An exact
 degree-zero cochain prescribes power charges, exact dual cycles order integer
 generator turns, and period-normalized harmonic one-forms provide global
 freedom. One compatible Poisson load and a temporary period solve publish the
-existing `FaceDirectionField`; exact charges and compact quantization evidence
+existing `field.Direction`; exact charges and compact quantization evidence
 remain observable afterward.
 
 ## Optional effects
 
 `polygeo.mesh.load_surface()` imports Trimesh only when called and returns an
-owned native realization. Plotting derives typed declarative traces from copied
+owned native geometry. Plotting derives typed declarative traces from copied
 position, coefficient, or vector snapshots, then constructs one Plotly figure
-at one lazy effect boundary. Root and leaf names have the same identity.
+at one lazy effect boundary. Effects are accessed only through their contextual
+modules.
 Optional libraries never own or alter mathematical state.
 
 ## Invariants
@@ -136,5 +139,5 @@ Optional libraries never own or alter mathematical state.
 - Admission and result publication are atomic.
 - Domain failures are classified by the relevant topology, exact algebra,
   geometry, operator, problem, solve, surface, mesh, or plotting error family.
-- Prepared numerical state exists only in `PreparedProblem` and
-  `SolveWorkspace`, never in topology, realization, or element values.
+- Prepared numerical state exists only in `solve.Prepared` and
+  `solve.Workspace`, never in topology, geometry, or form values.
