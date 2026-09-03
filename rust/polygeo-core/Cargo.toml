@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage = "https://github.com/nostalume/polygeo"
+documentation = "https://docs.rs/polygeo-core"
+readme = "README.md"
+keywords = ["geometry", "topology", "mesh", "homology", "linear-algebra"]
+categories = ["mathematics", "science"]
 
 [dependencies]
 faer.workspace = true
