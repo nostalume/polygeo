@@ -219,7 +219,8 @@ def _(mo):
             add contribution to its incident vertex
         normalize every nonzero vertex sum
 
-    report both total-defect identities and the torus signed range
+    report both total-defect identities, the torus signed range,
+        and the maximum unit-normal error
     render both defect measures and the sphere normal directions
     ```
 
@@ -274,7 +275,15 @@ def _(sphere_surface, torus_surface):
 
 
 @app.cell
-def _(mo, np, sphere_coefficients, sphere_domain, torus_coefficients, torus_domain):
+def _(
+    mo,
+    np,
+    sphere_coefficients,
+    sphere_domain,
+    sphere_normals,
+    torus_coefficients,
+    torus_domain,
+):
     sphere_chi = sum(
         (-1) ** degree * sphere_domain.simplex_count(degree) for degree in range(3)
     )
@@ -289,23 +298,39 @@ def _(mo, np, sphere_coefficients, sphere_domain, torus_coefficients, torus_doma
     torus_error = abs(torus_total - torus_expected)
     torus_min = float(np.min(torus_coefficients))
     torus_max = float(np.max(torus_coefficients))
-    evidence_limit = 1.0e-12
+    normal_values = sphere_normals.values_numpy_copy()
+    normal_length_error = float(
+        np.max(np.abs(np.linalg.norm(normal_values, axis=1) - 1.0))
+    )
+    defect_limit = 1.0e-12
+    normal_limit = 1.0e-12
+    if not (
+        sphere_error <= defect_limit
+        and torus_error <= defect_limit
+        and torus_min < 0.0 < torus_max
+        and normal_length_error <= normal_limit
+    ):
+        raise RuntimeError("curvature-study evidence exceeds its declared limits")
 
     mo.md(rf"""
     ## Evidence
 
-    Euler characteristic is computed independently as $V-E+F$. The numerical
-    comparison uses an absolute tolerance of `{evidence_limit:.1e}` radians.
+    Euler characteristic is computed independently as $V-E+F$. The defect totals
+    use an absolute tolerance of `{defect_limit:.1e}` radians. Normal lengths are
+    recomputed from the displayed vectors and use the dimensionless tolerance
+    `{normal_limit:.1e}`.
 
     | Quantity | Observed | Expected claim | Result |
     |---|---:|---:|---|
     | Sphere total defect | `{sphere_total:.15g}` | $2\pi\chi={sphere_expected:.15g}$ | error `{sphere_error:.3e}` |
     | Torus total defect | `{torus_total:.15g}` | $2\pi\chi={torus_expected:.1f}$ | error `{torus_error:.3e}` |
     | Torus signed range | `[{torus_min:.6f}, {torus_max:.6f}]` | $\min K_v<0<\max K_v$ | `{torus_min < 0.0 < torus_max}` |
+    | Sphere normal length | max error `{normal_length_error:.3e}` | $\max_v |\lVert n_v\rVert-1|\leq {normal_limit:.1e}$ | `{normal_length_error <= normal_limit}` |
 
-    Both total-defect errors are below the stated tolerance. The sphere therefore
+    Both total-defect errors are below their stated tolerance. The sphere therefore
     carries total integrated curvature $4\pi$, while positive and negative torus
-    defects cancel to zero globally.
+    defects cancel to zero globally. The independent length check establishes that
+    the displayed normal field carries directions of unit magnitude.
     """)
     return
 
@@ -357,7 +382,8 @@ def _(mo):
     angle defects. Gauss--Bonnet constrains their total by topology: the sphere's
     defects sum to $4\pi$, whereas signed defects on the torus cancel to zero.
     The normal arrows describe orientation of the embedded sphere, not curvature
-    magnitude.
+    magnitude. Their unit-length certificate checks normalization, not agreement
+    with an unknown smooth normal field.
 
     These finite-mesh results verify the discrete identity and sign structure;
     they do not establish pointwise convergence to a smooth curvature density.
