@@ -9,7 +9,7 @@ def _():
     import marimo as mo
     import numpy as np
     from polygeo.plot import form as plot_form
-    from support.meshes import annulus
+    from examples.support.meshes import annulus
 
     return annulus, mo, np, plot_form
 

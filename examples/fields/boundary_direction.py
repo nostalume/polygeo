@@ -10,7 +10,7 @@ def _():
     import numpy as np
     from polygeo.geometry import Geometry, TriangleSurface
     from polygeo.plot import direction as plot_direction_field
-    from support.meshes import disk
+    from examples.support.meshes import disk
 
     return Geometry, TriangleSurface, disk, mo, np, plot_direction_field
 

@@ -45,7 +45,7 @@ jobs:
       - run: uv run ty check --error-on-warning .
       - run: cargo fmt --all --manifest-path rust/Cargo.toml -- --check
       - run: cargo clippy --manifest-path rust/Cargo.toml --all-targets --all-features -- -D warnings
-      - run: uv run marimo check --strict examples/*.py
+      - run: uv run marimo check --strict examples/surface/*.py examples/pde/*.py examples/topology/*.py examples/fields/*.py
       - run: uv run pytest -m slow -q
       - run: git diff --exit-code
 

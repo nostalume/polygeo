@@ -28,6 +28,9 @@ manifest-path = "rust/polygeo-py/Cargo.toml"
 module-name = "polygeo._polygeo_native"
 python-source = "src"
 
+[tool.marimo.runtime]
+pythonpath = ["."]
+
 [dependency-groups]
 dev = [
     "marimo==0.23.15",

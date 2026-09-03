@@ -10,7 +10,7 @@ def _():
     import numpy as np
     from polygeo.geometry import TriangleSurface
     from polygeo.plot import form as plot_form, vectors as plot_surface_vectors
-    from support.meshes import icosphere, torus
+    from examples.support.meshes import icosphere, torus
 
     return TriangleSurface, icosphere, mo, np, plot_form, plot_surface_vectors, torus
 

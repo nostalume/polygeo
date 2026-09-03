@@ -8,7 +8,16 @@ import pytest
 
 
 _ROOT = Path(__file__).parents[1]
-_NOTEBOOKS = tuple(sorted((_ROOT / "examples").glob("*.py")))
+_STUDY_DIRECTORIES = tuple(
+    _ROOT / "examples" / name for name in ("surface", "pde", "topology", "fields")
+)
+_NOTEBOOKS = tuple(
+    sorted(
+        notebook
+        for directory in _STUDY_DIRECTORIES
+        for notebook in directory.glob("*.py")
+    )
+)
 
 
 @pytest.mark.slow

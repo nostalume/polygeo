@@ -9,7 +9,7 @@ def _():
     import marimo as mo
     from polygeo.chain import analyze_integral_homology
     from polygeo.plot import homology_cycle as plot_homology_cycle
-    from support.meshes import torus
+    from examples.support.meshes import torus
 
     return analyze_integral_homology, mo, plot_homology_cycle, torus
 

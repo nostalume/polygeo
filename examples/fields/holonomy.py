@@ -9,7 +9,7 @@ def _():
     import marimo as mo
     from polygeo.geometry import TriangleSurface
     from polygeo.plot import form as plot_form
-    from support.meshes import torus
+    from examples.support.meshes import torus
 
     return TriangleSurface, mo, plot_form, torus
 

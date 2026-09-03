@@ -92,9 +92,10 @@ NumPy, SciPy, and binary64 compatibility values are explicit owned projections.
 
 ## Examples
 
-The seven executable Marimo studies in [`examples/`](examples/) cover curvature,
-Poisson, LSCM, heat-method distance, homology, Hodge decomposition, and connection
-holonomy. See the [examples guide](examples/README.md).
+The eight executable Marimo studies in [`examples/`](examples/) cover curvature,
+Poisson, conformal mapping, heat-method distance, homology, Hodge decomposition,
+connection holonomy, and boundary-aligned direction fields. See the
+[examples guide](examples/README.md).
 
 ## Architecture
 

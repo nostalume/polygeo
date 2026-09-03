@@ -9,7 +9,7 @@ def _():
     import marimo as mo
     import numpy as np
     from polygeo.plot import form as plot_form
-    from support.meshes import icosphere
+    from examples.support.meshes import icosphere
 
     return icosphere, mo, np, plot_form
 
