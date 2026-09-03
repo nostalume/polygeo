@@ -1,7 +1,11 @@
-use polygeo_core::{
-    CancellationToken, DirichletProblem, HarmonicExtension, HeatProblem, HodgeProblem,
-    MeanZeroPoisson, NativeExecutor, Prepared, ProblemError, SolveError, SolveExt, SolveWorkspace,
-    StorageLimit, SurfaceComputationError, WorkLimit,
+use polygeo_core::field::{HarmonicBasis, HodgeDecomposition, HodgeProblem};
+use polygeo_core::geometry::FlowStep;
+use polygeo_core::solve::{
+    CancellationToken, DirichletProblem, DirichletResult as DirichletSolution,
+    Executor as NativeExecutor, HarmonicExtension, HeatProblem, HeatResult as HeatSolution,
+    PoissonProblem as MeanZeroPoisson, PoissonResult as PoissonSolution, Policy as CorePolicy,
+    Prepared, ProblemError, SolveError, SolveExt, StorageLimit, SurfaceComputationError, WorkLimit,
+    Workspace as SolveWorkspace,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
@@ -45,7 +49,12 @@ pub(crate) fn surface_computation_error(error: SurfaceComputationError) -> PyErr
     }
 }
 
-#[pyclass(name = "StorageLimit", frozen, module = "polygeo", skip_from_py_object)]
+#[pyclass(
+    name = "StorageLimit",
+    frozen,
+    module = "polygeo.solve",
+    skip_from_py_object
+)]
 #[derive(Clone, Copy)]
 pub(crate) struct PyStorageLimit {
     retained: u64,
@@ -83,7 +92,12 @@ impl PyStorageLimit {
     }
 }
 
-#[pyclass(name = "WorkLimit", frozen, module = "polygeo", skip_from_py_object)]
+#[pyclass(
+    name = "WorkLimit",
+    frozen,
+    module = "polygeo.solve",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub(crate) struct PyWorkLimit {
     steps: u64,
@@ -109,9 +123,9 @@ impl PyWorkLimit {
 }
 
 #[pyclass(
-    name = "NativeExecutor",
+    name = "Executor",
     frozen,
-    module = "polygeo",
+    module = "polygeo.solve",
     skip_from_py_object
 )]
 #[derive(Clone, Copy)]
@@ -129,10 +143,54 @@ impl PyNativeExecutor {
     }
 }
 
+#[pyclass(name = "Policy", frozen, module = "polygeo.solve", skip_from_py_object)]
+#[derive(Clone, Copy)]
+pub(crate) struct PyPolicy {
+    pub(crate) inner: CorePolicy,
+}
+
+#[pymethods]
+impl PyPolicy {
+    #[new]
+    #[pyo3(signature = (*, executor=None, storage=None, work=None))]
+    fn new(
+        executor: Option<&PyNativeExecutor>,
+        storage: Option<&PyStorageLimit>,
+        work: Option<&PyWorkLimit>,
+    ) -> Self {
+        Self {
+            inner: core_policy(executor, storage, work),
+        }
+    }
+
+    #[getter]
+    fn executor(&self) -> PyNativeExecutor {
+        PyNativeExecutor {
+            inner: self.inner.executor(),
+        }
+    }
+
+    #[getter]
+    fn storage(&self) -> PyStorageLimit {
+        let storage = self.inner.storage();
+        PyStorageLimit {
+            retained: storage.retained_logical_bytes(),
+            peak: storage.peak_live_logical_bytes(),
+        }
+    }
+
+    #[getter]
+    fn work(&self) -> PyWorkLimit {
+        PyWorkLimit {
+            steps: self.inner.work().steps(),
+        }
+    }
+}
+
 #[pyclass(
     name = "CancellationToken",
     frozen,
-    module = "polygeo",
+    module = "polygeo.solve",
     skip_from_py_object
 )]
 #[derive(Clone)]
@@ -166,7 +224,12 @@ pub(crate) enum Problem {
     Heat(HeatProblem),
 }
 
-#[pyclass(name = "Problem", frozen, module = "polygeo", skip_from_py_object)]
+#[pyclass(
+    name = "Problem",
+    frozen,
+    module = "polygeo.solve",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub(crate) struct PyProblem {
     pub(crate) inner: Problem,
@@ -181,62 +244,68 @@ enum PreparedProblem {
 }
 
 #[pyclass(
-    name = "PreparedProblem",
+    name = "Prepared",
     frozen,
-    module = "polygeo",
+    module = "polygeo.solve",
     skip_from_py_object
 )]
 pub(crate) struct PyPreparedProblem {
     inner: PreparedProblem,
 }
 
-#[pyclass(name = "SolveWorkspace", module = "polygeo", skip_from_py_object)]
+#[pyclass(name = "Workspace", module = "polygeo.solve", skip_from_py_object)]
 pub(crate) struct PySolveWorkspace {
     inner: SolveWorkspace,
 }
 
-pub(crate) fn policies(
+fn core_policy(
     executor: Option<&PyNativeExecutor>,
     storage: Option<&PyStorageLimit>,
     work: Option<&PyWorkLimit>,
-) -> (NativeExecutor, StorageLimit, WorkLimit) {
-    (
+) -> CorePolicy {
+    CorePolicy::new(
         executor.map_or(NativeExecutor::sequential(), |x| x.inner),
         storage.copied().unwrap_or(PyStorageLimit::DEFAULT).core(),
         work.cloned().unwrap_or(PyWorkLimit::DEFAULT).core(),
     )
 }
 
+pub(crate) fn policy(value: Option<&PyPolicy>) -> CorePolicy {
+    value.map_or_else(|| core_policy(None, None, None), |value| value.inner)
+}
+
+pub(crate) fn cancellation_token(value: Option<&PyCancellationToken>) -> CancellationToken {
+    value.map_or_else(CancellationToken::new, |value| value.inner.clone())
+}
+
 #[pymethods]
 impl PyProblem {
-    #[pyo3(signature = (*, executor=None, storage=None, work=None, cancellation=None))]
+    #[pyo3(signature = (*, policy=None, cancellation=None))]
     fn prepare(
         &self,
         py: Python<'_>,
-        executor: Option<&PyNativeExecutor>,
-        storage: Option<&PyStorageLimit>,
-        work: Option<&PyWorkLimit>,
+        policy: Option<&PyPolicy>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<PyPreparedProblem> {
-        let (executor, storage, work) = policies(executor, storage, work);
-        let token = cancellation.map_or_else(CancellationToken::new, |x| x.inner.clone());
+        let policy = crate::solve::policy(policy);
+        let token = cancellation_token(cancellation);
         let problem = self.inner.clone();
         let inner = py
             .detach(move || match problem {
                 Problem::MeanZero(x) => x
-                    .prepare_with_cancellation(&executor, storage, work, &token)
+                    .prepare_cancellable(policy, &token)
                     .map(PreparedProblem::MeanZero),
                 Problem::Dirichlet(x) => x
-                    .prepare_with_cancellation(&executor, storage, work, &token)
+                    .prepare_cancellable(policy, &token)
                     .map(PreparedProblem::Dirichlet),
                 Problem::Harmonic(x) => x
-                    .prepare_with_cancellation(&executor, storage, work, &token)
+                    .prepare_cancellable(policy, &token)
                     .map(PreparedProblem::Harmonic),
                 Problem::Hodge(x) => x
-                    .prepare_with_cancellation(&executor, storage, work, &token)
+                    .prepare_cancellable(policy, &token)
                     .map(PreparedProblem::Hodge),
                 Problem::Heat(x) => x
-                    .prepare_with_cancellation(&executor, storage, work, &token)
+                    .prepare_cancellable(policy, &token)
                     .map(PreparedProblem::Heat),
             })
             .map_err(solve_error)?;
@@ -246,64 +315,56 @@ impl PyProblem {
 
 #[pymethods]
 impl PyPreparedProblem {
-    #[pyo3(signature = (problem, *, storage=None))]
-    fn workspace_for(
-        &self,
-        problem: &PyProblem,
-        storage: Option<&PyStorageLimit>,
-    ) -> PyResult<PySolveWorkspace> {
-        let storage = storage.copied().unwrap_or(PyStorageLimit::DEFAULT).core();
+    fn workspace_for(&self, problem: &PyProblem) -> PyResult<PySolveWorkspace> {
         let inner = match (&self.inner, &problem.inner) {
-            (PreparedProblem::MeanZero(a), Problem::MeanZero(b)) => a.workspace_for(b, storage),
-            (PreparedProblem::Dirichlet(a), Problem::Dirichlet(b)) => a.workspace_for(b, storage),
-            (PreparedProblem::Harmonic(a), Problem::Harmonic(b)) => a.workspace_for(b, storage),
-            (PreparedProblem::Hodge(a), Problem::Hodge(b)) => a.workspace_for(b, storage),
-            (PreparedProblem::Heat(a), Problem::Heat(b)) => a.workspace_for(b, storage),
+            (PreparedProblem::MeanZero(a), Problem::MeanZero(b)) => a.workspace_for(b),
+            (PreparedProblem::Dirichlet(a), Problem::Dirichlet(b)) => a.workspace_for(b),
+            (PreparedProblem::Harmonic(a), Problem::Harmonic(b)) => a.workspace_for(b),
+            (PreparedProblem::Hodge(a), Problem::Hodge(b)) => a.workspace_for(b),
+            (PreparedProblem::Heat(a), Problem::Heat(b)) => a.workspace_for(b),
             _ => return Err(solve_error(SolveError::ProblemMismatch)),
         }
         .map_err(solve_error)?;
         Ok(PySolveWorkspace { inner })
     }
 
-    #[pyo3(signature = (problem, workspace, *, work=None, cancellation=None))]
+    #[pyo3(signature = (problem, workspace, *, cancellation=None))]
     fn solve(
         &self,
         py: Python<'_>,
         problem: &PyProblem,
         workspace: &mut PySolveWorkspace,
-        work: Option<&PyWorkLimit>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        let work = work.cloned().unwrap_or(PyWorkLimit::DEFAULT).core();
-        let token = cancellation.map_or_else(CancellationToken::new, |x| x.inner.clone());
+        let token = cancellation_token(cancellation);
         match (&self.inner, &problem.inner) {
             (PreparedProblem::MeanZero(a), Problem::MeanZero(b)) => {
                 let value = py
-                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, work, &token))
+                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, &token))
                     .map_err(solve_error)?;
                 Ok(Py::new(py, PyPoissonSolution { inner: value })?.into_any())
             }
             (PreparedProblem::Dirichlet(a), Problem::Dirichlet(b)) => {
                 let value = py
-                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, work, &token))
+                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, &token))
                     .map_err(solve_error)?;
                 Ok(Py::new(py, PyDirichletSolution { inner: value })?.into_any())
             }
             (PreparedProblem::Harmonic(a), Problem::Harmonic(b)) => {
                 let value = py
-                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, work, &token))
+                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, &token))
                     .map_err(solve_error)?;
                 Ok(Py::new(py, PyDirichletSolution { inner: value })?.into_any())
             }
             (PreparedProblem::Hodge(a), Problem::Hodge(b)) => {
                 let value = py
-                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, work, &token))
+                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, &token))
                     .map_err(solve_error)?;
                 Ok(Py::new(py, PyHodgeDecomposition { inner: value })?.into_any())
             }
             (PreparedProblem::Heat(a), Problem::Heat(b)) => {
                 let value = py
-                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, work, &token))
+                    .detach(|| a.solve_cancellable(b, &mut workspace.inner, &token))
                     .map_err(solve_error)?;
                 Ok(Py::new(py, PyHeatSolution { inner: value })?.into_any())
             }
@@ -313,13 +374,13 @@ impl PyPreparedProblem {
 }
 
 #[pyclass(
-    name = "PoissonSolution",
+    name = "PoissonResult",
     frozen,
-    module = "polygeo",
+    module = "polygeo.solve",
     skip_from_py_object
 )]
 struct PyPoissonSolution {
-    inner: polygeo_core::PoissonSolution,
+    inner: PoissonSolution,
 }
 #[pymethods]
 impl PyPoissonSolution {
@@ -344,13 +405,13 @@ impl PyPoissonSolution {
 }
 
 #[pyclass(
-    name = "DirichletSolution",
+    name = "DirichletResult",
     frozen,
-    module = "polygeo",
+    module = "polygeo.solve",
     skip_from_py_object
 )]
 struct PyDirichletSolution {
-    inner: polygeo_core::DirichletSolution,
+    inner: DirichletSolution,
 }
 #[pymethods]
 impl PyDirichletSolution {
@@ -373,21 +434,21 @@ impl PyDirichletSolution {
 #[pyclass(
     name = "HodgeDecomposition",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 struct PyHodgeDecomposition {
-    inner: polygeo_core::HodgeDecomposition,
+    inner: HodgeDecomposition,
 }
 
 #[pyclass(
-    name = "HarmonicOneFormBasis",
+    name = "HarmonicBasis",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 pub(crate) struct PyHarmonicOneFormBasis {
-    pub(crate) inner: polygeo_core::HarmonicOneFormBasis,
+    pub(crate) inner: HarmonicBasis,
 }
 
 #[pymethods]
@@ -462,9 +523,14 @@ impl PyHodgeDecomposition {
     }
 }
 
-#[pyclass(name = "HeatSolution", frozen, module = "polygeo", skip_from_py_object)]
+#[pyclass(
+    name = "HeatResult",
+    frozen,
+    module = "polygeo.solve",
+    skip_from_py_object
+)]
 struct PyHeatSolution {
-    inner: polygeo_core::HeatSolution,
+    inner: HeatSolution,
 }
 #[pymethods]
 impl PyHeatSolution {
@@ -496,14 +562,19 @@ impl PyHeatSolution {
     }
 }
 
-#[pyclass(name = "FlowStep", frozen, module = "polygeo", skip_from_py_object)]
+#[pyclass(
+    name = "FlowStep",
+    frozen,
+    module = "polygeo.geometry",
+    skip_from_py_object
+)]
 pub(crate) struct PyFlowStep {
-    pub(crate) inner: polygeo_core::FlowStep,
+    pub(crate) inner: FlowStep,
 }
 #[pymethods]
 impl PyFlowStep {
     #[getter]
-    fn target(&self) -> NativeEuclideanRealization {
+    fn geometry(&self) -> NativeEuclideanRealization {
         NativeEuclideanRealization::from_owner(self.inner.target().clone())
     }
     #[getter]
@@ -524,20 +595,31 @@ impl PyFlowStep {
     }
 }
 
-pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add("ProblemError", module.py().get_type::<ProblemErrorPy>())?;
-    module.add("SolveError", module.py().get_type::<SolveErrorPy>())?;
+pub(crate) fn register_solve(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let problem_error = module.py().get_type::<ProblemErrorPy>();
+    problem_error.setattr("__module__", "polygeo.solve")?;
+    module.add("ProblemError", problem_error)?;
+    let solve_error = module.py().get_type::<SolveErrorPy>();
+    solve_error.setattr("__module__", "polygeo.solve")?;
+    module.add("SolveError", solve_error)?;
     module.add_class::<PyStorageLimit>()?;
     module.add_class::<PyWorkLimit>()?;
     module.add_class::<PyNativeExecutor>()?;
+    module.add_class::<PyPolicy>()?;
     module.add_class::<PyCancellationToken>()?;
     module.add_class::<PyProblem>()?;
     module.add_class::<PyPreparedProblem>()?;
     module.add_class::<PySolveWorkspace>()?;
     module.add_class::<PyPoissonSolution>()?;
     module.add_class::<PyDirichletSolution>()?;
+    module.add_class::<PyHeatSolution>()
+}
+
+pub(crate) fn register_field(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHodgeDecomposition>()?;
-    module.add_class::<PyHarmonicOneFormBasis>()?;
-    module.add_class::<PyHeatSolution>()?;
+    module.add_class::<PyHarmonicOneFormBasis>()
+}
+
+pub(crate) fn register_geometry(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyFlowStep>()
 }

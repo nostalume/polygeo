@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
-use polygeo_core::{
-    HomologyError as CoreHomologyError, HomologyLimit as CoreHomologyLimit,
-    IntegralHomology as CoreIntegralHomology, StorageLimit, WorkLimit,
+use polygeo_core::chain::{
+    HomologyError as CoreHomologyError, HomologyLimit as CoreHomologyLimit, IntegralChain,
+    IntegralHomology as CoreIntegralHomology,
 };
+use polygeo_core::solve::{StorageLimit, WorkLimit};
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 
-use super::{
+use crate::chain::{
     ChainError, ExactComplex, ExactElement, NativeChainComplex, NativeChainElement, bigint_tuple,
-    classified_exception,
 };
+use crate::classified_exception;
 
 create_exception!(
     _polygeo_native,
@@ -57,7 +58,7 @@ fn limit(value: Option<&Bound<'_, PyAny>>, current: u64) -> PyResult<u64> {
 #[pyclass(
     name = "HomologyLimit",
     frozen,
-    module = "polygeo",
+    module = "polygeo.chain",
     skip_from_py_object
 )]
 #[derive(Clone, Copy)]
@@ -125,7 +126,7 @@ impl PyHomologyLimit {
     }
 }
 
-#[pyclass(name = "IntegralHomology", frozen, module = "polygeo")]
+#[pyclass(name = "IntegralHomology", frozen, module = "polygeo.chain")]
 struct PyIntegralHomology {
     analysis: Arc<CoreIntegralHomology>,
 }
@@ -170,21 +171,21 @@ impl PyIntegralHomology {
     }
 }
 
-#[pyclass(name = "HomologyGroup", frozen, module = "polygeo")]
+#[pyclass(name = "HomologyGroup", frozen, module = "polygeo.chain")]
 pub(crate) struct PyHomologyGroup {
     pub(crate) analysis: Arc<CoreIntegralHomology>,
     pub(crate) degree: usize,
 }
 
 impl PyHomologyGroup {
-    pub(crate) fn row(&self) -> polygeo_core::HomologyGroup<'_> {
+    pub(crate) fn row(&self) -> polygeo_core::chain::HomologyGroup<'_> {
         self.analysis
             .group(self.degree)
             .expect("native group retains one admitted analysis row")
     }
 }
 
-fn chain(value: Option<&polygeo_core::IntegralChain>) -> PyResult<NativeChainElement> {
+fn chain(value: Option<&IntegralChain>) -> PyResult<NativeChainElement> {
     value
         .cloned()
         .map(|value| NativeChainElement {
@@ -244,7 +245,7 @@ fn analyze_integral_homology(
     )
 }
 
-pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHomologyLimit>()?;
     module.add_class::<PyIntegralHomology>()?;
     module.add_class::<PyHomologyGroup>()?;
@@ -255,8 +256,8 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(analyze_integral_homology, module)?)?;
     module
         .getattr("analyze_integral_homology")?
-        .setattr("__module__", "polygeo")?;
+        .setattr("__module__", "polygeo.chain")?;
     let error = module.py().get_type::<HomologyError>();
-    error.setattr("__module__", "polygeo")?;
+    error.setattr("__module__", "polygeo.chain")?;
     module.add("HomologyError", error)
 }

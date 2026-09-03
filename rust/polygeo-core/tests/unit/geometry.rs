@@ -1,6 +1,6 @@
 use super::{
-    BigInt, BigRational, DenseSquare, RealizationError, binary64_from_exact_rounded,
-    determinant_f64, exact_from_binary64,
+    BigInt, BigRational, DenseSquare, GeometryError, binary64_from_exact_rounded, determinant_f64,
+    exact_from_binary64,
 };
 
 #[test]
@@ -51,12 +51,12 @@ fn exact_to_binary64_uses_ties_to_even_and_rejects_nonzero_underflow() {
     let half_min_subnormal = BigRational::new(BigInt::from(1_u8), BigInt::from(1_u8) << 1075_usize);
     assert_eq!(
         binary64_from_exact_rounded(&half_min_subnormal),
-        Err(RealizationError::Unrepresentable)
+        Err(GeometryError::Unrepresentable)
     );
     let overflow = exact_from_binary64(f64::MAX) * BigInt::from(2_u8);
     assert_eq!(
         binary64_from_exact_rounded(&overflow),
-        Err(RealizationError::Unrepresentable)
+        Err(GeometryError::Unrepresentable)
     );
 }
 

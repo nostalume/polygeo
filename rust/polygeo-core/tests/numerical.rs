@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use num_bigint::BigInt;
 use polygeo_core::{
-    Binary64Chain, Binary64ChainSpace, Binary64Cochain, Binary64CochainSpace, Binary64Element,
-    Binary64ElementError, Binary64Space, CandidateInput, ComplexCore, HalfedgeInput,
-    HalfedgeSurfaceCore, OperatorError,
+    form::Chain as Binary64Chain, form::ChainSpace as Binary64ChainSpace,
+    form::Cochain as Binary64Cochain, form::CochainSpace as Binary64CochainSpace,
+    form::Element as Binary64Element, form::ElementError as Binary64ElementError,
+    form::OperatorError, form::Space as Binary64Space, topology::CandidateInput,
+    topology::Complex as ComplexCore, topology::HalfedgeInput,
+    topology::HalfedgeSurface as HalfedgeSurfaceCore,
 };
 
 fn triangle() -> Arc<ComplexCore> {

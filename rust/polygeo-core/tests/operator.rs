@@ -1,27 +1,29 @@
 use std::sync::Arc;
 
 use polygeo_core::{
-    Binary64Chain, Binary64Cochain, Binary64CochainSpace, Binary64Element, Binary64Space,
-    CandidateInput, Cochain, ComplexCore, EuclideanRealization, NondegenerateCapability,
-    PairingCapability, PositiveMetric, RealizationLimit,
-    operator::{LinearOperator, OperatorError, compose},
+    chain::Cochain, form::Chain as Binary64Chain, form::Cochain as Binary64Cochain,
+    form::CochainSpace as Binary64CochainSpace, form::Element as Binary64Element,
+    form::Operator as LinearOperator, form::OperatorError, form::Space as Binary64Space,
+    form::compose, geometry::Geometry, geometry::Limit, geometry::Metric,
+    geometry::NondegenerateCapability, geometry::PairingCapability, topology::CandidateInput,
+    topology::Complex as ComplexCore,
 };
 
 fn triangle() -> Arc<ComplexCore> {
     ComplexCore::admit(CandidateInput::signed([0, 1, 2], 1, 3, None).unwrap()).unwrap()
 }
 
-fn metric() -> PositiveMetric {
+fn metric() -> Metric {
     metric_scaled(1.0)
 }
 
-fn metric_scaled(scale: f64) -> PositiveMetric {
+fn metric_scaled(scale: f64) -> Metric {
     let height = 3.0_f64.sqrt() / 2.0;
-    EuclideanRealization::admit(
+    Geometry::admit(
         triangle(),
         2,
         vec![0.0, 0.0, scale, 0.0, 0.5 * scale, height * scale],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap()
     .circumcentric_pairing()

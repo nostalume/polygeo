@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use polygeo_core::{
-    CandidateInput, CircumcentricPairing, ComplexCore, EuclideanRealization, MetricError,
-    NondegenerateCapability, NondegeneratePairing, PairingCapability, PositiveMetric,
-    RealizationError, RealizationLimit, StorageLimit, WorkLimit,
+    geometry::CircumcentricPairing, geometry::Geometry, geometry::GeometryError, geometry::Limit,
+    geometry::Metric, geometry::MetricError, geometry::NondegenerateCapability,
+    geometry::NondegeneratePairing, geometry::PairingCapability, solve::StorageLimit,
+    solve::WorkLimit, topology::CandidateInput, topology::Complex as ComplexCore,
 };
 
 fn triangle() -> Arc<ComplexCore> {
@@ -14,12 +15,11 @@ fn right_triangle() -> [f64; 6] {
     [0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
 }
 
-fn realized_triangle(positions: [f64; 6]) -> Arc<EuclideanRealization> {
-    EuclideanRealization::admit(triangle(), 2, positions.to_vec(), RealizationLimit::DEFAULT)
-        .unwrap()
+fn realized_triangle(positions: [f64; 6]) -> Arc<Geometry> {
+    Geometry::admit(triangle(), 2, positions.to_vec(), Limit::DEFAULT).unwrap()
 }
 
-fn simplex(dimension: usize, scale: f64) -> Arc<EuclideanRealization> {
+fn simplex(dimension: usize, scale: f64) -> Arc<Geometry> {
     let vertices = (0..=dimension)
         .map(|vertex| i64::try_from(vertex).unwrap())
         .collect::<Vec<_>>();
@@ -31,7 +31,7 @@ fn simplex(dimension: usize, scale: f64) -> Arc<EuclideanRealization> {
     for axis in 0..dimension {
         positions[(axis + 1) * dimension + axis] = scale;
     }
-    EuclideanRealization::admit(topology, dimension, positions, RealizationLimit::DEFAULT).unwrap()
+    Geometry::admit(topology, dimension, positions, Limit::DEFAULT).unwrap()
 }
 
 #[test]
@@ -40,13 +40,8 @@ fn realization_owns_one_position_copy_and_retains_topology() {
     let mut positions = right_triangle();
     let position_buffer = positions.to_vec();
     let transferred = position_buffer.as_ptr();
-    let realization = EuclideanRealization::admit(
-        Arc::clone(&owner),
-        2,
-        position_buffer,
-        RealizationLimit::DEFAULT,
-    )
-    .unwrap();
+    let realization =
+        Geometry::admit(Arc::clone(&owner), 2, position_buffer, Limit::DEFAULT).unwrap();
 
     positions.fill(9.0);
     assert!(Arc::ptr_eq(realization.topology(), &owner));
@@ -57,13 +52,8 @@ fn realization_owns_one_position_copy_and_retains_topology() {
 
 #[test]
 fn realization_computes_primal_and_cached_dual_rows() {
-    let realization = EuclideanRealization::admit(
-        triangle(),
-        2,
-        right_triangle().to_vec(),
-        RealizationLimit::DEFAULT,
-    )
-    .unwrap();
+    let realization =
+        Geometry::admit(triangle(), 2, right_triangle().to_vec(), Limit::DEFAULT).unwrap();
 
     assert_eq!(realization.primal_measures(0).unwrap(), &[1.0; 3]);
     assert_eq!(realization.primal_measures(2).unwrap(), &[0.5]);
@@ -80,72 +70,48 @@ fn realization_computes_primal_and_cached_dual_rows() {
 fn realization_rejects_before_publication() {
     let owner = triangle();
     assert_eq!(
-        EuclideanRealization::admit(
-            Arc::clone(&owner),
-            1,
-            vec![0.0; 3],
-            RealizationLimit::DEFAULT,
-        )
-        .unwrap_err(),
-        RealizationError::AmbientDimension
+        Geometry::admit(Arc::clone(&owner), 1, vec![0.0; 3], Limit::DEFAULT,).unwrap_err(),
+        GeometryError::AmbientDimension
     );
     assert_eq!(
-        EuclideanRealization::admit(
-            Arc::clone(&owner),
-            2,
-            vec![0.0; 5],
-            RealizationLimit::DEFAULT,
-        )
-        .unwrap_err(),
-        RealizationError::PositionShape
+        Geometry::admit(Arc::clone(&owner), 2, vec![0.0; 5], Limit::DEFAULT,).unwrap_err(),
+        GeometryError::PositionShape
     );
     assert_eq!(
-        EuclideanRealization::admit(
+        Geometry::admit(
             Arc::clone(&owner),
             2,
             vec![0.0, 0.0, f64::NAN, 0.0, 0.0, 1.0],
-            RealizationLimit::DEFAULT,
+            Limit::DEFAULT,
         )
         .unwrap_err(),
-        RealizationError::NonFinite
+        GeometryError::NonFinite
     );
     assert_eq!(
-        EuclideanRealization::admit(
+        Geometry::admit(
             owner,
             2,
             right_triangle().to_vec(),
-            RealizationLimit::new(
-                StorageLimit::new(
-                    414,
-                    RealizationLimit::DEFAULT
-                        .storage()
-                        .peak_live_logical_bytes()
-                )
-                .unwrap(),
-                RealizationLimit::DEFAULT.coefficient_bits(),
-                RealizationLimit::DEFAULT.exact_steps(),
+            Limit::new(
+                StorageLimit::new(414, Limit::DEFAULT.storage().peak_live_logical_bytes()).unwrap(),
+                Limit::DEFAULT.coefficient_bits(),
+                Limit::DEFAULT.exact_steps(),
             ),
         )
         .unwrap_err(),
-        RealizationError::RetainedLogicalBytes {
+        GeometryError::RetainedLogicalBytes {
             required: 415,
             limit: 414,
         }
     );
-    EuclideanRealization::admit(
+    Geometry::admit(
         triangle(),
         2,
         right_triangle().to_vec(),
-        RealizationLimit::new(
-            StorageLimit::new(
-                415,
-                RealizationLimit::DEFAULT
-                    .storage()
-                    .peak_live_logical_bytes(),
-            )
-            .unwrap(),
-            RealizationLimit::DEFAULT.coefficient_bits(),
-            RealizationLimit::DEFAULT.exact_steps(),
+        Limit::new(
+            StorageLimit::new(415, Limit::DEFAULT.storage().peak_live_logical_bytes()).unwrap(),
+            Limit::DEFAULT.coefficient_bits(),
+            Limit::DEFAULT.exact_steps(),
         ),
     )
     .unwrap();
@@ -154,9 +120,8 @@ fn realization_rejects_before_publication() {
 #[test]
 fn realization_limits_report_storage_and_exact_axes() {
     let storage = StorageLimit::new(0, 0).unwrap();
-    let limit = RealizationLimit::new(storage, 4096, WorkLimit::new(100_000));
-    let error =
-        EuclideanRealization::admit(triangle(), 2, right_triangle().to_vec(), limit).unwrap_err();
+    let limit = Limit::new(storage, 4096, WorkLimit::new(100_000));
+    let error = Geometry::admit(triangle(), 2, right_triangle().to_vec(), limit).unwrap_err();
     assert_eq!(error.reason(), "resource_limit");
     assert!(matches!(
         error.resource_limit(),
@@ -166,25 +131,21 @@ fn realization_limits_report_storage_and_exact_axes() {
 
 #[test]
 fn realization_preflights_peak_and_coefficient_growth() {
-    let peak = RealizationLimit::new(
+    let peak = Limit::new(
         StorageLimit::new(415, 415).unwrap(),
-        RealizationLimit::DEFAULT.coefficient_bits(),
-        RealizationLimit::DEFAULT.exact_steps(),
+        Limit::DEFAULT.coefficient_bits(),
+        Limit::DEFAULT.exact_steps(),
     );
     assert!(matches!(
-        EuclideanRealization::admit(triangle(), 2, right_triangle().to_vec(), peak)
+        Geometry::admit(triangle(), 2, right_triangle().to_vec(), peak)
             .unwrap_err()
             .resource_limit(),
         Some(("peak_live_logical_bytes", required, 415)) if required > 415
     ));
 
-    let narrow = RealizationLimit::new(
-        RealizationLimit::DEFAULT.storage(),
-        10,
-        RealizationLimit::DEFAULT.exact_steps(),
-    );
+    let narrow = Limit::new(Limit::DEFAULT.storage(), 10, Limit::DEFAULT.exact_steps());
     assert!(matches!(
-        EuclideanRealization::admit(
+        Geometry::admit(
             triangle(),
             2,
             vec![0.0, 0.0, 1.0, 0.0, 1.0, f64::MIN_POSITIVE],
@@ -205,15 +166,14 @@ fn exact_steps_are_cumulative_across_primal_fallbacks() {
     let positions = vec![
         0.0, 0.0, 1.0, 0.0, 1.0, height, 2.0, 0.0, 3.0, 0.0, 3.0, height,
     ];
-    let limit = RealizationLimit::new(
-        RealizationLimit::DEFAULT.storage(),
-        RealizationLimit::DEFAULT.coefficient_bits(),
+    let limit = Limit::new(
+        Limit::DEFAULT.storage(),
+        Limit::DEFAULT.coefficient_bits(),
         WorkLimit::new(60),
     );
-    EuclideanRealization::admit(triangle(), 2, vec![0.0, 0.0, 1.0, 0.0, 1.0, height], limit)
-        .unwrap();
+    Geometry::admit(triangle(), 2, vec![0.0, 0.0, 1.0, 0.0, 1.0, height], limit).unwrap();
     assert!(matches!(
-        EuclideanRealization::admit(topology, 2, positions, limit)
+        Geometry::admit(topology, 2, positions, limit)
             .unwrap_err()
             .resource_limit(),
         Some(("exact_steps", required, 60)) if required > 60
@@ -246,22 +206,22 @@ fn simplex_measures_preserve_dimension_and_extreme_binary64_scale() {
 fn exact_fallback_preserves_representable_subnormal_measure() {
     let topology = triangle();
     let height = f64::MIN_POSITIVE;
-    let realization = EuclideanRealization::admit(
+    let realization = Geometry::admit(
         topology,
         2,
         vec![0.0, 0.0, 1.0, 0.0, 1.0, height],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
 
     assert_eq!(realization.primal_measures(2).unwrap(), &[height / 2.0]);
 }
 
-fn pairing_owner(value: &impl PairingCapability) -> &Arc<EuclideanRealization> {
+fn pairing_owner(value: &impl PairingCapability) -> &Arc<Geometry> {
     value.realization()
 }
 
-fn nondegenerate_owner(value: &impl NondegenerateCapability) -> &Arc<EuclideanRealization> {
+fn nondegenerate_owner(value: &impl NondegenerateCapability) -> &Arc<Geometry> {
     value.realization()
 }
 
@@ -273,7 +233,7 @@ fn metric_refinement_is_cached_evidence_over_one_realization() {
     let coefficients = pairing.hodge_coefficients_slice(1).unwrap();
     let pointer = coefficients.as_ptr();
     let nondegenerate = NondegeneratePairing::try_from(pairing.clone()).unwrap();
-    let positive = PositiveMetric::try_from(nondegenerate.clone()).unwrap();
+    let positive = Metric::try_from(nondegenerate.clone()).unwrap();
     let forgotten: CircumcentricPairing = positive.clone().into();
 
     assert!(Arc::ptr_eq(pairing_owner(&forgotten), &realization));
@@ -303,7 +263,7 @@ fn metric_refinement_reports_zero_before_indefiniteness() {
         .unwrap();
     let nondegenerate = NondegeneratePairing::try_from(obtuse).unwrap();
     assert_eq!(
-        PositiveMetric::try_from(nondegenerate).unwrap_err(),
+        Metric::try_from(nondegenerate).unwrap_err(),
         MetricError::Indefinite
     );
 }
@@ -330,12 +290,12 @@ fn concurrent_pairing_access_publishes_one_coefficient_buffer() {
 
 #[test]
 fn exact_fallback_obeys_the_cumulative_step_limit() {
-    let budget = RealizationLimit::new(
-        RealizationLimit::DEFAULT.storage(),
-        RealizationLimit::DEFAULT.coefficient_bits(),
+    let budget = Limit::new(
+        Limit::DEFAULT.storage(),
+        Limit::DEFAULT.coefficient_bits(),
         WorkLimit::new(0),
     );
-    let result = EuclideanRealization::admit(
+    let result = Geometry::admit(
         triangle(),
         2,
         vec![0.0, 0.0, 1.0, 0.0, 1.0, f64::MIN_POSITIVE],
@@ -349,27 +309,27 @@ fn exact_fallback_obeys_the_cumulative_step_limit() {
 
 #[test]
 fn failed_lazy_metric_publication_can_be_retried() {
-    let realization = EuclideanRealization::admit(
+    let realization = Geometry::admit(
         triangle(),
         2,
         right_triangle().to_vec(),
-        RealizationLimit::new(
-            RealizationLimit::DEFAULT.storage(),
-            RealizationLimit::DEFAULT.coefficient_bits(),
+        Limit::new(
+            Limit::DEFAULT.storage(),
+            Limit::DEFAULT.coefficient_bits(),
             WorkLimit::new(0),
         ),
     )
     .unwrap();
     assert_eq!(
         realization.circumcentric_pairing().unwrap_err(),
-        RealizationError::ExactSteps {
+        GeometryError::ExactSteps {
             required: 1,
             limit: 0
         }
     );
     assert_eq!(
         realization.circumcentric_pairing().unwrap_err(),
-        RealizationError::ExactSteps {
+        GeometryError::ExactSteps {
             required: 1,
             limit: 0
         }
@@ -385,7 +345,7 @@ fn unrepresentable_pairing_does_not_hide_representable_dual_rows() {
     );
     assert_eq!(
         realization.circumcentric_pairing().unwrap_err(),
-        RealizationError::Unrepresentable
+        GeometryError::Unrepresentable
     );
     assert!(std::ptr::eq(
         realization.dual_measures(1).unwrap(),

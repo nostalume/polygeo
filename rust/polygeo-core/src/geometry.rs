@@ -25,12 +25,12 @@ impl<T> DenseSquare<T> {
     fn try_from_fn(
         order: usize,
         mut value: impl FnMut(usize, usize) -> T,
-    ) -> Result<Self, RealizationError> {
-        let cells = order.checked_mul(order).ok_or(RealizationError::Overflow)?;
+    ) -> Result<Self, GeometryError> {
+        let cells = order.checked_mul(order).ok_or(GeometryError::Overflow)?;
         let mut values = Vec::new();
         values
             .try_reserve_exact(cells)
-            .map_err(|_| RealizationError::Allocation)?;
+            .map_err(|_| GeometryError::Allocation)?;
         for row in 0..order {
             for column in 0..order {
                 values.push(value(row, column));
@@ -73,13 +73,13 @@ impl<T> DenseSquare<T> {
 
 /// Logical-storage and exact-arithmetic ceilings for one Euclidean realization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RealizationLimit {
+pub struct Limit {
     storage: StorageLimit,
     coefficient_bits: u64,
     exact_steps: WorkLimit,
 }
 
-impl RealizationLimit {
+impl Limit {
     pub const DEFAULT: Self = Self {
         storage: StorageLimit::new(128 * 1024 * 1024, 512 * 1024 * 1024)
             .expect("default storage lifecycle is valid"),
@@ -112,7 +112,7 @@ impl RealizationLimit {
     }
 }
 
-impl Default for RealizationLimit {
+impl Default for Limit {
     fn default() -> Self {
         Self::DEFAULT
     }
@@ -121,7 +121,7 @@ impl Default for RealizationLimit {
 /// Classified realization admission or derived-measure failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum RealizationError {
+pub enum GeometryError {
     AmbientDimension,
     PositionShape,
     NonFinite,
@@ -137,7 +137,7 @@ pub enum RealizationError {
     Topology,
 }
 
-impl RealizationError {
+impl GeometryError {
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
@@ -175,7 +175,7 @@ impl RealizationError {
     }
 }
 
-impl fmt::Display for RealizationError {
+impl fmt::Display for GeometryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::AmbientDimension => "ambient dimension must contain the simplicial dimension",
@@ -197,9 +197,9 @@ impl fmt::Display for RealizationError {
     }
 }
 
-impl std::error::Error for RealizationError {}
+impl std::error::Error for GeometryError {}
 
-impl From<TopologyError> for RealizationError {
+impl From<TopologyError> for GeometryError {
     fn from(_: TopologyError) -> Self {
         Self::Topology
     }
@@ -211,8 +211,8 @@ struct ExactLimit {
     steps: u64,
 }
 
-impl From<RealizationLimit> for ExactLimit {
-    fn from(limit: RealizationLimit) -> Self {
+impl From<Limit> for ExactLimit {
+    fn from(limit: Limit) -> Self {
         Self {
             coefficient_bits: limit.coefficient_bits(),
             steps: limit.exact_steps().steps(),
@@ -236,13 +236,13 @@ impl ExactUse {
         }
     }
 
-    fn charge(&mut self, steps: u64) -> Result<(), RealizationError> {
+    fn charge(&mut self, steps: u64) -> Result<(), GeometryError> {
         let required = self
             .used
             .checked_add(steps)
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         if required > self.exact_steps {
-            return Err(RealizationError::ExactSteps {
+            return Err(GeometryError::ExactSteps {
                 required,
                 limit: self.exact_steps,
             });
@@ -251,9 +251,9 @@ impl ExactUse {
         Ok(())
     }
 
-    fn grow(&mut self, bits: u64, steps: u64) -> Result<(), RealizationError> {
+    fn grow(&mut self, bits: u64, steps: u64) -> Result<(), GeometryError> {
         if bits > self.coefficient_bits {
-            return Err(RealizationError::CoefficientBits {
+            return Err(GeometryError::CoefficientBits {
                 required: bits,
                 limit: self.coefficient_bits,
             });
@@ -266,31 +266,31 @@ impl ExactUse {
         left: &BigRational,
         right: &BigRational,
         carry: u64,
-    ) -> Result<(), RealizationError> {
+    ) -> Result<(), GeometryError> {
         let bits = rational_bits(left)
             .checked_add(rational_bits(right))
             .and_then(|bits| bits.checked_add(carry))
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         self.grow(bits, 1)
     }
 }
 
-fn checked_u64(value: usize) -> Result<u64, RealizationError> {
-    u64::try_from(value).map_err(|_| RealizationError::Overflow)
+fn checked_u64(value: usize) -> Result<u64, GeometryError> {
+    u64::try_from(value).map_err(|_| GeometryError::Overflow)
 }
 
-fn bytes(count: usize, width: usize) -> Result<u64, RealizationError> {
+fn bytes(count: usize, width: usize) -> Result<u64, GeometryError> {
     checked_u64(count)?
         .checked_mul(checked_u64(width)?)
-        .ok_or(RealizationError::Overflow)
+        .ok_or(GeometryError::Overflow)
 }
 
 fn realization_peak_bytes(
     topology: &ComplexCore,
     ambient: usize,
     retained: u64,
-    limit: RealizationLimit,
-) -> Result<u64, RealizationError> {
+    limit: Limit,
+) -> Result<u64, GeometryError> {
     let mut topology_bytes = 0_u64;
     let mut basis_count = 0_usize;
     let mut incidence_count = 0_usize;
@@ -299,58 +299,56 @@ fn realization_peak_bytes(
         let basis = topology.basis(degree)?;
         basis_count = basis_count
             .checked_add(basis.row_count())
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         largest_basis = largest_basis.max(basis.row_count());
         if degree > 0 {
             incidence_count = incidence_count
                 .checked_add(topology.immediate_faces(degree)?.len())
-                .ok_or(RealizationError::Overflow)?;
+                .ok_or(GeometryError::Overflow)?;
         }
         topology_bytes = topology_bytes
             .checked_add(bytes(basis.values().len(), size_of::<usize>())?)
             .and_then(|value| value.checked_add(bytes(basis.row_count(), size_of::<i8>()).ok()?))
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         let boundary = topology.chain_view().boundary(degree)?;
         let indices = boundary
             .indptr()
             .len()
             .checked_add(boundary.indices().len())
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         topology_bytes = topology_bytes
             .checked_add(bytes(indices, size_of::<usize>())?)
             .and_then(|value| {
                 value.checked_add(bytes(boundary.indices().len(), size_of::<i8>()).ok()?)
             })
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
     }
     let degree = topology.dimension();
-    let dense = degree
-        .checked_mul(degree)
-        .ok_or(RealizationError::Overflow)?;
-    let degrees = degree.checked_add(1).ok_or(RealizationError::Overflow)?;
+    let dense = degree.checked_mul(degree).ok_or(GeometryError::Overflow)?;
+    let degrees = degree.checked_add(1).ok_or(GeometryError::Overflow)?;
     let slots = degrees
         .checked_mul(ambient)
         .and_then(|value| value.checked_add(degree.checked_mul(ambient)?))
         .and_then(|value| value.checked_add(dense.checked_mul(2)?))
         .and_then(|value| value.checked_add(degree))
-        .ok_or(RealizationError::Overflow)?;
+        .ok_or(GeometryError::Overflow)?;
     let component_bits = limit.coefficient_bits();
     let limbs = component_bits.div_ceil(u64::from(usize::BITS));
     let rational_bytes = checked_u64(size_of::<BigRational>())?
         .checked_add(
             limbs
                 .checked_mul(2 * checked_u64(size_of::<usize>())?)
-                .ok_or(RealizationError::Overflow)?,
+                .ok_or(GeometryError::Overflow)?,
         )
-        .ok_or(RealizationError::Overflow)?;
+        .ok_or(GeometryError::Overflow)?;
     let rational_scratch = checked_u64(slots)?
         .checked_mul(rational_bytes)
-        .ok_or(RealizationError::Overflow)?;
+        .ok_or(GeometryError::Overflow)?;
     let dense_f64 = degree
         .checked_mul(ambient)
         .and_then(|value| value.checked_add(dense))
         .and_then(|value| value.checked_add(degree.checked_mul(2)?))
-        .ok_or(RealizationError::Overflow)?;
+        .ok_or(GeometryError::Overflow)?;
     let metric_scratch = incidence_count
         .checked_mul(size_of::<(usize, f64)>() + size_of::<f64>())
         .and_then(|value| {
@@ -360,16 +358,16 @@ fn realization_peak_bytes(
             )
         })
         .and_then(|value| value.checked_add(degrees.checked_mul(size_of::<Box<[f64]>>())?))
-        .ok_or(RealizationError::Overflow)?;
+        .ok_or(GeometryError::Overflow)?;
     let scratch = rational_scratch
         .checked_add(bytes(dense_f64, size_of::<f64>())?)
         .and_then(|value| value.checked_add(checked_u64(metric_scratch).ok()?))
         .and_then(|value| value.checked_add(bytes(basis_count, size_of::<f64>()).ok()?))
-        .ok_or(RealizationError::Overflow)?;
+        .ok_or(GeometryError::Overflow)?;
     retained
         .checked_add(topology_bytes)
         .and_then(|value| value.checked_add(scratch))
-        .ok_or(RealizationError::Overflow)
+        .ok_or(GeometryError::Overflow)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -382,7 +380,7 @@ enum MetricClassification {
 struct MetricRows {
     measures: Box<[Box<[f64]>]>,
     signs: Box<[Box<[i8]>]>,
-    coefficients: Result<Box<[Box<[f64]>]>, RealizationError>,
+    coefficients: Result<Box<[Box<[f64]>]>, GeometryError>,
     classification: MetricClassification,
 }
 
@@ -413,14 +411,14 @@ mod metric_sealed {
 /// Borrowing operations shared by finite circumcentric pairing refinements.
 pub trait PairingCapability: metric_sealed::PairingCapability {
     #[must_use]
-    fn realization(&self) -> &Arc<EuclideanRealization>;
+    fn realization(&self) -> &Arc<Geometry>;
 
     /// Borrow conventional diagonal Hodge coefficients without copying rows.
     ///
     /// # Errors
     ///
     /// Returns an unrepresented-degree failure.
-    fn hodge_coefficients_slice(&self, degree: usize) -> Result<&[f64], RealizationError> {
+    fn hodge_coefficients_slice(&self, degree: usize) -> Result<&[f64], GeometryError> {
         self.realization()
             .metric_rows()?
             .coefficients
@@ -428,7 +426,7 @@ pub trait PairingCapability: metric_sealed::PairingCapability {
             .map_err(|error| *error)?
             .get(degree)
             .map(AsRef::as_ref)
-            .ok_or(RealizationError::DegreeOutside)
+            .ok_or(GeometryError::DegreeOutside)
     }
 
     /// Metric-induced identification from cochains to chains in the primal basis.
@@ -439,9 +437,7 @@ pub trait PairingCapability: metric_sealed::PairingCapability {
     fn riesz(
         &self,
         degree: usize,
-    ) -> Result<crate::LinearOperator<crate::Cochain, crate::Chain>, crate::OperatorError> {
-        crate::LinearOperator::riesz(Arc::clone(self.realization()), degree)
-    }
+    ) -> Result<crate::LinearOperator<crate::Cochain, crate::Chain>, crate::OperatorError>;
 }
 
 /// Borrowing operations requiring a nondegenerate circumcentric pairing.
@@ -456,9 +452,7 @@ pub trait NondegenerateCapability:
     fn inverse_riesz(
         &self,
         degree: usize,
-    ) -> Result<crate::LinearOperator<crate::Chain, crate::Cochain>, crate::OperatorError> {
-        crate::LinearOperator::inverse_riesz(Arc::clone(self.realization()), degree)
-    }
+    ) -> Result<crate::LinearOperator<crate::Chain, crate::Cochain>, crate::OperatorError>;
 
     /// Metric codifferential from degree `k` to degree `k - 1`.
     ///
@@ -468,9 +462,7 @@ pub trait NondegenerateCapability:
     fn codifferential(
         &self,
         degree: usize,
-    ) -> Result<crate::LinearOperator<crate::Cochain, crate::Cochain>, crate::OperatorError> {
-        crate::LinearOperator::codifferential(Arc::clone(self.realization()), degree)
-    }
+    ) -> Result<crate::LinearOperator<crate::Cochain, crate::Cochain>, crate::OperatorError>;
 
     /// Metric Hodge Laplacian on one cochain degree.
     ///
@@ -480,21 +472,19 @@ pub trait NondegenerateCapability:
     fn laplacian(
         &self,
         degree: usize,
-    ) -> Result<crate::LinearOperator<crate::Cochain, crate::Cochain>, crate::OperatorError> {
-        crate::LinearOperator::laplacian(Arc::clone(self.realization()), degree)
-    }
+    ) -> Result<crate::LinearOperator<crate::Cochain, crate::Cochain>, crate::OperatorError>;
 }
 
 /// Finite signed or zero circumcentric pairing over one realization.
 #[derive(Clone, Debug)]
 pub struct CircumcentricPairing {
-    realization: Arc<EuclideanRealization>,
+    pub(crate) realization: Arc<Geometry>,
 }
 
 /// Nondegenerate, possibly indefinite circumcentric pairing.
 #[derive(Clone, Debug)]
 pub struct NondegeneratePairing {
-    realization: Arc<EuclideanRealization>,
+    pub(crate) realization: Arc<Geometry>,
 }
 
 /// Strictly positive circumcentric metric.
@@ -503,14 +493,14 @@ pub struct NondegeneratePairing {
 ///
 /// ```compile_fail
 /// use std::sync::Arc;
-/// use polygeo_core::{EuclideanRealization, PositiveMetric};
-/// fn forge(realization: Arc<EuclideanRealization>) -> PositiveMetric {
-///     PositiveMetric { realization }
+/// use polygeo_core::{Geometry, Metric};
+/// fn forge(realization: Arc<Geometry>) -> Metric {
+///     Metric { realization }
 /// }
 /// ```
 #[derive(Clone, Debug)]
-pub struct PositiveMetric {
-    realization: Arc<EuclideanRealization>,
+pub struct Metric {
+    pub(crate) realization: Arc<Geometry>,
 }
 
 impl CircumcentricPairing {
@@ -528,35 +518,18 @@ impl CircumcentricPairing {
     /// # Errors
     ///
     /// Returns a zero counterexample or indefinite classification.
-    pub fn require_positive(self) -> Result<PositiveMetric, MetricError> {
+    pub fn require_positive(self) -> Result<Metric, MetricError> {
         self.try_into()
     }
 }
 
-impl PairingCapability for CircumcentricPairing {
-    fn realization(&self) -> &Arc<EuclideanRealization> {
-        &self.realization
-    }
-}
 impl metric_sealed::PairingCapability for CircumcentricPairing {}
 
-impl PairingCapability for NondegeneratePairing {
-    fn realization(&self) -> &Arc<EuclideanRealization> {
-        &self.realization
-    }
-}
 impl metric_sealed::PairingCapability for NondegeneratePairing {}
 impl metric_sealed::NondegenerateCapability for NondegeneratePairing {}
-impl NondegenerateCapability for NondegeneratePairing {}
 
-impl PairingCapability for PositiveMetric {
-    fn realization(&self) -> &Arc<EuclideanRealization> {
-        &self.realization
-    }
-}
-impl metric_sealed::PairingCapability for PositiveMetric {}
-impl metric_sealed::NondegenerateCapability for PositiveMetric {}
-impl NondegenerateCapability for PositiveMetric {}
+impl metric_sealed::PairingCapability for Metric {}
+impl metric_sealed::NondegenerateCapability for Metric {}
 
 impl TryFrom<CircumcentricPairing> for NondegeneratePairing {
     type Error = MetricError;
@@ -573,7 +546,7 @@ impl TryFrom<CircumcentricPairing> for NondegeneratePairing {
     }
 }
 
-impl TryFrom<CircumcentricPairing> for PositiveMetric {
+impl TryFrom<CircumcentricPairing> for Metric {
     type Error = MetricError;
 
     fn try_from(pairing: CircumcentricPairing) -> Result<Self, Self::Error> {
@@ -589,7 +562,7 @@ impl TryFrom<CircumcentricPairing> for PositiveMetric {
     }
 }
 
-impl TryFrom<NondegeneratePairing> for PositiveMetric {
+impl TryFrom<NondegeneratePairing> for Metric {
     type Error = MetricError;
 
     fn try_from(pairing: NondegeneratePairing) -> Result<Self, Self::Error> {
@@ -603,16 +576,16 @@ impl TryFrom<NondegeneratePairing> for PositiveMetric {
     }
 }
 
-impl From<PositiveMetric> for NondegeneratePairing {
-    fn from(metric: PositiveMetric) -> Self {
+impl From<Metric> for NondegeneratePairing {
+    fn from(metric: Metric) -> Self {
         Self {
             realization: metric.realization,
         }
     }
 }
 
-impl From<PositiveMetric> for CircumcentricPairing {
-    fn from(metric: PositiveMetric) -> Self {
+impl From<Metric> for CircumcentricPairing {
+    fn from(metric: Metric) -> Self {
         Self {
             realization: metric.realization,
         }
@@ -628,7 +601,7 @@ impl From<NondegeneratePairing> for CircumcentricPairing {
 }
 
 /// Immutable Euclidean realization bound to one admitted simplicial owner.
-pub struct EuclideanRealization {
+pub struct Geometry {
     topology: Arc<ComplexCore>,
     ambient_dimension: usize,
     positions: Box<[f64]>,
@@ -637,10 +610,10 @@ pub struct EuclideanRealization {
     metric: OnceCell<MetricRows>,
 }
 
-impl fmt::Debug for EuclideanRealization {
+impl fmt::Debug for Geometry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("EuclideanRealization")
+            .debug_struct("Geometry")
             .field("dimension", &self.topology.dimension())
             .field("ambient_dimension", &self.ambient_dimension)
             .field("vertex_count", &self.topology.vertex_count())
@@ -648,7 +621,7 @@ impl fmt::Debug for EuclideanRealization {
     }
 }
 
-impl EuclideanRealization {
+impl Geometry {
     /// Admit one owned entity-major position buffer and all primal measures.
     ///
     /// # Errors
@@ -659,53 +632,49 @@ impl EuclideanRealization {
         topology: Arc<ComplexCore>,
         ambient_dimension: usize,
         positions: Vec<f64>,
-        limit: RealizationLimit,
-    ) -> Result<Arc<Self>, RealizationError> {
+        limit: Limit,
+    ) -> Result<Arc<Self>, GeometryError> {
         if ambient_dimension < topology.dimension() {
-            return Err(RealizationError::AmbientDimension);
+            return Err(GeometryError::AmbientDimension);
         }
         let position_count = topology
             .vertex_count()
             .checked_mul(ambient_dimension)
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         if positions.len() != position_count {
-            return Err(RealizationError::PositionShape);
+            return Err(GeometryError::PositionShape);
         }
         if positions.iter().any(|value| !value.is_finite()) {
-            return Err(RealizationError::NonFinite);
+            return Err(GeometryError::NonFinite);
         }
 
         let basis_count = (0..=topology.dimension())
             .try_fold(0_usize, |total, degree| {
                 total.checked_add(topology.basis(degree).ok()?.row_count())
             })
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         let retained_f64 = position_count
-            .checked_add(
-                basis_count
-                    .checked_mul(3)
-                    .ok_or(RealizationError::Overflow)?,
-            )
-            .ok_or(RealizationError::Overflow)?;
+            .checked_add(basis_count.checked_mul(3).ok_or(GeometryError::Overflow)?)
+            .ok_or(GeometryError::Overflow)?;
         let sign_bytes = basis_count
             .checked_mul(size_of::<i8>())
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         let outer_bytes = topology
             .dimension()
             .checked_add(1)
             .and_then(|rows| rows.checked_mul(4))
             .and_then(|rows| rows.checked_mul(size_of::<Box<[f64]>>()))
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         let retained_logical_bytes = retained_f64
             .checked_mul(size_of::<f64>())
             .and_then(|bytes| bytes.checked_add(sign_bytes))
             .and_then(|bytes| bytes.checked_add(outer_bytes))
-            .ok_or(RealizationError::Overflow)?;
+            .ok_or(GeometryError::Overflow)?;
         let retained_logical_bytes =
-            u64::try_from(retained_logical_bytes).map_err(|_| RealizationError::Overflow)?;
+            u64::try_from(retained_logical_bytes).map_err(|_| GeometryError::Overflow)?;
         let storage = limit.storage();
         if retained_logical_bytes > storage.retained_logical_bytes() {
-            return Err(RealizationError::RetainedLogicalBytes {
+            return Err(GeometryError::RetainedLogicalBytes {
                 required: retained_logical_bytes,
                 limit: storage.retained_logical_bytes(),
             });
@@ -713,7 +682,7 @@ impl EuclideanRealization {
         let peak_bytes =
             realization_peak_bytes(&topology, ambient_dimension, retained_logical_bytes, limit)?;
         if peak_bytes > storage.peak_live_logical_bytes() {
-            return Err(RealizationError::PeakLiveLogicalBytes {
+            return Err(GeometryError::PeakLiveLogicalBytes {
                 required: peak_bytes,
                 limit: storage.peak_live_logical_bytes(),
             });
@@ -739,11 +708,7 @@ impl EuclideanRealization {
     /// # Errors
     /// Rejects the same shape, finiteness, degeneracy, or resource failures as
     /// [`Self::admit`].
-    pub fn deform(
-        &self,
-        positions: Vec<f64>,
-        limit: RealizationLimit,
-    ) -> Result<Arc<Self>, RealizationError> {
+    pub fn deform(&self, positions: Vec<f64>, limit: Limit) -> Result<Arc<Self>, GeometryError> {
         Self::admit(
             Arc::clone(&self.topology),
             self.ambient_dimension,
@@ -771,12 +736,12 @@ impl EuclideanRealization {
     ///
     /// # Errors
     ///
-    /// Returns [`RealizationError::DegreeOutside`] for an unrepresented degree.
-    pub fn primal_measures(&self, degree: usize) -> Result<&[f64], RealizationError> {
+    /// Returns [`GeometryError::DegreeOutside`] for an unrepresented degree.
+    pub fn primal_measures(&self, degree: usize) -> Result<&[f64], GeometryError> {
         self.primal
             .get(degree)
             .map(AsRef::as_ref)
-            .ok_or(RealizationError::DegreeOutside)
+            .ok_or(GeometryError::DegreeOutside)
     }
 
     /// Borrow one immutable, lazily published dual-measure row.
@@ -784,12 +749,12 @@ impl EuclideanRealization {
     /// # Errors
     ///
     /// Rejects an unrepresented degree or an unrepresentable dual recurrence.
-    pub fn dual_measures(&self, degree: usize) -> Result<&[f64], RealizationError> {
+    pub fn dual_measures(&self, degree: usize) -> Result<&[f64], GeometryError> {
         self.metric_rows()?
             .measures
             .get(degree)
             .map(AsRef::as_ref)
-            .ok_or(RealizationError::DegreeOutside)
+            .ok_or(GeometryError::DegreeOutside)
     }
 
     /// Borrow certified represented signs aligned with one dual-measure row.
@@ -797,12 +762,12 @@ impl EuclideanRealization {
     /// # Errors
     ///
     /// Rejects an unrepresented degree or an unrepresentable dual recurrence.
-    pub fn dual_signs(&self, degree: usize) -> Result<&[i8], RealizationError> {
+    pub fn dual_signs(&self, degree: usize) -> Result<&[i8], GeometryError> {
         self.metric_rows()?
             .signs
             .get(degree)
             .map(AsRef::as_ref)
-            .ok_or(RealizationError::DegreeOutside)
+            .ok_or(GeometryError::DegreeOutside)
     }
 
     /// Admit the finite circumcentric pairing derived from this realization.
@@ -810,9 +775,7 @@ impl EuclideanRealization {
     /// # Errors
     ///
     /// Returns a resource, topology, or representability failure before publishing a handle.
-    pub fn circumcentric_pairing(
-        self: &Arc<Self>,
-    ) -> Result<CircumcentricPairing, RealizationError> {
+    pub fn circumcentric_pairing(self: &Arc<Self>) -> Result<CircumcentricPairing, GeometryError> {
         self.metric_rows()?
             .coefficients
             .as_ref()
@@ -822,17 +785,17 @@ impl EuclideanRealization {
         })
     }
 
-    pub(crate) fn hodge_coefficients(&self, degree: usize) -> Result<&[f64], RealizationError> {
+    pub(crate) fn hodge_coefficients(&self, degree: usize) -> Result<&[f64], GeometryError> {
         self.metric_rows()?
             .coefficients
             .as_ref()
             .map_err(|error| *error)?
             .get(degree)
             .map(AsRef::as_ref)
-            .ok_or(RealizationError::DegreeOutside)
+            .ok_or(GeometryError::DegreeOutside)
     }
 
-    fn metric_rows(&self) -> Result<&MetricRows, RealizationError> {
+    fn metric_rows(&self) -> Result<&MetricRows, GeometryError> {
         self.metric.get_or_try_init(|| {
             let mut exact = ExactUse::new(self.exact_limit);
             compute_metric(self, &mut exact)
@@ -852,22 +815,22 @@ fn compute_primal(
     ambient: usize,
     positions: &[f64],
     exact: &mut ExactUse,
-) -> Result<Box<[Box<[f64]>]>, RealizationError> {
+) -> Result<Box<[Box<[f64]>]>, GeometryError> {
     let mut rows = Vec::new();
     rows.try_reserve_exact(topology.dimension() + 1)
-        .map_err(|_| RealizationError::Allocation)?;
+        .map_err(|_| GeometryError::Allocation)?;
     rows.push(vec![1.0; topology.vertex_count()].into_boxed_slice());
     for degree in 1..=topology.dimension() {
         let basis = topology.basis(degree)?;
         let mut values = Vec::new();
         values
             .try_reserve_exact(basis.row_count())
-            .map_err(|_| RealizationError::Allocation)?;
+            .map_err(|_| GeometryError::Allocation)?;
         let mut deferred = None;
         for simplex in basis.values().chunks_exact(degree + 1) {
             match simplex_measure(simplex, positions, ambient, exact) {
                 Ok(value) => values.push(value),
-                Err(RealizationError::Degenerate) => return Err(RealizationError::Degenerate),
+                Err(GeometryError::Degenerate) => return Err(GeometryError::Degenerate),
                 Err(error) => {
                     deferred.get_or_insert(error);
                     values.push(0.0);
@@ -887,7 +850,7 @@ fn simplex_measure(
     positions: &[f64],
     ambient: usize,
     exact: &mut ExactUse,
-) -> Result<f64, RealizationError> {
+) -> Result<f64, GeometryError> {
     let degree = simplex.len() - 1;
     let (normalized, scales) = normalized_edges(simplex, positions, ambient)?;
     let diagonals = qr_diagonals(&normalized, ambient, degree);
@@ -905,7 +868,7 @@ fn simplex_measure(
     scaled_product(
         scales.iter().copied().chain([determinant.sqrt()]),
         (2..=degree).map(float),
-        RealizationError::Unrepresentable,
+        GeometryError::Unrepresentable,
     )
 }
 
@@ -944,7 +907,7 @@ fn normalized_edges(
     simplex: &[usize],
     positions: &[f64],
     ambient: usize,
-) -> Result<(Vec<f64>, Vec<f64>), RealizationError> {
+) -> Result<(Vec<f64>, Vec<f64>), GeometryError> {
     let degree = simplex.len() - 1;
     let base = simplex[0] * ambient;
     let mut edges = vec![0.0; ambient * degree];
@@ -954,13 +917,13 @@ fn normalized_edges(
         for coordinate in 0..ambient {
             let value = positions[vertex + coordinate] - positions[base + coordinate];
             if !value.is_finite() {
-                return Err(RealizationError::Unrepresentable);
+                return Err(GeometryError::Unrepresentable);
             }
             edges[column * ambient + coordinate] = value;
             scales[column] = scales[column].max(value.abs());
         }
         if scales[column] == 0.0 {
-            return Err(RealizationError::Degenerate);
+            return Err(GeometryError::Degenerate);
         }
         for coordinate in 0..ambient {
             edges[column * ambient + coordinate] /= scales[column];
@@ -1007,7 +970,7 @@ fn gram_matrix(
     edges: &[f64],
     ambient: usize,
     degree: usize,
-) -> Result<DenseSquare<f64>, RealizationError> {
+) -> Result<DenseSquare<f64>, GeometryError> {
     DenseSquare::try_from_fn(degree, |left, right| {
         dot_columns(edges, left, edges, right, ambient)
     })
@@ -1024,7 +987,7 @@ fn rational_bits(value: &BigRational) -> u64 {
 fn metered_exact_from_binary64(
     value: f64,
     exact: &mut ExactUse,
-) -> Result<BigRational, RealizationError> {
+) -> Result<BigRational, GeometryError> {
     let exponent = ((value.to_bits() >> 52) & 0x7ff) as i32;
     let bits = if value == 0.0 {
         0
@@ -1041,7 +1004,7 @@ fn exact_add(
     left: &BigRational,
     right: &BigRational,
     exact: &mut ExactUse,
-) -> Result<BigRational, RealizationError> {
+) -> Result<BigRational, GeometryError> {
     exact.binary(left, right, 1)?;
     Ok(left + right)
 }
@@ -1050,7 +1013,7 @@ fn exact_sub(
     left: &BigRational,
     right: &BigRational,
     exact: &mut ExactUse,
-) -> Result<BigRational, RealizationError> {
+) -> Result<BigRational, GeometryError> {
     exact.binary(left, right, 1)?;
     Ok(left - right)
 }
@@ -1059,7 +1022,7 @@ fn exact_mul(
     left: &BigRational,
     right: &BigRational,
     exact: &mut ExactUse,
-) -> Result<BigRational, RealizationError> {
+) -> Result<BigRational, GeometryError> {
     exact.binary(left, right, 0)?;
     Ok(left * right)
 }
@@ -1068,7 +1031,7 @@ fn exact_div(
     left: &BigRational,
     right: &BigRational,
     exact: &mut ExactUse,
-) -> Result<BigRational, RealizationError> {
+) -> Result<BigRational, GeometryError> {
     exact.binary(left, right, 0)?;
     Ok(left / right)
 }
@@ -1078,16 +1041,16 @@ fn exact_points(
     positions: &[f64],
     ambient: usize,
     exact: &mut ExactUse,
-) -> Result<Box<[BigRational]>, RealizationError> {
+) -> Result<Box<[BigRational]>, GeometryError> {
     let mut points = Vec::new();
     points
         .try_reserve_exact(
             simplex
                 .len()
                 .checked_mul(ambient)
-                .ok_or(RealizationError::Overflow)?,
+                .ok_or(GeometryError::Overflow)?,
         )
-        .map_err(|_| RealizationError::Allocation)?;
+        .map_err(|_| GeometryError::Allocation)?;
     for &vertex in simplex {
         points.extend(
             positions[vertex * ambient..(vertex + 1) * ambient]
@@ -1105,17 +1068,13 @@ fn exact_gram(
     positions: &[f64],
     ambient: usize,
     exact: &mut ExactUse,
-) -> Result<DenseSquare<BigRational>, RealizationError> {
+) -> Result<DenseSquare<BigRational>, GeometryError> {
     let degree = simplex.len() - 1;
     let points = exact_points(simplex, positions, ambient, exact)?;
     let mut edges = Vec::new();
     edges
-        .try_reserve_exact(
-            degree
-                .checked_mul(ambient)
-                .ok_or(RealizationError::Overflow)?,
-        )
-        .map_err(|_| RealizationError::Allocation)?;
+        .try_reserve_exact(degree.checked_mul(ambient).ok_or(GeometryError::Overflow)?)
+        .map_err(|_| GeometryError::Allocation)?;
     for vertex in 1..=degree {
         for coordinate in 0..ambient {
             edges.push(exact_sub(
@@ -1127,12 +1086,8 @@ fn exact_gram(
     }
     let mut values = Vec::new();
     values
-        .try_reserve_exact(
-            degree
-                .checked_mul(degree)
-                .ok_or(RealizationError::Overflow)?,
-        )
-        .map_err(|_| RealizationError::Allocation)?;
+        .try_reserve_exact(degree.checked_mul(degree).ok_or(GeometryError::Overflow)?)
+        .map_err(|_| GeometryError::Allocation)?;
     for left in 0..degree {
         for right in 0..degree {
             exact.grow(1, 1)?;
@@ -1160,26 +1115,26 @@ fn exact_measure(
     positions: &[f64],
     ambient: usize,
     exact: &mut ExactUse,
-) -> Result<f64, RealizationError> {
+) -> Result<f64, GeometryError> {
     let degree = simplex.len() - 1;
     let determinant = exact_determinant(exact_gram(simplex, positions, ambient, exact)?, exact)?;
     exact.charge(1)?;
     if !determinant.is_positive() {
-        return Err(RealizationError::Degenerate);
+        return Err(GeometryError::Degenerate);
     }
     let factorial = (2..=degree).fold(1.0, |product, value| product * float(value));
     let measure = metered_binary64_sqrt(&determinant, exact)? / factorial;
     if measure.is_finite() && measure > 0.0 {
         Ok(measure)
     } else {
-        Err(RealizationError::Unrepresentable)
+        Err(GeometryError::Unrepresentable)
     }
 }
 
 fn exact_determinant(
     mut matrix: DenseSquare<BigRational>,
     exact: &mut ExactUse,
-) -> Result<BigRational, RealizationError> {
+) -> Result<BigRational, GeometryError> {
     exact.grow(1, 1)?;
     let mut determinant = BigRational::one();
     let mut negative = false;
@@ -1218,14 +1173,14 @@ fn exact_determinant(
 }
 
 fn compute_metric(
-    realization: &EuclideanRealization,
+    realization: &Geometry,
     exact: &mut ExactUse,
-) -> Result<MetricRows, RealizationError> {
+) -> Result<MetricRows, GeometryError> {
     let dimension = realization.topology.dimension();
     let mut steps = Vec::new();
     steps
         .try_reserve_exact(dimension + 1)
-        .map_err(|_| RealizationError::Allocation)?;
+        .map_err(|_| GeometryError::Allocation)?;
     steps.push(Box::default());
     for degree in 1..=dimension {
         steps.push(circumcentric_steps(realization, degree, exact)?);
@@ -1244,7 +1199,7 @@ fn compute_metric(
         let mut contributions = Vec::new();
         contributions
             .try_reserve_exact(faces.len())
-            .map_err(|_| RealizationError::Allocation)?;
+            .map_err(|_| GeometryError::Allocation)?;
         for (upper_index, upper_value) in measures[upper_degree].iter().copied().enumerate() {
             for local in 0..width {
                 let offset = upper_index * width + local;
@@ -1254,7 +1209,7 @@ fn compute_metric(
                         steps[upper_degree][offset],
                         upper_value,
                         float(dimension - lower_degree),
-                        RealizationError::Unrepresentable,
+                        GeometryError::Unrepresentable,
                     )?,
                 ));
             }
@@ -1265,7 +1220,7 @@ fn compute_metric(
     }
     let classification = classify_metric(&signs);
     let coefficients = match metric_coefficients(&measures, &realization.primal) {
-        Err(RealizationError::Unrepresentable) => Err(RealizationError::Unrepresentable),
+        Err(GeometryError::Unrepresentable) => Err(GeometryError::Unrepresentable),
         Err(error) => return Err(error),
         Ok(coefficients) => Ok(coefficients),
     };
@@ -1280,20 +1235,20 @@ fn compute_metric(
 fn metric_coefficients(
     dual_rows: &[Box<[f64]>],
     primal_rows: &[Box<[f64]>],
-) -> Result<Box<[Box<[f64]>]>, RealizationError> {
+) -> Result<Box<[Box<[f64]>]>, GeometryError> {
     let mut rows = Vec::new();
     rows.try_reserve_exact(dual_rows.len())
-        .map_err(|_| RealizationError::Allocation)?;
+        .map_err(|_| GeometryError::Allocation)?;
     for (dual, primal) in dual_rows.iter().zip(primal_rows) {
         let mut row = Vec::new();
         row.try_reserve_exact(dual.len())
-            .map_err(|_| RealizationError::Allocation)?;
+            .map_err(|_| GeometryError::Allocation)?;
         for (dual, primal) in dual.iter().zip(primal) {
             row.push(scaled_pair(
                 *dual,
                 1.0,
                 *primal,
-                RealizationError::Unrepresentable,
+                GeometryError::Unrepresentable,
             )?);
         }
         rows.push(row.into_boxed_slice());
@@ -1315,16 +1270,16 @@ fn classify_metric(signs: &[Box<[i8]>]) -> MetricClassification {
 }
 
 fn circumcentric_steps(
-    realization: &EuclideanRealization,
+    realization: &Geometry,
     degree: usize,
     exact: &mut ExactUse,
-) -> Result<Box<[f64]>, RealizationError> {
+) -> Result<Box<[f64]>, GeometryError> {
     let basis = realization.topology.basis(degree)?;
     let faces = realization.topology.immediate_faces(degree)?;
     let mut steps = Vec::new();
     steps
         .try_reserve_exact(faces.len())
-        .map_err(|_| RealizationError::Allocation)?;
+        .map_err(|_| GeometryError::Allocation)?;
     for (upper, simplex) in basis.values().chunks_exact(degree + 1).enumerate() {
         let barycentric = circumcenter_barycentric(
             simplex,
@@ -1338,7 +1293,7 @@ fn circumcentric_steps(
                 float(degree),
                 realization.primal[degree][upper],
                 realization.primal[degree - 1][lower],
-                RealizationError::Unrepresentable,
+                GeometryError::Unrepresentable,
             )?;
             steps.push(exact_scaled_if_needed(barycentric[local], height)?);
         }
@@ -1351,7 +1306,7 @@ fn circumcenter_barycentric(
     positions: &[f64],
     ambient: usize,
     exact: &mut ExactUse,
-) -> Result<Vec<f64>, RealizationError> {
+) -> Result<Vec<f64>, GeometryError> {
     let degree = simplex.len() - 1;
     let (edges, scales) = normalized_edges(simplex, positions, ambient)?;
     let diagonals = qr_diagonals(&edges, ambient, degree);
@@ -1434,7 +1389,7 @@ fn exact_barycentric(
     positions: &[f64],
     ambient: usize,
     exact: &mut ExactUse,
-) -> Result<Vec<f64>, RealizationError> {
+) -> Result<Vec<f64>, GeometryError> {
     let mut gram = exact_gram(simplex, positions, ambient, exact)?;
     exact.grow(2, 1)?;
     let two = BigRational::from_integer(BigInt::from(2_u8));
@@ -1460,7 +1415,7 @@ fn solve_exact(
     matrix: &mut DenseSquare<BigRational>,
     right: &mut [BigRational],
     exact: &mut ExactUse,
-) -> Result<(), RealizationError> {
+) -> Result<(), GeometryError> {
     for column in 0..matrix.order {
         let mut pivot = None;
         for row in column..matrix.order {
@@ -1470,7 +1425,7 @@ fn solve_exact(
                 break;
             }
         }
-        let pivot = pivot.ok_or(RealizationError::Degenerate)?;
+        let pivot = pivot.ok_or(GeometryError::Degenerate)?;
         matrix.swap_rows(column, pivot);
         right.swap(column, pivot);
         let divisor = matrix.row(column)[column].clone();
@@ -1501,12 +1456,12 @@ fn solve_exact(
     Ok(())
 }
 
-fn exact_scaled_if_needed(coefficient: f64, scale: f64) -> Result<f64, RealizationError> {
+fn exact_scaled_if_needed(coefficient: f64, scale: f64) -> Result<f64, GeometryError> {
     let value = coefficient * scale;
     if value.is_finite() && (value != 0.0 || coefficient == 0.0 || scale == 0.0) {
         Ok(value)
     } else {
-        Err(RealizationError::Unrepresentable)
+        Err(GeometryError::Unrepresentable)
     }
 }
 
@@ -1514,16 +1469,16 @@ fn scaled_pair(
     left: f64,
     right: f64,
     divisor: f64,
-    error: RealizationError,
-) -> Result<f64, RealizationError> {
+    error: GeometryError,
+) -> Result<f64, GeometryError> {
     scaled_product([left, right], [divisor], error)
 }
 
 fn scaled_product(
     factors: impl IntoIterator<Item = f64>,
     divisors: impl IntoIterator<Item = f64>,
-    error: RealizationError,
-) -> Result<f64, RealizationError> {
+    error: GeometryError,
+) -> Result<f64, GeometryError> {
     let mut mantissa = 1.0;
     let mut exponent = 0_i32;
     let mut nonzero = true;
@@ -1578,7 +1533,7 @@ fn sum_incident(
     contributions: &[(usize, f64)],
     count: usize,
     exact: &mut ExactUse,
-) -> Result<(Vec<f64>, Vec<i8>), RealizationError> {
+) -> Result<(Vec<f64>, Vec<i8>), GeometryError> {
     let mut sums = vec![0.0; count];
     let mut corrections = vec![0.0; count];
     let mut magnitudes = vec![0.0; count];
@@ -1597,7 +1552,7 @@ fn sum_incident(
     for (value, correction) in sums.iter_mut().zip(corrections) {
         *value += correction;
         if !value.is_finite() {
-            return Err(RealizationError::Unrepresentable);
+            return Err(GeometryError::Unrepresentable);
         }
     }
     let signs = sums
@@ -1613,7 +1568,7 @@ fn sum_incident(
                 exact_sum_sign(contributions, row, exact)
             }
         })
-        .collect::<Result<Vec<_>, RealizationError>>()?;
+        .collect::<Result<Vec<_>, GeometryError>>()?;
     Ok((sums, signs))
 }
 
@@ -1621,7 +1576,7 @@ fn exact_sum_sign(
     contributions: &[(usize, f64)],
     row: usize,
     use_: &mut ExactUse,
-) -> Result<i8, RealizationError> {
+) -> Result<i8, GeometryError> {
     use_.grow(1, 1)?;
     let mut sum = BigRational::zero();
     for (_, value) in contributions.iter().filter(|(index, _)| *index == row) {
@@ -1660,23 +1615,20 @@ fn exact_from_binary64(value: f64) -> BigRational {
     }
 }
 
-fn metered_binary64(value: &BigRational, exact: &mut ExactUse) -> Result<f64, RealizationError> {
+fn metered_binary64(value: &BigRational, exact: &mut ExactUse) -> Result<f64, GeometryError> {
     let bits = rational_bits(value)
         .checked_add(BINARY64_UNDERFLOW_BIT_DIFFERENCE)
-        .ok_or(RealizationError::Overflow)?;
+        .ok_or(GeometryError::Overflow)?;
     exact.grow(bits, 4)?;
     binary64_from_exact_rounded(value)
 }
 
-fn metered_binary64_sqrt(
-    value: &BigRational,
-    exact: &mut ExactUse,
-) -> Result<f64, RealizationError> {
+fn metered_binary64_sqrt(value: &BigRational, exact: &mut ExactUse) -> Result<f64, GeometryError> {
     exact.grow(rational_bits(value), 3)?;
     binary64_sqrt_from_exact_rounded(value)
 }
 
-fn binary64_from_exact_rounded(value: &BigRational) -> Result<f64, RealizationError> {
+fn binary64_from_exact_rounded(value: &BigRational) -> Result<f64, GeometryError> {
     if value.is_zero() {
         return Ok(0.0);
     }
@@ -1689,9 +1641,9 @@ fn binary64_from_exact_rounded(value: &BigRational) -> Result<f64, RealizationEr
     if (positive_difference && difference > BINARY64_OVERFLOW_BIT_DIFFERENCE)
         || (!positive_difference && difference > BINARY64_UNDERFLOW_BIT_DIFFERENCE)
     {
-        return Err(RealizationError::Unrepresentable);
+        return Err(GeometryError::Unrepresentable);
     }
-    let difference = i64::try_from(difference).map_err(|_| RealizationError::Unrepresentable)?;
+    let difference = i64::try_from(difference).map_err(|_| GeometryError::Unrepresentable)?;
     let difference = if positive_difference {
         difference
     } else {
@@ -1699,19 +1651,19 @@ fn binary64_from_exact_rounded(value: &BigRational) -> Result<f64, RealizationEr
     };
     let shift = difference.max(i64::from(f64::MIN_EXP)) - i64::from(f64::MANTISSA_DIGITS) - 2;
     if shift >= 0 {
-        denominator <<= usize::try_from(shift).map_err(|_| RealizationError::Unrepresentable)?;
+        denominator <<= usize::try_from(shift).map_err(|_| GeometryError::Unrepresentable)?;
     } else {
-        numerator <<= usize::try_from(-shift).map_err(|_| RealizationError::Unrepresentable)?;
+        numerator <<= usize::try_from(-shift).map_err(|_| GeometryError::Unrepresentable)?;
     }
     let (quotient, remainder) = numerator.div_rem(&denominator);
-    let mut quotient = quotient.to_u64().ok_or(RealizationError::Unrepresentable)?;
+    let mut quotient = quotient.to_u64().ok_or(GeometryError::Unrepresentable)?;
     let quotient_bits = i64::from(u64::BITS - quotient.leading_zeros());
     let subnormal_bits = i64::from(f64::MIN_EXP) - shift;
     let rounding_bits =
         usize::try_from(quotient_bits.max(subnormal_bits) - i64::from(f64::MANTISSA_DIGITS))
-            .map_err(|_| RealizationError::Unrepresentable)?;
+            .map_err(|_| GeometryError::Unrepresentable)?;
     if !(2..=3).contains(&rounding_bits) {
-        return Err(RealizationError::Unrepresentable);
+        return Err(GeometryError::Unrepresentable);
     }
     let rounding_mask = (1_u64 << rounding_bits) - 1;
     let retained_is_odd = quotient & (1_u64 << rounding_bits) != 0;
@@ -1721,7 +1673,7 @@ fn binary64_from_exact_rounded(value: &BigRational) -> Result<f64, RealizationEr
         quotient += 1_u64 << rounding_bits;
     }
     quotient &= !rounding_mask;
-    let magnitude = quotient.to_f64().ok_or(RealizationError::Unrepresentable)?;
+    let magnitude = quotient.to_f64().ok_or(GeometryError::Unrepresentable)?;
     let signed = if value.is_negative() {
         -magnitude
     } else {
@@ -1729,18 +1681,18 @@ fn binary64_from_exact_rounded(value: &BigRational) -> Result<f64, RealizationEr
     };
     let result = ldexp(
         signed,
-        i32::try_from(shift).map_err(|_| RealizationError::Unrepresentable)?,
+        i32::try_from(shift).map_err(|_| GeometryError::Unrepresentable)?,
     );
     if result.is_finite() && result != 0.0 {
         Ok(result)
     } else {
-        Err(RealizationError::Unrepresentable)
+        Err(GeometryError::Unrepresentable)
     }
 }
 
-fn binary64_sqrt_from_exact_rounded(value: &BigRational) -> Result<f64, RealizationError> {
+fn binary64_sqrt_from_exact_rounded(value: &BigRational) -> Result<f64, GeometryError> {
     if !value.is_positive() {
-        return Err(RealizationError::Degenerate);
+        return Err(GeometryError::Degenerate);
     }
     let (mut head, mut exponent) = rational_head_exponent(value)?;
     if exponent % 2 != 0 {
@@ -1751,11 +1703,11 @@ fn binary64_sqrt_from_exact_rounded(value: &BigRational) -> Result<f64, Realizat
     if result.is_finite() && result > 0.0 {
         Ok(result)
     } else {
-        Err(RealizationError::Unrepresentable)
+        Err(GeometryError::Unrepresentable)
     }
 }
 
-fn rational_head_exponent(value: &BigRational) -> Result<(f64, i32), RealizationError> {
+fn rational_head_exponent(value: &BigRational) -> Result<(f64, i32), GeometryError> {
     let numerator = value.numer().magnitude();
     let denominator = value.denom().magnitude();
     let numerator_shift = numerator.bits().saturating_sub(RATIONAL_HEAD_BITS);
@@ -1763,11 +1715,11 @@ fn rational_head_exponent(value: &BigRational) -> Result<(f64, i32), Realization
     let numerator_head = (numerator >> numerator_shift)
         .to_u64()
         .and_then(|value| value.to_f64())
-        .ok_or(RealizationError::Unrepresentable)?;
+        .ok_or(GeometryError::Unrepresentable)?;
     let denominator_head = (denominator >> denominator_shift)
         .to_u64()
         .and_then(|value| value.to_f64())
-        .ok_or(RealizationError::Unrepresentable)?;
+        .ok_or(GeometryError::Unrepresentable)?;
     let exponent = i32::try_from(numerator_shift)
         .ok()
         .and_then(|left| {
@@ -1775,7 +1727,7 @@ fn rational_head_exponent(value: &BigRational) -> Result<(f64, i32), Realization
                 .ok()
                 .map(|right| left - right)
         })
-        .ok_or(RealizationError::Unrepresentable)?;
+        .ok_or(GeometryError::Unrepresentable)?;
     Ok((numerator_head / denominator_head, exponent))
 }
 
@@ -1784,5 +1736,5 @@ fn float(value: usize) -> f64 {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/realization.rs"]
+#[path = "../tests/unit/geometry.rs"]
 mod tests;

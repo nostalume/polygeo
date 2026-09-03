@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use polygeo_core::{
-    Binary64Cochain, Binary64Element, Binary64Space, CancellationToken, CandidateInput, Cochain,
-    ComplexCore, EuclideanRealization, NativeExecutor, NondegenerateCapability, PairingCapability,
-    PositiveMetric, ProblemError, RealizationLimit, SolveExt, StorageLimit, WorkLimit,
+    chain::Cochain, form::Cochain as Binary64Cochain, form::Element as Binary64Element,
+    form::Space as Binary64Space, geometry::Geometry, geometry::Limit, geometry::Metric,
+    geometry::NondegenerateCapability, geometry::PairingCapability, solve::CancellationToken,
+    solve::Executor, solve::Policy, solve::ProblemError, solve::SolveExt, solve::StorageLimit,
+    solve::WorkLimit, topology::CandidateInput, topology::Complex as ComplexCore,
 };
 
 const STORAGE: StorageLimit = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
@@ -17,7 +19,7 @@ fn triangle() -> Arc<ComplexCore> {
     ComplexCore::admit(CandidateInput::signed([0, 1, 2], 1, 3, None).unwrap()).unwrap()
 }
 
-fn hexagonal_disk() -> PositiveMetric {
+fn hexagonal_disk() -> Metric {
     let triangles = (0..6).flat_map(|index| {
         let next = 1 + (index + 1) % 6;
         [0, 1 + index, next].map(i64::from)
@@ -31,7 +33,7 @@ fn hexagonal_disk() -> PositiveMetric {
         }))
         .flatten()
         .collect();
-    EuclideanRealization::admit(topology, 2, positions, RealizationLimit::DEFAULT)
+    Geometry::admit(topology, 2, positions, Limit::DEFAULT)
         .unwrap()
         .circumcentric_pairing()
         .unwrap()
@@ -53,10 +55,10 @@ fn generic_dirichlet_uses_the_operator_equation_and_exact_prescription() {
         .dirichlet(cochain(full, vec![2.0, 5.0, 11.0]), prescribed)
         .unwrap();
     let prepared = problem
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&problem, STORAGE).unwrap();
-    let solution = prepared.solve(&problem, &mut workspace, WORK).unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
+    let solution = prepared.solve(&problem, &mut workspace).unwrap();
 
     assert_eq!(solution.value().coefficients(), &[7.0, 5.0, -3.0]);
     assert_eq!(solution.evidence().exact_fallback_rows(), 0);
@@ -82,13 +84,13 @@ fn harmonic_extension_uses_the_true_boundary_and_reuses_its_factor() {
         ))
         .unwrap();
     let prepared = first
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
     let second = metric
         .harmonic_extension(cochain(boundary_space, vec![6.0, 5.0, 4.0, 3.0, 2.0, 1.0]))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&second, STORAGE).unwrap();
-    let solution = prepared.solve(&second, &mut workspace, WORK).unwrap();
+    let mut workspace = prepared.workspace_for(&second).unwrap();
+    let solution = prepared.solve(&second, &mut workspace).unwrap();
 
     assert!((solution.value().coefficients()[0] - 3.5).abs() <= 1.0e-12);
     for (&index, &expected) in boundary
@@ -144,11 +146,11 @@ fn full_boundary_has_an_analytic_extension_and_singular_general_system_fails() {
             .canonical_selection(0)
             .unwrap(),
     );
-    let realization = EuclideanRealization::admit(
+    let realization = Geometry::admit(
         Arc::clone(&owner),
         2,
         vec![0.0, 0.0, 1.0, 0.0, 0.5, 3.0_f64.sqrt() / 2.0],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     let metric = realization
@@ -162,12 +164,12 @@ fn full_boundary_has_an_analytic_extension_and_singular_general_system_fails() {
     );
     let problem = metric.harmonic_extension(values).unwrap();
     let prepared = problem
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&problem, STORAGE).unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
     assert_eq!(
         prepared
-            .solve(&problem, &mut workspace, WORK)
+            .solve(&problem, &mut workspace)
             .unwrap()
             .value()
             .coefficients(),
@@ -185,7 +187,7 @@ fn full_boundary_has_an_analytic_extension_and_singular_general_system_fails() {
         .unwrap();
     assert_eq!(
         singular
-            .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+            .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
             .unwrap_err()
             .reason(),
         "factorization"
@@ -201,12 +203,12 @@ fn full_boundary_has_an_analytic_extension_and_singular_general_system_fails() {
         )
         .unwrap();
     let prepared = unconstrained
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&unconstrained, STORAGE).unwrap();
+    let mut workspace = prepared.workspace_for(&unconstrained).unwrap();
     assert_eq!(
         prepared
-            .solve(&unconstrained, &mut workspace, WORK)
+            .solve(&unconstrained, &mut workspace)
             .unwrap()
             .value()
             .coefficients(),
@@ -229,11 +231,11 @@ fn reuse_keys_resources_and_cancellation_are_checked_before_publication() {
         .unwrap();
     assert_eq!(
         first
-            .prepare_with(
-                &NativeExecutor::sequential(),
+            .prepare(Policy::new(
+                Executor::sequential(),
                 StorageLimit::new(0, 0).unwrap(),
                 WORK,
-            )
+            ))
             .unwrap_err()
             .reason(),
         "resource_limit"
@@ -242,13 +244,16 @@ fn reuse_keys_resources_and_cancellation_are_checked_before_publication() {
     cancelled.cancel();
     assert_eq!(
         first
-            .prepare_with_cancellation(&NativeExecutor::sequential(), STORAGE, WORK, &cancelled,)
+            .prepare_cancellable(
+                Policy::new(Executor::sequential(), STORAGE, WORK),
+                &cancelled,
+            )
             .unwrap_err()
             .reason(),
         "cancelled"
     );
     let prepared = first
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
     let changed_values = operator
         .dirichlet(
@@ -256,14 +261,8 @@ fn reuse_keys_resources_and_cancellation_are_checked_before_publication() {
             cochain(selected, vec![-1.0]),
         )
         .unwrap();
-    let mut workspace = prepared.workspace_for(&changed_values, STORAGE).unwrap();
-    assert_eq!(
-        prepared
-            .solve(&changed_values, &mut workspace, WorkLimit::new(0))
-            .unwrap_err()
-            .reason(),
-        "resource_limit"
-    );
+    let mut workspace = prepared.workspace_for(&changed_values).unwrap();
+    prepared.solve(&changed_values, &mut workspace).unwrap();
     let replacement = Arc::new(owner.selection(0, vec![0]).unwrap());
     let distinct_selection = operator
         .dirichlet(
@@ -273,7 +272,7 @@ fn reuse_keys_resources_and_cancellation_are_checked_before_publication() {
         .unwrap();
     assert_eq!(
         prepared
-            .workspace_for(&distinct_selection, STORAGE)
+            .workspace_for(&distinct_selection)
             .unwrap_err()
             .reason(),
         "problem_mismatch"

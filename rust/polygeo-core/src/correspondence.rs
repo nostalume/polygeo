@@ -3,19 +3,13 @@ use std::sync::Arc;
 
 use crate::{
     CandidateInput, ChainIsomorphism, ChainLawLimit, ComplexCore, HalfedgeInput,
-    HalfedgeSurfaceCore, IntegerRing, IsomorphismError, TopologyError,
+    HalfedgeSurfaceCore, IntegerRing, IsomorphismError, MaterialFace, TopologyError,
 };
 
 const UNASSIGNED: usize = usize::MAX;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CorrespondenceDirection {
-    ComplexToSurface,
-    SurfaceToComplex,
-}
-
 #[derive(Debug)]
-pub struct SignedPermutation {
+pub(crate) struct SignedPermutation {
     target_of_source: Box<[usize]>,
     source_of_target: Box<[usize]>,
     signs: Box<[i8]>,
@@ -39,9 +33,6 @@ impl SignedPermutation {
             }
             source_of_target[target] = source;
         }
-        if source_of_target.contains(&UNASSIGNED) {
-            return Err(TopologyError::CorrespondenceLaw);
-        }
         Ok(Self {
             target_of_source: target_of_source.into_boxed_slice(),
             source_of_target: source_of_target.into_boxed_slice(),
@@ -50,22 +41,17 @@ impl SignedPermutation {
     }
 
     #[must_use]
-    pub const fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.target_of_source.len()
     }
 
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.target_of_source.is_empty()
-    }
-
-    #[must_use]
-    pub const fn target_of_source(&self) -> &[usize] {
+    pub(crate) const fn target_of_source(&self) -> &[usize] {
         &self.target_of_source
     }
 
     #[must_use]
-    pub const fn signs(&self) -> &[i8] {
+    pub(crate) const fn signs(&self) -> &[i8] {
         &self.signs
     }
 
@@ -74,7 +60,7 @@ impl SignedPermutation {
     /// # Errors
     ///
     /// Returns `degree_outside` when the index is outside this permutation.
-    pub fn map_basis(&self, source: usize) -> Result<(usize, i8), TopologyError> {
+    pub(crate) fn map_basis(&self, source: usize) -> Result<(usize, i8), TopologyError> {
         self.target_of_source
             .get(source)
             .copied()
@@ -87,112 +73,13 @@ impl SignedPermutation {
     /// # Errors
     ///
     /// Returns `degree_outside` when the index is outside this permutation.
-    pub fn inverse_basis(&self, target: usize) -> Result<(usize, i8), TopologyError> {
+    pub(crate) fn inverse_basis(&self, target: usize) -> Result<(usize, i8), TopologyError> {
         let source = self
             .source_of_target
             .get(target)
             .copied()
             .ok_or(TopologyError::degree_outside(target))?;
         Ok((source, self.signs[source]))
-    }
-}
-
-#[derive(Debug)]
-pub struct SurfaceCorrespondence {
-    relation: ChainIsomorphism<IntegerRing>,
-    direction: CorrespondenceDirection,
-}
-
-impl SurfaceCorrespondence {
-    fn admit(
-        complex: &Arc<ComplexCore>,
-        surface: &Arc<HalfedgeSurfaceCore>,
-        direction: CorrespondenceDirection,
-        degrees: [SignedPermutation; 3],
-        limit: ChainLawLimit,
-    ) -> Result<Self, IsomorphismError> {
-        let (source, target) = match direction {
-            CorrespondenceDirection::ComplexToSurface => {
-                (complex.chain_complex(), surface.chain_complex())
-            }
-            CorrespondenceDirection::SurfaceToComplex => {
-                (surface.chain_complex(), complex.chain_complex())
-            }
-        };
-        let relation = ChainIsomorphism::admit_signed(source, target, Vec::from(degrees), limit)?;
-        Ok(Self {
-            relation,
-            direction,
-        })
-    }
-
-    #[must_use]
-    pub const fn direction(&self) -> CorrespondenceDirection {
-        self.direction
-    }
-
-    #[must_use]
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the private constructor violated the surface-relation
-    /// owner schema.
-    pub fn complex_owner(&self) -> &Arc<ComplexCore> {
-        self.relation
-            .source()
-            .simplicial_owner()
-            .or_else(|| self.relation.target().simplicial_owner())
-            .expect("a surface correspondence retains one simplicial owner")
-    }
-
-    #[must_use]
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the private constructor violated the surface-relation
-    /// owner schema.
-    pub fn surface_owner(&self) -> &Arc<HalfedgeSurfaceCore> {
-        self.relation
-            .source()
-            .halfedge_owner()
-            .or_else(|| self.relation.target().halfedge_owner())
-            .expect("a surface correspondence retains one halfedge owner")
-    }
-
-    /// Borrow the signed permutation for one represented degree.
-    ///
-    /// # Errors
-    ///
-    /// Returns `degree_outside` when the degree is not represented.
-    pub fn permutation(&self, degree: usize) -> Result<&SignedPermutation, TopologyError> {
-        self.relation.permutation(degree)
-    }
-
-    /// Recheck basis ranks and the exact commuting-boundary law.
-    ///
-    /// # Errors
-    ///
-    /// Returns `correspondence_law` if any admitted relation no longer agrees.
-    pub fn verify_chain_law(&self) -> Result<(), IsomorphismError> {
-        self.verify_chain_law_with_limit(ChainLawLimit::DEFAULT)
-    }
-
-    /// Recheck the exact law under explicit lifecycle and term ceilings.
-    ///
-    /// # Errors
-    ///
-    /// Returns a classified candidate, resource, allocation, or topology failure.
-    pub fn verify_chain_law_with_limit(
-        &self,
-        limit: ChainLawLimit,
-    ) -> Result<(), IsomorphismError> {
-        self.relation.verify(limit)
-    }
-
-    /// Borrow the checked algebraic relation backing this domain facade.
-    #[must_use]
-    pub const fn isomorphism(&self) -> &ChainIsomorphism<IntegerRing> {
-        &self.relation
     }
 }
 
@@ -205,7 +92,7 @@ impl HalfedgeSurfaceCore {
     /// without publishing either result.
     pub fn from_complex(
         complex: &Arc<ComplexCore>,
-    ) -> Result<(Arc<Self>, SurfaceCorrespondence), IsomorphismError> {
+    ) -> Result<(Arc<Self>, ChainIsomorphism<IntegerRing>), IsomorphismError> {
         Self::from_complex_with_limit(complex, ChainLawLimit::DEFAULT)
     }
 
@@ -218,23 +105,22 @@ impl HalfedgeSurfaceCore {
     pub fn from_complex_with_limit(
         complex: &Arc<ComplexCore>,
         limit: ChainLawLimit,
-    ) -> Result<(Arc<Self>, SurfaceCorrespondence), IsomorphismError> {
+    ) -> Result<(Arc<Self>, ChainIsomorphism<IntegerRing>), IsomorphismError> {
         complex
             .require_triangle()
             .map_err(IsomorphismError::Topology)?;
         complex
             .require_oriented()
             .map_err(IsomorphismError::Topology)?;
-        let (input, directed, face_starts) =
+        let (input, directed) =
             halfedges_from_complex(complex).map_err(IsomorphismError::Topology)?;
         let surface = Self::admit(input).map_err(IsomorphismError::Topology)?;
-        let degrees = complex_to_surface_degrees(complex, &surface, &directed, &face_starts)
+        let degrees = complex_to_surface_degrees(complex, &surface, &directed)
             .map_err(IsomorphismError::Topology)?;
-        let correspondence = SurfaceCorrespondence::admit(
-            complex,
-            &surface,
-            CorrespondenceDirection::ComplexToSurface,
-            degrees,
+        let correspondence = ChainIsomorphism::admit_signed(
+            complex.chain_complex(),
+            surface.chain_complex(),
+            Vec::from(degrees),
             limit,
         )?;
         Ok((surface, correspondence))
@@ -248,7 +134,7 @@ impl HalfedgeSurfaceCore {
     /// presentations, or another classified construction failure.
     pub fn to_complex(
         self: &Arc<Self>,
-    ) -> Result<(Arc<ComplexCore>, SurfaceCorrespondence), IsomorphismError> {
+    ) -> Result<(Arc<ComplexCore>, ChainIsomorphism<IntegerRing>), IsomorphismError> {
         self.to_complex_with_limit(ChainLawLimit::DEFAULT)
     }
 
@@ -261,13 +147,12 @@ impl HalfedgeSurfaceCore {
     pub fn to_complex_with_limit(
         self: &Arc<Self>,
         limit: ChainLawLimit,
-    ) -> Result<(Arc<ComplexCore>, SurfaceCorrespondence), IsomorphismError> {
+    ) -> Result<(Arc<ComplexCore>, ChainIsomorphism<IntegerRing>), IsomorphismError> {
         let (complex, degrees) = complex_from_surface(self).map_err(IsomorphismError::Topology)?;
-        let correspondence = SurfaceCorrespondence::admit(
-            &complex,
-            self,
-            CorrespondenceDirection::SurfaceToComplex,
-            degrees,
+        let correspondence = ChainIsomorphism::admit_signed(
+            self.chain_complex(),
+            complex.chain_complex(),
+            Vec::from(degrees),
             limit,
         )?;
         Ok((complex, correspondence))
@@ -285,23 +170,14 @@ fn complex_from_surface(
     rows.try_reserve_exact(row_entries)
         .map_err(|_| TopologyError::Allocation)?;
     for face in surface.material_faces() {
-        let vertices = face
-            .halfedges()
-            .map(|halfedge| halfedge.vertex().index())
-            .collect::<Vec<_>>();
-        if vertices.len() != 3
-            || vertices[0] == vertices[1]
-            || vertices[1] == vertices[2]
-            || vertices[0] == vertices[2]
-        {
+        let vertices = triangle_vertices(face)?;
+        if vertices[0] == vertices[1] || vertices[1] == vertices[2] || vertices[0] == vertices[2] {
             return Err(TopologyError::ConversionNotSimplicial);
         }
-        rows.extend_from_slice(&vertices);
+        for vertex in vertices {
+            rows.push(u64::try_from(vertex).map_err(|_| TopologyError::IndexOverflow)?);
+        }
     }
-    let rows = rows
-        .into_iter()
-        .map(|value| u64::try_from(value).map_err(|_| TopologyError::IndexOverflow))
-        .collect::<Result<Vec<_>, _>>()?;
     let candidate = CandidateInput::unsigned(
         rows,
         surface.material_face_count(),
@@ -320,11 +196,28 @@ fn complex_from_surface(
     Ok((complex, degrees))
 }
 
+fn triangle_vertices(face: MaterialFace<'_>) -> Result<[usize; 3], TopologyError> {
+    let mut halfedges = face.halfedges();
+    let vertices = {
+        let mut next = || {
+            halfedges
+                .next()
+                .map(|halfedge| halfedge.vertex().index())
+                .ok_or(TopologyError::ConversionNotSimplicial)
+        };
+        [next()?, next()?, next()?]
+    };
+    if halfedges.next().is_some() {
+        return Err(TopologyError::ConversionNotSimplicial);
+    }
+    Ok(vertices)
+}
+
 type DirectedEdge = (usize, usize);
 
 fn halfedges_from_complex(
     complex: &ComplexCore,
-) -> Result<(HalfedgeInput, Vec<DirectedEdge>, Vec<usize>), TopologyError> {
+) -> Result<(HalfedgeInput, Vec<DirectedEdge>), TopologyError> {
     let faces = complex.basis(2)?;
     let orientations = complex.orientation(2)?;
     let material_count = faces
@@ -334,7 +227,6 @@ fn halfedges_from_complex(
     let mut next = vec![UNASSIGNED; material_count];
     let mut twin = vec![UNASSIGNED; material_count];
     let mut directed = Vec::with_capacity(material_count);
-    let mut face_starts = Vec::with_capacity(faces.row_count());
     for (face_index, (row, &sign)) in faces.values().chunks_exact(3).zip(orientations).enumerate() {
         let oriented = if sign == 1 {
             [row[0], row[1], row[2]]
@@ -342,7 +234,6 @@ fn halfedges_from_complex(
             [row[0], row[2], row[1]]
         };
         let start = face_index * 3;
-        face_starts.push(start);
         for corner in 0..3 {
             next[start + corner] = start + (corner + 1) % 3;
             directed.push((oriented[corner], oriented[(corner + 1) % 3]));
@@ -402,7 +293,6 @@ fn halfedges_from_complex(
             exterior_seeds.into_boxed_slice(),
         )?,
         directed,
-        face_starts,
     ))
 }
 
@@ -410,7 +300,6 @@ fn complex_to_surface_degrees(
     complex: &ComplexCore,
     surface: &HalfedgeSurfaceCore,
     directed: &[DirectedEdge],
-    face_starts: &[usize],
 ) -> Result<[SignedPermutation; 3], TopologyError> {
     let mut vertices = vec![UNASSIGNED; complex.vertex_count()];
     for (halfedge, &(origin, _)) in directed.iter().enumerate() {
@@ -447,16 +336,18 @@ fn complex_to_surface_degrees(
     }
     let one = SignedPermutation::admit(edges, edge_signs)?;
 
-    let mut faces = vec![UNASSIGNED; face_starts.len()];
-    for (source, &halfedge) in face_starts.iter().enumerate() {
-        faces[source] = surface
+    let face_count = complex.basis(2)?.row_count();
+    let mut faces = vec![UNASSIGNED; face_count];
+    for (source, target) in faces.iter_mut().enumerate() {
+        let halfedge = source * 3;
+        *target = surface
             .halfedge(halfedge)?
             .face_orbit()
             .as_material()
             .ok_or(TopologyError::CorrespondenceLaw)?
             .index();
     }
-    let two = SignedPermutation::admit(faces, vec![1; face_starts.len()])?;
+    let two = SignedPermutation::admit(faces, vec![1; face_count])?;
     Ok([zero, one, two])
 }
 
@@ -502,10 +393,7 @@ fn surface_to_complex_degrees(
     let mut faces = vec![UNASSIGNED; surface.material_face_count()];
     for face in surface.material_faces() {
         let source = face.index();
-        let mut row = face
-            .halfedges()
-            .map(|halfedge| halfedge.vertex().index())
-            .collect::<Vec<_>>();
+        let mut row = triangle_vertices(face)?;
         row.sort_unstable();
         faces[source] = *face_rows
             .get(&[row[0], row[1], row[2]])

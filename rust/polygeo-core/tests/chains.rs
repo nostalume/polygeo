@@ -2,7 +2,8 @@
 mod common;
 
 use polygeo_core::{
-    CandidateInput, CoefficientSlice, ComplexCore, HalfedgeSurfaceCore, TopologyError,
+    topology::CandidateInput, topology::CoefficientSlice, topology::Complex as ComplexCore,
+    topology::HalfedgeSurface as HalfedgeSurfaceCore, topology::TopologyError,
 };
 use proptest::prelude::*;
 

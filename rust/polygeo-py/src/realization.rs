@@ -1,17 +1,22 @@
 use std::sync::Arc;
 
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
-use polygeo_core::{
-    EuclideanRealization, MetricError as CoreMetricError, NondegenerateCapability,
-    PairingCapability, PositiveMetric, RealizationError, RealizationLimit, StorageLimit, WorkLimit,
+use polygeo_core::geometry::{
+    Geometry as EuclideanRealization, GeometryError as RealizationError, Limit as RealizationLimit,
+    Metric as PositiveMetric, MetricError as CoreMetricError, NondegenerateCapability,
+    PairingCapability,
 };
+use polygeo_core::solve::{ProblemError, StorageLimit, WorkLimit};
+use polygeo_core::topology::Complex as ComplexCore;
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyType};
 
+use crate::array::{filled_array_1d, filled_array_2d};
+use crate::classified_exception;
 use crate::form::{Operator, PyLinearOperator};
-use crate::{NativeComplex, classified_exception, filled_array_1d, filled_array_2d};
+use crate::topology::NativeComplex;
 
 create_exception!(
     _polygeo_native,
@@ -70,9 +75,9 @@ fn geometry_input_error(reason: &'static str, message: &'static str) -> PyErr {
 }
 
 #[pyclass(
-    name = "RealizationLimit",
+    name = "Limit",
     frozen,
-    module = "polygeo",
+    module = "polygeo.geometry",
     skip_from_py_object
 )]
 #[derive(Clone, Copy)]
@@ -144,13 +149,13 @@ impl PyRealizationLimit {
     }
 }
 
-#[pyclass(name = "EuclideanRealization", frozen, module = "polygeo")]
+#[pyclass(name = "Geometry", frozen, module = "polygeo.geometry")]
 pub(crate) struct NativeEuclideanRealization {
     owner: Arc<EuclideanRealization>,
 }
 
 impl NativeEuclideanRealization {
-    pub(crate) fn topology(&self) -> &Arc<polygeo_core::EuclideanRealization> {
+    pub(crate) fn owner(&self) -> &Arc<EuclideanRealization> {
         &self.owner
     }
 
@@ -202,7 +207,7 @@ impl NativeEuclideanRealization {
     }
 
     #[getter]
-    fn complex(&self) -> NativeComplex {
+    fn topology(&self) -> NativeComplex {
         NativeComplex {
             owner: Arc::clone(self.owner.topology()),
         }
@@ -247,18 +252,7 @@ impl NativeEuclideanRealization {
         })
     }
 
-    fn _dual_signs(&self, py: Python<'_>, degree: isize) -> PyResult<Py<PyAny>> {
-        let degree = admit_degree(degree)?;
-        let values = py
-            .detach(|| self.owner.dual_signs(degree))
-            .map_err(geometry_error)?;
-        filled_array_1d(py, values.len(), |output| {
-            output.copy_from_slice(values);
-            Ok(())
-        })
-    }
-
-    fn positive_metric(&self, py: Python<'_>) -> PyResult<PyPositiveMetric> {
+    fn metric(&self, py: Python<'_>) -> PyResult<PyPositiveMetric> {
         let owner = Arc::clone(&self.owner);
         let pairing = py
             .detach(move || owner.circumcentric_pairing())
@@ -298,9 +292,9 @@ impl NativeEuclideanRealization {
 }
 
 #[pyclass(
-    name = "PositiveMetric",
+    name = "Metric",
     frozen,
-    module = "polygeo",
+    module = "polygeo.geometry",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
@@ -311,7 +305,7 @@ pub(crate) struct PyPositiveMetric {
 #[pymethods]
 impl PyPositiveMetric {
     #[getter]
-    fn realization(&self) -> NativeEuclideanRealization {
+    fn geometry(&self) -> NativeEuclideanRealization {
         NativeEuclideanRealization {
             owner: Arc::clone(self.inner.realization()),
         }
@@ -368,21 +362,16 @@ impl PyPositiveMetric {
         })
     }
 
-    #[pyo3(signature = (group, *, executor=None, storage=None, work=None, cancellation=None))]
-    fn harmonic_one_form_basis(
+    #[pyo3(signature = (group, *, policy=None, cancellation=None))]
+    fn harmonic_basis(
         &self,
         py: Python<'_>,
         group: &crate::homology::PyHomologyGroup,
-        executor: Option<&crate::solve::PyNativeExecutor>,
-        storage: Option<&crate::solve::PyStorageLimit>,
-        work: Option<&crate::solve::PyWorkLimit>,
+        policy: Option<&crate::solve::PyPolicy>,
         cancellation: Option<&crate::solve::PyCancellationToken>,
     ) -> PyResult<crate::solve::PyHarmonicOneFormBasis> {
-        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
-        let cancellation = cancellation
-            .map_or_else(polygeo_core::CancellationToken::new, |value| {
-                value.inner.clone()
-            });
+        let policy = crate::solve::policy(policy);
+        let cancellation = crate::solve::cancellation_token(cancellation);
         let metric = self.inner.clone();
         let analysis = Arc::clone(&group.analysis);
         let degree = group.degree;
@@ -390,7 +379,7 @@ impl PyPositiveMetric {
             let group = analysis
                 .group(degree)
                 .expect("Python homology group retains one admitted analysis row");
-            metric.harmonic_one_form_basis(group, &executor, storage, work, &cancellation)
+            metric.harmonic_one_form_basis(group, policy, &cancellation)
         })
         .map(|inner| crate::solve::PyHarmonicOneFormBasis { inner })
         .map_err(crate::solve::surface_computation_error)
@@ -401,9 +390,7 @@ impl PyPositiveMetric {
         density: &crate::form::PyBinary64Element,
     ) -> PyResult<crate::solve::PyProblem> {
         let crate::form::Element::Cochain(density) = &density.inner else {
-            return Err(crate::solve::problem_error(
-                polygeo_core::ProblemError::SpaceMismatch,
-            ));
+            return Err(crate::solve::problem_error(ProblemError::SpaceMismatch));
         };
         Ok(crate::solve::PyProblem {
             inner: crate::solve::Problem::MeanZero(
@@ -419,9 +406,7 @@ impl PyPositiveMetric {
         load: &crate::form::PyBinary64Element,
     ) -> PyResult<crate::solve::PyProblem> {
         let crate::form::Element::Chain(load) = &load.inner else {
-            return Err(crate::solve::problem_error(
-                polygeo_core::ProblemError::SpaceMismatch,
-            ));
+            return Err(crate::solve::problem_error(ProblemError::SpaceMismatch));
         };
         Ok(crate::solve::PyProblem {
             inner: crate::solve::Problem::MeanZero(
@@ -437,9 +422,7 @@ impl PyPositiveMetric {
         values: &crate::form::PyBinary64Element,
     ) -> PyResult<crate::solve::PyProblem> {
         let crate::form::Element::Cochain(values) = &values.inner else {
-            return Err(crate::solve::problem_error(
-                polygeo_core::ProblemError::SpaceMismatch,
-            ));
+            return Err(crate::solve::problem_error(ProblemError::SpaceMismatch));
         };
         Ok(crate::solve::PyProblem {
             inner: crate::solve::Problem::Harmonic(
@@ -455,9 +438,7 @@ impl PyPositiveMetric {
         source: &crate::form::PyBinary64Element,
     ) -> PyResult<crate::solve::PyProblem> {
         let crate::form::Element::Cochain(source) = &source.inner else {
-            return Err(crate::solve::problem_error(
-                polygeo_core::ProblemError::SpaceMismatch,
-            ));
+            return Err(crate::solve::problem_error(ProblemError::SpaceMismatch));
         };
         Ok(crate::solve::PyProblem {
             inner: crate::solve::Problem::Hodge(
@@ -474,9 +455,7 @@ impl PyPositiveMetric {
         time_step: f64,
     ) -> PyResult<crate::solve::PyProblem> {
         let crate::form::Element::Cochain(source) = &source.inner else {
-            return Err(crate::solve::problem_error(
-                polygeo_core::ProblemError::SpaceMismatch,
-            ));
+            return Err(crate::solve::problem_error(ProblemError::SpaceMismatch));
         };
         Ok(crate::solve::PyProblem {
             inner: crate::solve::Problem::Heat(
@@ -487,46 +466,28 @@ impl PyPositiveMetric {
         })
     }
 
-    #[pyo3(signature = (time_step, *, realization_limit=None, executor=None, storage=None, work=None, cancellation=None))]
+    #[pyo3(signature = (time_step, *, limit=None, policy=None, cancellation=None))]
     fn frozen_mean_curvature_flow(
         &self,
+        py: Python<'_>,
         time_step: f64,
-        realization_limit: Option<&PyRealizationLimit>,
-        executor: Option<&crate::solve::PyNativeExecutor>,
-        storage: Option<&crate::solve::PyStorageLimit>,
-        work: Option<&crate::solve::PyWorkLimit>,
+        limit: Option<&PyRealizationLimit>,
+        policy: Option<&crate::solve::PyPolicy>,
         cancellation: Option<&crate::solve::PyCancellationToken>,
     ) -> PyResult<crate::solve::PyFlowStep> {
-        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
-        let realization_limit = realization_limit
-            .copied()
-            .unwrap_or(PyRealizationLimit::DEFAULT)
-            .core();
-        let cancellation = cancellation
-            .map_or_else(polygeo_core::CancellationToken::new, |value| {
-                value.inner.clone()
-            });
+        let policy = crate::solve::policy(policy);
+        let limit = limit.copied().unwrap_or(PyRealizationLimit::DEFAULT).core();
+        let cancellation = crate::solve::cancellation_token(cancellation);
         let metric = self.inner.clone();
-        Python::attach(|py| {
-            py.detach(move || {
-                metric.frozen_mean_curvature_flow(
-                    time_step,
-                    realization_limit,
-                    &executor,
-                    storage,
-                    work,
-                    &cancellation,
-                )
-            })
+        py.detach(move || {
+            metric.frozen_mean_curvature_flow(time_step, limit, policy, &cancellation)
         })
         .map(|inner| crate::solve::PyFlowStep { inner })
         .map_err(crate::solve::surface_computation_error)
     }
 }
 
-pub(crate) fn topology_owner(
-    complex: &Bound<'_, PyAny>,
-) -> PyResult<Arc<polygeo_core::ComplexCore>> {
+pub(crate) fn topology_owner(complex: &Bound<'_, PyAny>) -> PyResult<Arc<ComplexCore>> {
     complex
         .extract::<PyRef<'_, NativeComplex>>()
         .map(|value| Arc::clone(&value.owner))
@@ -543,15 +504,19 @@ fn admit_degree(degree: isize) -> PyResult<usize> {
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add("GeometryError", module.py().get_type::<GeometryError>())?;
+    let geometry_error = module.py().get_type::<GeometryError>();
+    geometry_error.setattr("__module__", "polygeo.geometry")?;
+    module.add("GeometryError", geometry_error)?;
     module.add_class::<PyRealizationLimit>()?;
     module.add(
-        "DEFAULT_REALIZATION_LIMIT",
+        "DEFAULT_LIMIT",
         Py::new(module.py(), PyRealizationLimit::DEFAULT)?,
     )?;
     module
         .add_class::<NativeEuclideanRealization>()
         .and_then(|()| module.add_class::<PyPositiveMetric>())?;
-    module.add("MetricError", module.py().get_type::<MetricError>())?;
+    let metric_error = module.py().get_type::<MetricError>();
+    metric_error.setattr("__module__", "polygeo.geometry")?;
+    module.add("MetricError", metric_error)?;
     Ok(())
 }

@@ -4,7 +4,7 @@ use std::mem::size_of;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Zero};
 
-use crate::form::exact_integer_binary64_dot;
+use crate::form_impl::exact_integer_binary64_dot;
 use crate::{
     Binary64Chain, Binary64Cochain, Binary64Element, Binary64ElementError, Binary64Space, Chain,
     ChainError, ChainIsomorphism, CoefficientSlice, IntegerRing, IntegralChain,

@@ -1,8 +1,8 @@
 use crate::ExactRational;
 use crate::TopologyError;
 use crate::complex::ComplexCore;
+use crate::csr::CsrMatrix;
 use crate::halfedge::HalfedgeSurfaceCore;
-use crate::sparse::CsrMatrix;
 use num_traits::{ToPrimitive, Zero};
 
 #[derive(Debug)]

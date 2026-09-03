@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use polygeo_core::{
-    Binary64Cochain, Binary64Element, Binary64Space, CancellationToken, CandidateInput, Cochain,
-    ComplexCore, EuclideanRealization, HeatProblem, HeatSolution, NativeExecutor,
-    PairingCapability, PositiveMetric, ProblemError, RealizationLimit, SolveError, SolveExt,
-    StorageLimit, SurfaceError, WorkLimit,
+    chain::Cochain, form::Cochain as Binary64Cochain, form::Element as Binary64Element,
+    form::Space as Binary64Space, geometry::Geometry, geometry::Limit, geometry::Metric,
+    geometry::PairingCapability, geometry::SurfaceError, solve::CancellationToken, solve::Executor,
+    solve::HeatProblem, solve::HeatResult, solve::Policy, solve::ProblemError, solve::SolveError,
+    solve::SolveExt, solve::StorageLimit, solve::WorkLimit, topology::CandidateInput,
+    topology::Complex as ComplexCore,
 };
 
-fn realization(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
+fn realization(scale: f64, translation: [f64; 3]) -> Arc<Geometry> {
     let topology = ComplexCore::admit(
         CandidateInput::signed([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3], 4, 3, None).unwrap(),
     )
@@ -27,7 +29,7 @@ fn realization(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
                 .map(move |(x, t)| scale * x + t)
         })
         .collect();
-    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+    Geometry::admit(topology, 3, positions, Limit::DEFAULT).unwrap()
 }
 
 fn unlimited() -> (StorageLimit, WorkLimit) {
@@ -37,7 +39,7 @@ fn unlimited() -> (StorageLimit, WorkLimit) {
     )
 }
 
-fn positive_metric(scale: f64) -> (Arc<EuclideanRealization>, PositiveMetric) {
+fn positive_metric(scale: f64) -> (Arc<Geometry>, Metric) {
     let realization = realization(scale, [0.0; 3]);
     let metric = realization
         .circumcentric_pairing()
@@ -47,30 +49,28 @@ fn positive_metric(scale: f64) -> (Arc<EuclideanRealization>, PositiveMetric) {
     (realization, metric)
 }
 
-fn scalar(metric: &PositiveMetric, coefficients: Vec<f64>) -> Binary64Cochain {
+fn scalar(metric: &Metric, coefficients: Vec<f64>) -> Binary64Cochain {
     let space =
         Binary64Space::<Cochain>::full(Arc::clone(metric.realization().topology()), 0).unwrap();
     Binary64Element::admit(space, coefficients).unwrap()
 }
 
-fn solve_heat(problem: &HeatProblem) -> HeatSolution {
+fn solve_heat(problem: &HeatProblem) -> HeatResult {
     let (storage, work) = unlimited();
     let prepared = problem
-        .prepare_with(&NativeExecutor::sequential(), storage, work)
+        .prepare(Policy::new(Executor::sequential(), storage, work))
         .unwrap();
-    let mut workspace = prepared.workspace_for(problem, storage).unwrap();
-    prepared.solve(problem, &mut workspace, work).unwrap()
+    let mut workspace = prepared.workspace_for(problem).unwrap();
+    prepared.solve(problem, &mut workspace).unwrap()
 }
 
-fn solve_flow(metric: &PositiveMetric, time_step: f64) -> polygeo_core::FlowStep {
+fn solve_flow(metric: &Metric, time_step: f64) -> polygeo_core::geometry::FlowStep {
     let (storage, work) = unlimited();
     metric
         .frozen_mean_curvature_flow(
             time_step,
-            RealizationLimit::DEFAULT,
-            &NativeExecutor::sequential(),
-            storage,
-            work,
+            Limit::DEFAULT,
+            Policy::new(Executor::sequential(), storage, work),
             &CancellationToken::new(),
         )
         .unwrap()
@@ -118,20 +118,20 @@ fn scalar_heat_is_shift_and_scale_covariant_and_reuses_its_factor() {
     let second = metric.heat_evolution(second_value.clone(), 0.1).unwrap();
     let (storage, work) = unlimited();
     let prepared = first
-        .prepare_with(&NativeExecutor::sequential(), storage, work)
+        .prepare(Policy::new(Executor::sequential(), storage, work))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&second, storage).unwrap();
-    prepared.solve(&second, &mut workspace, work).unwrap();
+    let mut workspace = prepared.workspace_for(&second).unwrap();
+    prepared.solve(&second, &mut workspace).unwrap();
     let changed_time = metric.heat_evolution(second_value, 0.2).unwrap();
     assert_eq!(
-        prepared.workspace_for(&changed_time, storage).unwrap_err(),
+        prepared.workspace_for(&changed_time).unwrap_err(),
         SolveError::ProblemMismatch
     );
 }
 
 #[test]
 fn scalar_heat_admission_and_zero_dimensional_identity_are_explicit() {
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
     let (_, metric) = positive_metric(1.0);
     let initial = scalar(&metric, vec![1.0; 4]);
     assert_eq!(
@@ -150,32 +150,33 @@ fn scalar_heat_admission_and_zero_dimensional_identity_are_explicit() {
     let (storage, work) = unlimited();
     assert_eq!(
         bounded
-            .prepare_with_cancellation(&executor, storage, work, &cancelled)
+            .prepare_cancellable(Policy::new(executor, storage, work), &cancelled)
             .unwrap_err(),
         SolveError::Cancelled
     );
     assert_eq!(
         bounded
-            .prepare_with(&executor, StorageLimit::new(0, 0).unwrap(), work)
+            .prepare(Policy::new(
+                executor,
+                StorageLimit::new(0, 0).unwrap(),
+                work,
+            ))
             .unwrap_err(),
         SolveError::ResourceLimit
     );
-    let prepared = bounded.prepare_with(&executor, storage, work).unwrap();
-    let mut workspace = prepared.workspace_for(&bounded, storage).unwrap();
-    assert_eq!(
-        prepared
-            .solve(&bounded, &mut workspace, WorkLimit::new(0))
-            .unwrap_err(),
-        SolveError::ResourceLimit
-    );
+    let prepared = bounded
+        .prepare(Policy::new(executor, storage, work))
+        .unwrap();
+    let mut workspace = prepared.workspace_for(&bounded).unwrap();
+    prepared.solve(&bounded, &mut workspace).unwrap();
 
     let triangle =
         ComplexCore::admit(CandidateInput::signed([0_i64, 1, 2], 1, 3, Some(3)).unwrap()).unwrap();
-    let triangle = EuclideanRealization::admit(
+    let triangle = Geometry::admit(
         triangle,
         2,
         vec![0.0, 0.0, 1.0, 0.0, 0.5, 3.0_f64.sqrt() / 2.0],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     let triangle_metric = triangle
@@ -190,8 +191,7 @@ fn scalar_heat_admission_and_zero_dimensional_identity_are_explicit() {
 
     let points =
         ComplexCore::admit(CandidateInput::signed([0_i64, 1], 2, 1, Some(2)).unwrap()).unwrap();
-    let points =
-        EuclideanRealization::admit(points, 1, vec![0.0, 2.0], RealizationLimit::DEFAULT).unwrap();
+    let points = Geometry::admit(points, 1, vec![0.0, 2.0], Limit::DEFAULT).unwrap();
     let point_metric = points
         .circumcentric_pairing()
         .unwrap()
@@ -203,9 +203,11 @@ fn scalar_heat_admission_and_zero_dimensional_identity_are_explicit() {
         .unwrap();
     let storage = StorageLimit::new(0, 0).unwrap();
     let work = WorkLimit::new(0);
-    let prepared = problem.prepare_with(&executor, storage, work).unwrap();
-    let mut workspace = prepared.workspace_for(&problem, storage).unwrap();
-    let solution = prepared.solve(&problem, &mut workspace, work).unwrap();
+    let prepared = problem
+        .prepare(Policy::new(executor, storage, work))
+        .unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
+    let solution = prepared.solve(&problem, &mut workspace).unwrap();
     assert_eq!(solution.value().coefficients(), point_values.coefficients());
 }
 
@@ -213,7 +215,7 @@ fn scalar_heat_admission_and_zero_dimensional_identity_are_explicit() {
 fn deformation_is_immutable_and_composes_through_admission() {
     let source = realization(1.0, [0.0; 3]);
     let identity = source
-        .deform(source.positions().to_vec(), RealizationLimit::DEFAULT)
+        .deform(source.positions().to_vec(), Limit::DEFAULT)
         .unwrap();
     assert!(!Arc::ptr_eq(&source, &identity));
     assert!(Arc::ptr_eq(source.topology(), identity.topology()));
@@ -224,16 +226,14 @@ fn deformation_is_immutable_and_composes_through_admission() {
         .chunks_exact(3)
         .flat_map(|row| [row[0] + 2.0, row[1] - 3.0, row[2] + 5.0])
         .collect();
-    let target = identity
-        .deform(translated.clone(), RealizationLimit::DEFAULT)
-        .unwrap();
+    let target = identity.deform(translated.clone(), Limit::DEFAULT).unwrap();
     assert_eq!(target.positions(), translated);
     assert!((source.positions()[0] - 1.0).abs() <= f64::EPSILON);
 
     let mut invalid = translated;
     let duplicate = invalid[0..3].to_vec();
     invalid[3..6].copy_from_slice(&duplicate);
-    assert!(target.deform(invalid, RealizationLimit::DEFAULT).is_err());
+    assert!(target.deform(invalid, Limit::DEFAULT).is_err());
     assert!((target.positions()[0] - 3.0).abs() <= f64::EPSILON);
 }
 
@@ -266,9 +266,7 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
     let (storage, work) = unlimited();
 
     let changed_positions = source.positions().iter().map(|value| 2.0 * value).collect();
-    let changed = source
-        .deform(changed_positions, RealizationLimit::DEFAULT)
-        .unwrap();
+    let changed = source.deform(changed_positions, Limit::DEFAULT).unwrap();
     assert!(Arc::ptr_eq(source.topology(), changed.topology()));
     let changed_metric = changed
         .circumcentric_pairing()
@@ -284,10 +282,8 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
         metric
             .frozen_mean_curvature_flow(
                 0.1,
-                RealizationLimit::DEFAULT,
-                &NativeExecutor::sequential(),
-                storage,
-                work,
+                Limit::DEFAULT,
+                Policy::new(Executor::sequential(), storage, work),
                 &cancellation,
             )
             .unwrap_err()
@@ -301,10 +297,8 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
             metric
                 .frozen_mean_curvature_flow(
                     time_step,
-                    RealizationLimit::DEFAULT,
-                    &NativeExecutor::sequential(),
-                    storage,
-                    work,
+                    Limit::DEFAULT,
+                    Policy::new(Executor::sequential(), storage, work),
                     &CancellationToken::new(),
                 )
                 .unwrap_err()
@@ -317,10 +311,12 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
         metric
             .frozen_mean_curvature_flow(
                 0.1,
-                RealizationLimit::DEFAULT,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(0, 0).unwrap(),
-                work,
+                Limit::DEFAULT,
+                Policy::new(
+                    Executor::sequential(),
+                    StorageLimit::new(0, 0).unwrap(),
+                    work,
+                ),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -331,10 +327,8 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
         metric
             .frozen_mean_curvature_flow(
                 0.1,
-                RealizationLimit::DEFAULT,
-                &NativeExecutor::sequential(),
-                storage,
-                WorkLimit::new(0),
+                Limit::DEFAULT,
+                Policy::new(Executor::sequential(), storage, WorkLimit::new(0)),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -342,7 +336,7 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
         Some(SolveError::ResourceLimit)
     );
 
-    let target_limit = RealizationLimit::new(
+    let target_limit = Limit::new(
         StorageLimit::new(0, 0).unwrap(),
         u64::MAX,
         WorkLimit::new(u64::MAX),
@@ -352,9 +346,7 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
             .frozen_mean_curvature_flow(
                 0.1,
                 target_limit,
-                &NativeExecutor::sequential(),
-                storage,
-                work,
+                Policy::new(Executor::sequential(), storage, work),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -366,7 +358,7 @@ fn changed_metric_and_cancellation_cannot_publish_a_partial_step() {
 
 #[test]
 fn batched_coordinates_equal_the_same_flow_under_axis_permutation() {
-    fn solve(source: &Arc<EuclideanRealization>) -> Vec<f64> {
+    fn solve(source: &Arc<Geometry>) -> Vec<f64> {
         let metric = source
             .circumcentric_pairing()
             .unwrap()
@@ -382,9 +374,7 @@ fn batched_coordinates_equal_the_same_flow_under_axis_permutation() {
         .chunks_exact(3)
         .flat_map(|row| [row[2], row[0], row[1]])
         .collect();
-    let permuted = source
-        .deform(permuted_positions, RealizationLimit::DEFAULT)
-        .unwrap();
+    let permuted = source.deform(permuted_positions, Limit::DEFAULT).unwrap();
     let permuted_step = solve(&permuted);
     for (left, right) in ordinary.chunks_exact(3).zip(permuted_step.chunks_exact(3)) {
         for axis in 0..3 {

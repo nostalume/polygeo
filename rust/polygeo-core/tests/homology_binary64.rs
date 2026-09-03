@@ -3,8 +3,9 @@ use std::sync::Arc;
 use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use polygeo_core::{
-    Binary64Element, Binary64Space, CandidateInput, Chain, Cochain, ComplexCore, HomologyLimit,
-    IntegralHomology,
+    chain::Chain, chain::Cochain, chain::HomologyLimit, chain::IntegralHomology,
+    form::Element as Binary64Element, form::Space as Binary64Space, topology::CandidateInput,
+    topology::Complex as ComplexCore,
 };
 
 fn circle() -> Arc<ComplexCore> {

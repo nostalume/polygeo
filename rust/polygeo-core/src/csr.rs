@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use crate::chain::{
+use crate::chain_impl::{
     AtomicRecipe, BasedDegree, ChainDomain, ChainError, CompositionPlan, Element, LinearMap,
     MapRecipe, Space, Variance,
 };
@@ -10,36 +10,138 @@ use crate::coefficient::{
     BigIntEncoding, IntegerRing, RationalField, ReducedFractionEncoding, Ring, ValueEncoding,
 };
 use crate::correspondence::SignedPermutation;
-pub use crate::sparse::{CsrMatrix, CsrPattern};
 use crate::{BoundaryRef, CoefficientSlice, StorageLimit, TopologyError, WorkLimit};
 use num_bigint::BigInt;
+
+/// Invalid immutable compressed-row physical storage.
+pub(crate) struct InvalidCompressedRows;
+
+/// Immutable coefficient-independent compressed-row indexing.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct CsrPattern {
+    pub(crate) shape: (usize, usize),
+    pub(crate) row_offsets: Box<[usize]>,
+    pub(crate) column_indices: Box<[usize]>,
+}
+
+impl CsrPattern {
+    #[must_use]
+    pub(crate) const fn shape(&self) -> (usize, usize) {
+        self.shape
+    }
+
+    #[must_use]
+    pub(crate) const fn nnz(&self) -> usize {
+        self.column_indices.len()
+    }
+
+    #[must_use]
+    pub(crate) fn row_offsets(&self) -> &[usize] {
+        &self.row_offsets
+    }
+
+    #[must_use]
+    pub(crate) fn column_indices(&self) -> &[usize] {
+        &self.column_indices
+    }
+}
+
+/// Raw compressed-row storage with no mathematical-map identity.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct CsrMatrix<V> {
+    pub(crate) pattern: CsrPattern,
+    pub(crate) values: V,
+}
+
+impl<V> CsrMatrix<V> {
+    #[must_use]
+    pub(crate) const fn pattern(&self) -> &CsrPattern {
+        &self.pattern
+    }
+
+    #[must_use]
+    pub(crate) const fn values(&self) -> &V {
+        &self.values
+    }
+}
+
+impl<T> CsrMatrix<Box<[T]>> {
+    pub(crate) fn try_from_parts(
+        shape: (usize, usize),
+        row_offsets: impl Into<Box<[usize]>>,
+        column_indices: impl Into<Box<[usize]>>,
+        values: impl Into<Box<[T]>>,
+    ) -> Result<Self, InvalidCompressedRows> {
+        let (row_offsets, column_indices, values) =
+            (row_offsets.into(), column_indices.into(), values.into());
+        let valid_layout = row_offsets.len()
+            == shape.0.checked_add(1).ok_or(InvalidCompressedRows)?
+            && row_offsets.first() == Some(&0)
+            && row_offsets.last() == Some(&column_indices.len())
+            && column_indices.len() == values.len();
+        let valid_rows = row_offsets.windows(2).all(|offsets| {
+            column_indices
+                .get(offsets[0]..offsets[1])
+                .is_some_and(|row| {
+                    row.iter().all(|&column| column < shape.1)
+                        && row.windows(2).all(|pair| pair[0] < pair[1])
+                })
+        });
+        if !valid_layout || !valid_rows {
+            return Err(InvalidCompressedRows);
+        }
+        Ok(Self {
+            pattern: CsrPattern {
+                shape,
+                row_offsets,
+                column_indices,
+            },
+            values,
+        })
+    }
+
+    pub(crate) fn row(&self, row: usize) -> Option<(&[usize], &[T])> {
+        let offsets = self.pattern.row_offsets.get(row..=row.checked_add(1)?)?;
+        Some((
+            self.pattern.column_indices.get(offsets[0]..offsets[1])?,
+            self.values.get(offsets[0]..offsets[1])?,
+        ))
+    }
+
+    pub(crate) fn rows(&self) -> impl Iterator<Item = (&[usize], &[T])> {
+        (0..self.pattern.shape.0).map(|row| {
+            self.row(row)
+                .expect("validated compressed rows retain every declared row")
+        })
+    }
+}
 
 type EncodedCsr<A, E> = CsrMatrix<Box<[<E as ValueEncoding<A>>::Stored]>>;
 
 trait CsrEncoding<A: Ring>: ValueEncoding<A> {
-    fn logical_value_bytes(coefficient_bits: u64) -> Result<u64, RepresentationError>;
+    fn logical_value_bytes(coefficient_bits: u64) -> Result<u64, CsrError>;
 }
 
 impl CsrEncoding<IntegerRing> for BigIntEncoding {
-    fn logical_value_bytes(coefficient_bits: u64) -> Result<u64, RepresentationError> {
+    fn logical_value_bytes(coefficient_bits: u64) -> Result<u64, CsrError> {
         bigint_logical_bytes(coefficient_bits)
     }
 }
 
 impl CsrEncoding<RationalField> for ReducedFractionEncoding {
-    fn logical_value_bytes(coefficient_bits: u64) -> Result<u64, RepresentationError> {
+    fn logical_value_bytes(coefficient_bits: u64) -> Result<u64, CsrError> {
         bigint_logical_bytes(coefficient_bits)?
             .checked_add(bigint_logical_bytes(1)?)
-            .ok_or(RepresentationError::Overflow)
+            .ok_or(CsrError::Overflow)
     }
 }
 
-fn bigint_logical_bytes(coefficient_bits: u64) -> Result<u64, RepresentationError> {
+fn bigint_logical_bytes(coefficient_bits: u64) -> Result<u64, CsrError> {
     coefficient_bits
         .div_ceil(u64::from(usize::BITS))
         .checked_mul(size_of::<usize>() as u64)
         .and_then(|digits| (size_of::<BigInt>() as u64).checked_add(digits))
-        .ok_or(RepresentationError::Overflow)
+        .ok_or(CsrError::Overflow)
 }
 
 /// Deterministic pre-allocation bound for one CSR construction.
@@ -160,25 +262,25 @@ impl CsrBuildLimit {
         self
     }
 
-    fn rejection(self, estimate: CsrEstimate) -> Option<RepresentationError> {
+    fn rejection(self, estimate: CsrEstimate) -> Option<CsrError> {
         let storage = self.storage;
         if estimate.retained_logical_bytes_bound > storage.retained_logical_bytes() {
-            Some(RepresentationError::RetainedLogicalBytes {
+            Some(CsrError::RetainedLogicalBytes {
                 required: estimate.retained_logical_bytes_bound,
                 limit: storage.retained_logical_bytes(),
             })
         } else if estimate.peak_live_logical_bytes_bound > storage.peak_live_logical_bytes() {
-            Some(RepresentationError::PeakLiveLogicalBytes {
+            Some(CsrError::PeakLiveLogicalBytes {
                 required: estimate.peak_live_logical_bytes_bound,
                 limit: storage.peak_live_logical_bytes(),
             })
         } else if estimate.coefficient_bits_bound > self.coefficient_bits {
-            Some(RepresentationError::CoefficientBits {
+            Some(CsrError::CoefficientBits {
                 required: estimate.coefficient_bits_bound,
                 limit: self.coefficient_bits,
             })
         } else if estimate.scalar_steps_bound > self.scalar_steps.steps() {
-            Some(RepresentationError::ScalarSteps {
+            Some(CsrError::ScalarSteps {
                 required: estimate.scalar_steps_bound,
                 limit: self.scalar_steps.steps(),
             })
@@ -190,7 +292,7 @@ impl CsrBuildLimit {
 
 /// Failure to estimate or build one explicit representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RepresentationError {
+pub enum CsrError {
     /// The sealed materializer does not admit this recipe/encoding pair.
     Unavailable,
     /// Checked index, work, or byte arithmetic overflowed.
@@ -221,7 +323,7 @@ pub enum RepresentationError {
     Topology(TopologyError),
 }
 
-impl RepresentationError {
+impl CsrError {
     /// Stable machine-readable reason.
     #[must_use]
     pub const fn reason(self) -> &'static str {
@@ -271,17 +373,17 @@ impl RepresentationError {
     }
 }
 
-impl std::fmt::Display for RepresentationError {
+impl std::fmt::Display for CsrError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.reason())
     }
 }
 
-impl std::error::Error for RepresentationError {}
+impl std::error::Error for CsrError {}
 
 /// Caller-owned immutable CSR representation of one named map.
 #[derive(Debug)]
-pub struct CsrRepresentation<A, S, T, E>
+pub struct Csr<A, S, T, E>
 where
     A: Ring,
     S: Variance,
@@ -292,7 +394,7 @@ where
     physical: Arc<EncodedCsr<A, E>>,
 }
 
-impl<A, S, T, E> Clone for CsrRepresentation<A, S, T, E>
+impl<A, S, T, E> Clone for Csr<A, S, T, E>
 where
     A: Ring,
     S: Variance,
@@ -311,7 +413,7 @@ where
     private_bounds,
     reason = "public factories are restricted to the crate's admitted encodings"
 )]
-impl<A, S, T, E> CsrRepresentation<A, S, T, E>
+impl<A, S, T, E> Csr<A, S, T, E>
 where
     A: Ring,
     S: Variance,
@@ -323,10 +425,7 @@ where
     /// # Errors
     ///
     /// Returns a checked-overflow, unsupported-recipe, or topology failure.
-    pub fn estimate(
-        map: &LinearMap<A, S, T>,
-        _encoding: E,
-    ) -> Result<CsrEstimate, RepresentationError> {
+    pub fn estimate(map: &LinearMap<A, S, T>, _encoding: E) -> Result<CsrEstimate, CsrError> {
         estimate_csr::<A, S, T, E>(map)
     }
 
@@ -340,7 +439,7 @@ where
         map: &LinearMap<A, S, T>,
         _encoding: E,
         limit: CsrBuildLimit,
-    ) -> Result<Self, RepresentationError> {
+    ) -> Result<Self, CsrError> {
         let estimate = estimate_csr::<A, S, T, E>(map)?;
         if let Some(error) = limit.rejection(estimate) {
             return Err(error);
@@ -348,7 +447,7 @@ where
         let mut meter = BuildMeter::new(limit.scalar_steps);
         let physical = build_map_csr::<A, S, T, E>(map, &mut meter)?;
         if physical.pattern.nnz() > estimate.nnz_bound {
-            return Err(RepresentationError::Overflow);
+            return Err(CsrError::Overflow);
         }
         Ok(Self {
             represented_map: map.clone(),
@@ -357,7 +456,7 @@ where
     }
 }
 
-impl<A, S, T, E> CsrRepresentation<A, S, T, E>
+impl<A, S, T, E> Csr<A, S, T, E>
 where
     A: Ring,
     S: Variance,
@@ -368,12 +467,6 @@ where
     #[must_use]
     pub const fn represented_map(&self) -> &LinearMap<A, S, T> {
         &self.represented_map
-    }
-
-    /// Borrow raw physical CSR storage, which carries no independent map identity.
-    #[must_use]
-    pub fn matrix(&self) -> &CsrMatrix<Box<[E::Stored]>> {
-        self.physical.as_ref()
     }
 
     /// Matrix shape `(target rank, source rank)`.
@@ -432,13 +525,10 @@ impl BuildMeter {
         }
     }
 
-    fn charge(&mut self, count: u64) -> Result<(), RepresentationError> {
-        let required = self
-            .used
-            .checked_add(count)
-            .ok_or(RepresentationError::Overflow)?;
+    fn charge(&mut self, count: u64) -> Result<(), CsrError> {
+        let required = self.used.checked_add(count).ok_or(CsrError::Overflow)?;
         if required > self.limit {
-            return Err(RepresentationError::BuildScalarSteps {
+            return Err(CsrError::BuildScalarSteps {
                 required,
                 limit: self.limit,
             });
@@ -468,7 +558,7 @@ enum MatrixStructure {
     Zero,
 }
 
-fn estimate_csr<A, S, T, E>(map: &LinearMap<A, S, T>) -> Result<CsrEstimate, RepresentationError>
+fn estimate_csr<A, S, T, E>(map: &LinearMap<A, S, T>) -> Result<CsrEstimate, CsrError>
 where
     A: Ring,
     S: Variance,
@@ -490,7 +580,7 @@ where
         retained_logical_bytes_bound: bound.retained_bytes,
         peak_live_logical_bytes_bound: input_logical_bytes(map)?
             .checked_add(bound.build_peak_bytes)
-            .ok_or(RepresentationError::Overflow)?,
+            .ok_or(CsrError::Overflow)?,
         scratch_entries_bound: bound.scratch_entries,
         scalar_steps_bound: bound.work,
         canonicalization_required: match &map.recipe {
@@ -505,7 +595,7 @@ where
 fn estimate_composite<A: Ring, E: CsrEncoding<A>>(
     plan: &CompositionPlan,
     dual: bool,
-) -> Result<MatrixBound, RepresentationError> {
+) -> Result<MatrixBound, CsrError> {
     if dual {
         estimate_composite_order::<A, E, _>(
             (0..plan.len())
@@ -519,17 +609,17 @@ fn estimate_composite<A: Ring, E: CsrEncoding<A>>(
     }
 }
 
-fn estimate_composite_order<A, E, I>(mut bounds: I) -> Result<MatrixBound, RepresentationError>
+fn estimate_composite_order<A, E, I>(mut bounds: I) -> Result<MatrixBound, CsrError>
 where
     A: Ring,
     E: CsrEncoding<A>,
-    I: Iterator<Item = Result<MatrixBound, RepresentationError>>,
+    I: Iterator<Item = Result<MatrixBound, CsrError>>,
 {
-    let mut current = bounds.next().ok_or(RepresentationError::Unavailable)??;
+    let mut current = bounds.next().ok_or(CsrError::Unavailable)??;
     for next in bounds {
         let next = next?;
         if current.rows != next.columns {
-            return Err(RepresentationError::Unavailable);
+            return Err(CsrError::Unavailable);
         }
         let (nnz, multiply_pairs, coefficient_bits, structure): (
             usize,
@@ -573,14 +663,14 @@ where
                             .ok()
                             .and_then(|growth| bits.checked_add(growth))
                     })
-                    .ok_or(RepresentationError::Overflow)?;
+                    .ok_or(CsrError::Overflow)?;
                 (nnz, pair_bound, coefficient_bits, MatrixStructure::General)
             }
         };
         let multiply_work = u64::try_from(multiply_pairs)
             .ok()
             .and_then(|pairs| pairs.checked_mul(4))
-            .ok_or(RepresentationError::Overflow)?;
+            .ok_or(CsrError::Overflow)?;
         let retained_bytes = matrix_bytes::<A, E>(next.rows, nnz, coefficient_bits)?;
         let scratch_entries = current
             .scratch_entries
@@ -608,7 +698,7 @@ where
                 .work
                 .checked_add(next.work)
                 .and_then(|value| value.checked_add(multiply_work))
-                .ok_or(RepresentationError::Overflow)?,
+                .ok_or(CsrError::Overflow)?,
             retained_bytes,
             build_peak_bytes,
             scratch_entries,
@@ -620,7 +710,7 @@ where
 
 fn estimate_step<A: Ring, E: CsrEncoding<A>>(
     (source, target, recipe): (&BasedDegree, &BasedDegree, AtomicRecipe),
-) -> Result<MatrixBound, RepresentationError> {
+) -> Result<MatrixBound, CsrError> {
     estimate_atomic::<A, E>(source, target, &recipe)
 }
 
@@ -628,7 +718,7 @@ fn estimate_atomic<A, E>(
     source: &BasedDegree,
     target: &BasedDegree,
     recipe: &AtomicRecipe,
-) -> Result<MatrixBound, RepresentationError>
+) -> Result<MatrixBound, CsrError>
 where
     A: Ring,
     E: CsrEncoding<A>,
@@ -644,7 +734,7 @@ where
                 .domain
                 .view()
                 .boundary(*degree)
-                .map_err(RepresentationError::Topology)?;
+                .map_err(CsrError::Topology)?;
             let bits = boundary
                 .exact_entries()
                 .map(|(_, _, coefficient)| signed_bits(coefficient))
@@ -652,7 +742,7 @@ where
                 .unwrap_or(0);
             (
                 boundary.indices().len(),
-                u64::try_from(bits).map_err(|_| RepresentationError::Overflow)?,
+                u64::try_from(bits).map_err(|_| CsrError::Overflow)?,
                 MatrixStructure::General,
             )
         }
@@ -671,10 +761,10 @@ where
         _ => 0,
     };
     let retained_bytes = matrix_bytes::<A, E>(rows, nnz, coefficient_bits)?;
-    let work = u64::try_from(nnz).map_err(|_| RepresentationError::Overflow)?;
+    let work = u64::try_from(nnz).map_err(|_| CsrError::Overflow)?;
     let work = if matches!(recipe, AtomicRecipe::Coboundary { .. }) {
         work.checked_add(canonicalization_steps(nnz)?)
-            .ok_or(RepresentationError::Overflow)?
+            .ok_or(CsrError::Overflow)?
     } else {
         work
     };
@@ -687,7 +777,7 @@ where
         retained_bytes,
         build_peak_bytes: retained_bytes
             .checked_add(scratch_bytes::<A, E>(scratch_entries, coefficient_bits)?)
-            .ok_or(RepresentationError::Overflow)?,
+            .ok_or(CsrError::Overflow)?,
         scratch_entries,
         structure,
     })
@@ -702,92 +792,89 @@ fn ceil_log2(value: usize) -> usize {
         .expect("bit width fits usize")
 }
 
-fn checked_product(left: usize, right: usize) -> Result<usize, RepresentationError> {
-    left.checked_mul(right).ok_or(RepresentationError::Overflow)
+fn checked_product(left: usize, right: usize) -> Result<usize, CsrError> {
+    left.checked_mul(right).ok_or(CsrError::Overflow)
 }
 
-fn canonicalization_steps(entries: usize) -> Result<u64, RepresentationError> {
-    let logarithm =
-        u64::try_from(ceil_log2(entries.max(2))).map_err(|_| RepresentationError::Overflow)?;
-    let entries = u64::try_from(entries).map_err(|_| RepresentationError::Overflow)?;
+fn canonicalization_steps(entries: usize) -> Result<u64, CsrError> {
+    let logarithm = u64::try_from(ceil_log2(entries.max(2))).map_err(|_| CsrError::Overflow)?;
+    let entries = u64::try_from(entries).map_err(|_| CsrError::Overflow)?;
     entries
         .checked_mul(logarithm)
         .and_then(|sort| sort.checked_mul(2))
         .and_then(|sort| sort.checked_add(entries))
-        .ok_or(RepresentationError::Overflow)
+        .ok_or(CsrError::Overflow)
 }
 
 fn matrix_bytes<A: Ring, E: CsrEncoding<A>>(
     rows: usize,
     nnz: usize,
     coefficient_bits: u64,
-) -> Result<u64, RepresentationError> {
+) -> Result<u64, CsrError> {
     let offsets = u64::try_from(rows)
         .ok()
         .and_then(|rows| rows.checked_add(1))
         .and_then(|count| count.checked_mul(size_of::<usize>() as u64))
-        .ok_or(RepresentationError::Overflow)?;
+        .ok_or(CsrError::Overflow)?;
     let entry_bytes = (size_of::<usize>() as u64)
         .checked_add(E::logical_value_bytes(coefficient_bits)?)
-        .ok_or(RepresentationError::Overflow)?;
+        .ok_or(CsrError::Overflow)?;
     offsets
         .checked_add(
             u64::try_from(nnz)
                 .ok()
                 .and_then(|nnz| nnz.checked_mul(entry_bytes))
-                .ok_or(RepresentationError::Overflow)?,
+                .ok_or(CsrError::Overflow)?,
         )
-        .ok_or(RepresentationError::Overflow)
+        .ok_or(CsrError::Overflow)
 }
 
 fn scratch_bytes<A: Ring, E: CsrEncoding<A>>(
     entries: usize,
     coefficient_bits: u64,
-) -> Result<u64, RepresentationError> {
+) -> Result<u64, CsrError> {
     let entry_bytes = (2 * size_of::<usize>() as u64)
         .checked_add(E::logical_value_bytes(coefficient_bits)?)
-        .ok_or(RepresentationError::Overflow)?;
+        .ok_or(CsrError::Overflow)?;
     u64::try_from(entries)
         .ok()
         .and_then(|entries| entries.checked_mul(entry_bytes))
-        .ok_or(RepresentationError::Overflow)
+        .ok_or(CsrError::Overflow)
 }
 
-fn boundary_logical_bytes(boundary: BoundaryRef<'_>) -> Result<u64, RepresentationError> {
+fn boundary_logical_bytes(boundary: BoundaryRef<'_>) -> Result<u64, CsrError> {
     let index_bytes = u64::try_from(boundary.indptr().len() + boundary.indices().len())
         .ok()
         .and_then(|count| count.checked_mul(size_of::<usize>() as u64))
-        .ok_or(RepresentationError::Overflow)?;
+        .ok_or(CsrError::Overflow)?;
     let coefficient_bytes = match boundary.coefficients() {
         CoefficientSlice::I8(values) => {
-            u64::try_from(values.len()).map_err(|_| RepresentationError::Overflow)?
+            u64::try_from(values.len()).map_err(|_| CsrError::Overflow)?
         }
         CoefficientSlice::I64(values) => u64::try_from(values.len())
             .ok()
             .and_then(|count| count.checked_mul(size_of::<i64>() as u64))
-            .ok_or(RepresentationError::Overflow)?,
+            .ok_or(CsrError::Overflow)?,
     };
     index_bytes
         .checked_add(coefficient_bytes)
-        .ok_or(RepresentationError::Overflow)
+        .ok_or(CsrError::Overflow)
 }
 
-fn signed_permutation_logical_bytes(
-    permutation: &SignedPermutation,
-) -> Result<u64, RepresentationError> {
+fn signed_permutation_logical_bytes(permutation: &SignedPermutation) -> Result<u64, CsrError> {
     u64::try_from(permutation.len())
         .ok()
         .and_then(|count| count.checked_mul((2 * size_of::<usize>() + size_of::<i8>()) as u64))
-        .ok_or(RepresentationError::Overflow)
+        .ok_or(CsrError::Overflow)
 }
 
-fn checked_sum(values: &[u64]) -> Result<u64, RepresentationError> {
+fn checked_sum(values: &[u64]) -> Result<u64, CsrError> {
     values.iter().try_fold(0_u64, |sum, value| {
-        sum.checked_add(*value).ok_or(RepresentationError::Overflow)
+        sum.checked_add(*value).ok_or(CsrError::Overflow)
     })
 }
 
-fn input_logical_bytes<A, S, T>(map: &LinearMap<A, S, T>) -> Result<u64, RepresentationError>
+fn input_logical_bytes<A, S, T>(map: &LinearMap<A, S, T>) -> Result<u64, CsrError>
 where
     A: Ring,
     S: Variance,
@@ -805,10 +892,10 @@ where
         MapRecipe::Composite { plan, dual } => {
             boundaries
                 .try_reserve_exact(plan.len())
-                .map_err(|_| RepresentationError::Allocation)?;
+                .map_err(|_| CsrError::Allocation)?;
             permutations
                 .try_reserve_exact(plan.len())
-                .map_err(|_| RepresentationError::Allocation)?;
+                .map_err(|_| CsrError::Allocation)?;
             for index in 0..plan.len() {
                 let (source, _, recipe) = plan.step(index, *dual);
                 collect_input(source, &recipe, &mut boundaries, &mut permutations)?;
@@ -819,15 +906,15 @@ where
         let boundary = domain
             .view()
             .boundary(*degree)
-            .map_err(RepresentationError::Topology)?;
+            .map_err(CsrError::Topology)?;
         sum.checked_add(boundary_logical_bytes(boundary)?)
-            .ok_or(RepresentationError::Overflow)
+            .ok_or(CsrError::Overflow)
     })?;
     permutations
         .iter()
         .try_fold(boundary_bytes, |sum, permutation| {
             sum.checked_add(signed_permutation_logical_bytes(permutation)?)
-                .ok_or(RepresentationError::Overflow)
+                .ok_or(CsrError::Overflow)
         })
 }
 
@@ -836,7 +923,7 @@ fn collect_input(
     recipe: &AtomicRecipe,
     boundaries: &mut Vec<(ChainDomain, usize)>,
     permutations: &mut Vec<Arc<SignedPermutation>>,
-) -> Result<(), RepresentationError> {
+) -> Result<(), CsrError> {
     match recipe {
         AtomicRecipe::Boundary { degree }
         | AtomicRecipe::Coboundary {
@@ -848,7 +935,7 @@ fn collect_input(
             {
                 boundaries
                     .try_reserve(1)
-                    .map_err(|_| RepresentationError::Allocation)?;
+                    .map_err(|_| CsrError::Allocation)?;
                 boundaries.push((source.domain.clone(), *degree));
             }
         }
@@ -859,7 +946,7 @@ fn collect_input(
             {
                 permutations
                     .try_reserve(1)
-                    .map_err(|_| RepresentationError::Allocation)?;
+                    .map_err(|_| CsrError::Allocation)?;
                 permutations.push(Arc::clone(permutation));
             }
         }
@@ -871,7 +958,7 @@ fn collect_input(
 fn build_map_csr<A, S, T, E>(
     map: &LinearMap<A, S, T>,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError>
+) -> Result<EncodedCsr<A, E>, CsrError>
 where
     A: Ring,
     S: Variance,
@@ -897,7 +984,7 @@ fn build_composite<A: Ring, E: CsrEncoding<A>>(
     dual: bool,
     algebra: &A,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError> {
+) -> Result<EncodedCsr<A, E>, CsrError> {
     if dual {
         build_composite_order::<A, E, _>(plan, true, (0..plan.len()).rev(), algebra, meter)
     } else {
@@ -911,13 +998,13 @@ fn build_composite_order<A, E, I>(
     mut indices: I,
     algebra: &A,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError>
+) -> Result<EncodedCsr<A, E>, CsrError>
 where
     A: Ring,
     E: CsrEncoding<A>,
     I: Iterator<Item = usize>,
 {
-    let first = indices.next().ok_or(RepresentationError::Unavailable)?;
+    let first = indices.next().ok_or(CsrError::Unavailable)?;
     let mut current = build_step::<A, E>(plan.step(first, dual), algebra, meter)?;
     for index in indices {
         let next = build_step::<A, E>(plan.step(index, dual), algebra, meter)?;
@@ -930,7 +1017,7 @@ fn build_step<A: Ring, E: CsrEncoding<A>>(
     (source, target, recipe): (&BasedDegree, &BasedDegree, AtomicRecipe),
     algebra: &A,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError> {
+) -> Result<EncodedCsr<A, E>, CsrError> {
     build_atomic::<A, E>(source, target, &recipe, algebra, meter)
 }
 
@@ -940,7 +1027,7 @@ fn build_atomic<A, E>(
     recipe: &AtomicRecipe,
     algebra: &A,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError>
+) -> Result<EncodedCsr<A, E>, CsrError>
 where
     A: Ring,
     E: CsrEncoding<A>,
@@ -951,7 +1038,7 @@ where
                 .domain
                 .view()
                 .boundary(*degree)
-                .map_err(RepresentationError::Topology)?;
+                .map_err(CsrError::Topology)?;
             build_boundary_csr::<A, E>(boundary, algebra, meter)
         }
         AtomicRecipe::Coboundary { boundary_degree } => {
@@ -959,11 +1046,11 @@ where
                 .domain
                 .view()
                 .boundary(*boundary_degree)
-                .map_err(RepresentationError::Topology)?;
+                .map_err(CsrError::Topology)?;
             let mut entries = Vec::new();
             entries
                 .try_reserve_exact(boundary.indices().len())
-                .map_err(|_| RepresentationError::Allocation)?;
+                .map_err(|_| CsrError::Allocation)?;
             for (row, column, coefficient) in boundary.exact_entries() {
                 meter.charge(1)?;
                 entries.push((column, row, algebra.lift_i64(coefficient)));
@@ -994,10 +1081,10 @@ where
             let mut values = Vec::new();
             columns
                 .try_reserve_exact(rank)
-                .map_err(|_| RepresentationError::Allocation)?;
+                .map_err(|_| CsrError::Allocation)?;
             values
                 .try_reserve_exact(rank)
-                .map_err(|_| RepresentationError::Allocation)?;
+                .map_err(|_| CsrError::Allocation)?;
             for index in 0..rank {
                 meter.charge(1)?;
                 columns.push(index);
@@ -1015,11 +1102,11 @@ fn build_boundary_csr<A: Ring, E: CsrEncoding<A>>(
     boundary: BoundaryRef<'_>,
     algebra: &A,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError> {
+) -> Result<EncodedCsr<A, E>, CsrError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(boundary.indices().len())
-        .map_err(|_| RepresentationError::Allocation)?;
+        .map_err(|_| CsrError::Allocation)?;
     match boundary.coefficients() {
         CoefficientSlice::I8(coefficients) => {
             for &coefficient in coefficients {
@@ -1049,16 +1136,16 @@ fn build_signed_csr<A: Ring, E: CsrEncoding<A>>(
     columns: usize,
     algebra: &A,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError> {
+) -> Result<EncodedCsr<A, E>, CsrError> {
     let rank = permutation.len();
     let mut output_columns = Vec::new();
     let mut values = Vec::new();
     output_columns
         .try_reserve_exact(rank)
-        .map_err(|_| RepresentationError::Allocation)?;
+        .map_err(|_| CsrError::Allocation)?;
     values
         .try_reserve_exact(rank)
-        .map_err(|_| RepresentationError::Allocation)?;
+        .map_err(|_| CsrError::Allocation)?;
     for row in 0..rank {
         meter.charge(1)?;
         let (column, sign) = if inverse {
@@ -1066,7 +1153,7 @@ fn build_signed_csr<A: Ring, E: CsrEncoding<A>>(
         } else {
             permutation.inverse_basis(row)
         }
-        .map_err(RepresentationError::Topology)?;
+        .map_err(CsrError::Topology)?;
         output_columns.push(column);
         values.push(E::encode(algebra.lift_i64(i64::from(sign))));
     }
@@ -1078,16 +1165,16 @@ fn direct_csr<V>(
     columns: usize,
     column_indices: Vec<usize>,
     values: Vec<V>,
-) -> Result<CsrMatrix<Box<[V]>>, RepresentationError> {
+) -> Result<CsrMatrix<Box<[V]>>, CsrError> {
     if column_indices.len() != values.len()
         || (!column_indices.is_empty() && column_indices.len() != rows)
     {
-        return Err(RepresentationError::Unavailable);
+        return Err(CsrError::Unavailable);
     }
     let mut row_offsets = Vec::new();
     row_offsets
-        .try_reserve_exact(rows.checked_add(1).ok_or(RepresentationError::Overflow)?)
-        .map_err(|_| RepresentationError::Allocation)?;
+        .try_reserve_exact(rows.checked_add(1).ok_or(CsrError::Overflow)?)
+        .map_err(|_| CsrError::Allocation)?;
     if column_indices.is_empty() {
         row_offsets.resize(rows + 1, 0);
     } else {
@@ -1103,30 +1190,28 @@ fn canonical_csr<A: Ring, E: CsrEncoding<A>>(
     algebra: &A,
     meter: &mut BuildMeter,
     already_sorted: bool,
-) -> Result<EncodedCsr<A, E>, RepresentationError> {
+) -> Result<EncodedCsr<A, E>, CsrError> {
     if !already_sorted {
         meter.charge(
             canonicalization_steps(entries.len())?
-                .checked_sub(
-                    u64::try_from(entries.len()).map_err(|_| RepresentationError::Overflow)?,
-                )
-                .ok_or(RepresentationError::Overflow)?,
+                .checked_sub(u64::try_from(entries.len()).map_err(|_| CsrError::Overflow)?)
+                .ok_or(CsrError::Overflow)?,
         )?;
         entries.sort_unstable_by_key(|(row, column, _)| (*row, *column));
     }
     let mut row_offsets = Vec::new();
-    let offset_count = rows.checked_add(1).ok_or(RepresentationError::Overflow)?;
+    let offset_count = rows.checked_add(1).ok_or(CsrError::Overflow)?;
     row_offsets
         .try_reserve_exact(offset_count)
-        .map_err(|_| RepresentationError::Allocation)?;
+        .map_err(|_| CsrError::Allocation)?;
     let mut column_indices = Vec::new();
     let mut values = Vec::new();
     column_indices
         .try_reserve_exact(entries.len())
-        .map_err(|_| RepresentationError::Allocation)?;
+        .map_err(|_| CsrError::Allocation)?;
     values
         .try_reserve_exact(entries.len())
-        .map_err(|_| RepresentationError::Allocation)?;
+        .map_err(|_| CsrError::Allocation)?;
     row_offsets.push(0);
     let mut entries = entries.into_iter().peekable();
     for row in 0..rows {
@@ -1136,7 +1221,7 @@ fn canonical_csr<A: Ring, E: CsrEncoding<A>>(
             }
             let column = *column;
             if column >= columns {
-                return Err(RepresentationError::Unavailable);
+                return Err(CsrError::Unavailable);
             }
             let mut sum = algebra.zero();
             while let Some((entry_row, entry_column, _)) = entries.peek() {
@@ -1155,7 +1240,7 @@ fn canonical_csr<A: Ring, E: CsrEncoding<A>>(
         row_offsets.push(column_indices.len());
     }
     if entries.next().is_some() {
-        return Err(RepresentationError::Unavailable);
+        return Err(CsrError::Unavailable);
     }
     physical_csr((rows, columns), row_offsets, column_indices, values)
 }
@@ -1165,9 +1250,9 @@ fn physical_csr<V>(
     row_offsets: Vec<usize>,
     column_indices: Vec<usize>,
     values: Vec<V>,
-) -> Result<CsrMatrix<Box<[V]>>, RepresentationError> {
+) -> Result<CsrMatrix<Box<[V]>>, CsrError> {
     CsrMatrix::try_from_parts(shape, row_offsets, column_indices, values)
-        .map_err(|_| RepresentationError::Unavailable)
+        .map_err(|_| CsrError::Unavailable)
 }
 
 fn multiply_csr<A: Ring, E: CsrEncoding<A>>(
@@ -1175,9 +1260,9 @@ fn multiply_csr<A: Ring, E: CsrEncoding<A>>(
     before: &EncodedCsr<A, E>,
     algebra: &A,
     meter: &mut BuildMeter,
-) -> Result<EncodedCsr<A, E>, RepresentationError> {
+) -> Result<EncodedCsr<A, E>, CsrError> {
     if before.pattern.shape.0 != after.pattern.shape.1 {
-        return Err(RepresentationError::Unavailable);
+        return Err(CsrError::Unavailable);
     }
     let rows = after.pattern.shape.0;
     let columns = before.pattern.shape.1;
@@ -1202,7 +1287,7 @@ fn multiply_csr<A: Ring, E: CsrEncoding<A>>(
         }
         entries
             .try_reserve(accumulated.len())
-            .map_err(|_| RepresentationError::Allocation)?;
+            .map_err(|_| CsrError::Allocation)?;
         entries.extend(
             accumulated
                 .into_iter()
@@ -1253,13 +1338,10 @@ mod tests {
 
     #[test]
     fn estimation_rejects_checked_arithmetic_overflow() {
-        assert_eq!(
-            checked_product(usize::MAX, 2),
-            Err(RepresentationError::Overflow)
-        );
+        assert_eq!(checked_product(usize::MAX, 2), Err(CsrError::Overflow));
         assert_eq!(
             matrix_bytes::<IntegerRing, BigIntEncoding>(usize::MAX, 1, 1),
-            Err(RepresentationError::Overflow)
+            Err(CsrError::Overflow)
         );
     }
 

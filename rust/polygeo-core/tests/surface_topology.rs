@@ -1,6 +1,8 @@
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
-use polygeo_core::{CandidateInput, ComplexCore, IntegralCochain};
+use polygeo_core::{
+    chain::IntegralCochain, topology::CandidateInput, topology::Complex as ComplexCore,
+};
 use std::sync::Arc;
 
 fn admit(faces: &[[usize; 3]], vertex_count: usize) -> Arc<ComplexCore> {

@@ -1,8 +1,9 @@
 use num_bigint::BigInt;
 use num_traits::Zero;
 use polygeo_core::{
-    CandidateInput, ComplexCore, HalfedgeSurfaceCore, HomologyLimit, IntegralChain,
-    IntegralChainComplex, IntegralHomology, StorageLimit, WorkLimit,
+    chain::HomologyLimit, chain::IntegralChain, chain::IntegralChainComplex,
+    chain::IntegralHomology, solve::StorageLimit, solve::WorkLimit, topology::CandidateInput,
+    topology::Complex as ComplexCore, topology::HalfedgeSurface as HalfedgeSurfaceCore,
 };
 use proptest::prelude::*;
 use std::sync::Arc;
@@ -209,13 +210,9 @@ fn analysis_rows_are_stable_and_transport_across_checked_correspondences() {
 
     let (surface, forward) = HalfedgeSurfaceCore::from_complex(&source).unwrap();
     let transported = analysis
-        .transport(forward.isomorphism(), HomologyLimit::DEFAULT)
+        .transport(&forward, HomologyLimit::DEFAULT)
         .unwrap();
-    assert!(
-        transported
-            .chain_complex()
-            .same_owner(forward.isomorphism().target())
-    );
+    assert!(transported.chain_complex().same_owner(forward.target()));
     assert!(!transported.chain_complex().same_owner(&source_chain));
     for degree in 0..=2 {
         let source_group = analysis.group(degree).unwrap();
@@ -233,7 +230,7 @@ fn analysis_rows_are_stable_and_transport_across_checked_correspondences() {
 
     let (_, backward) = surface.to_complex().unwrap();
     let roundtrip = transported
-        .transport(backward.isomorphism(), HomologyLimit::DEFAULT)
+        .transport(&backward, HomologyLimit::DEFAULT)
         .unwrap();
     for degree in 0..=2 {
         assert_eq!(
@@ -255,14 +252,14 @@ fn transport_rejects_foreign_sources_and_exhausted_smith_steps() {
     let (_, foreign_relation) = HalfedgeSurfaceCore::from_complex(&foreign).unwrap();
     assert_eq!(
         analysis
-            .transport(foreign_relation.isomorphism(), HomologyLimit::DEFAULT)
+            .transport(&foreign_relation, HomologyLimit::DEFAULT)
             .unwrap_err()
             .reason(),
         "owner_mismatch"
     );
     let exhausted = analysis
         .transport(
-            relation.isomorphism(),
+            &relation,
             HomologyLimit::DEFAULT.with_smith_steps(WorkLimit::new(0)),
         )
         .unwrap_err();

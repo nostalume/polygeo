@@ -3,7 +3,7 @@ use std::{marker::PhantomData, sync::Arc};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
-use crate::chain::{BasedDegree, ChainDomain, visit_wedge_face_pairs, wedge_normalization};
+use crate::chain_impl::{BasedDegree, ChainDomain, visit_wedge_face_pairs, wedge_normalization};
 use crate::{
     BigIntEncoding, CanonicalSelection, Chain, Cochain, CoefficientSystem, ComplexCore, Element,
     IntegerRing, Space, TopologyError, Variance,

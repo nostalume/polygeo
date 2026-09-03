@@ -3,14 +3,20 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use num_bigint::BigInt;
-use polygeo_core::{
-    Binary64CochainSpace, Binary64Element, CancellationToken, CandidateInput, ComplexCore,
-    EuclideanRealization, FaceDirectionField, HomologyLimit, IntegralCochain, IntegralHomology,
-    NativeExecutor, NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit,
-    SolveError, StorageLimit, SurfaceComputationError, SurfaceError, TriangleSurface, WorkLimit,
+use polygeo_core::chain::{HomologyLimit, IntegralCochain, IntegralHomology};
+use polygeo_core::field::Direction as FaceDirectionField;
+use polygeo_core::form::{CochainSpace as Binary64CochainSpace, Element as Binary64Element};
+use polygeo_core::geometry::{
+    Geometry, Limit, Metric, NondegenerateCapability, PairingCapability, SurfaceError,
+    TriangleSurface, VectorField as EntityVectors,
 };
+use polygeo_core::solve::{
+    CancellationToken, Executor, Policy, SolveError, StorageLimit, SurfaceComputationError,
+    WorkLimit,
+};
+use polygeo_core::topology::{CandidateInput, Complex as ComplexCore};
 
-fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
+fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<Geometry> {
     let topology = ComplexCore::admit(
         CandidateInput::unsigned([0_u64, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], 4, 3, Some(4)).unwrap(),
     )
@@ -30,10 +36,10 @@ fn tetrahedron(scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
                 .map(move |(coordinate, offset)| scale * coordinate + offset)
         })
         .collect();
-    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+    Geometry::admit(topology, 3, positions, Limit::DEFAULT).unwrap()
 }
 
-fn octahedron() -> Arc<EuclideanRealization> {
+fn octahedron() -> Arc<Geometry> {
     let topology = ComplexCore::admit(
         CandidateInput::unsigned(
             [
@@ -46,32 +52,32 @@ fn octahedron() -> Arc<EuclideanRealization> {
         .unwrap(),
     )
     .unwrap();
-    EuclideanRealization::admit(
+    Geometry::admit(
         topology,
         3,
         vec![
             1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
             -1.0,
         ],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap()
 }
 
-fn triangle() -> Arc<EuclideanRealization> {
+fn triangle() -> Arc<Geometry> {
     let topology =
         ComplexCore::admit(CandidateInput::unsigned([0_u64, 1, 2], 1, 3, Some(3)).unwrap())
             .unwrap();
-    EuclideanRealization::admit(
+    Geometry::admit(
         topology,
         3,
         vec![0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap()
 }
 
-fn radial_disk(sections: usize) -> Arc<EuclideanRealization> {
+fn radial_disk(sections: usize) -> Arc<Geometry> {
     let mut positions = Vec::with_capacity(3 * (sections + 1));
     for section in 0..sections {
         let angle = 2.0 * PI * f64::from(u32::try_from(section).unwrap())
@@ -92,26 +98,26 @@ fn radial_disk(sections: usize) -> Arc<EuclideanRealization> {
         CandidateInput::unsigned(faces, sections, 3, Some(sections + 1)).unwrap(),
     )
     .unwrap();
-    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+    Geometry::admit(topology, 3, positions, Limit::DEFAULT).unwrap()
 }
 
-fn nonplanar_disk() -> Arc<EuclideanRealization> {
+fn nonplanar_disk() -> Arc<Geometry> {
     let topology = ComplexCore::admit(
         CandidateInput::unsigned([0_u64, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4], 4, 3, Some(5)).unwrap(),
     )
     .unwrap();
-    EuclideanRealization::admit(
+    Geometry::admit(
         topology,
         3,
         vec![
             -1.0, -1.0, 0.0, 1.0, -1.0, 0.2, 1.0, 1.0, 0.0, -1.0, 1.0, -0.1, 0.0, 0.0, 0.5,
         ],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap()
 }
 
-fn acute_disk(subdivisions: usize, scale: f64, translation: [f64; 3]) -> Arc<EuclideanRealization> {
+fn acute_disk(subdivisions: usize, scale: f64, translation: [f64; 3]) -> Arc<Geometry> {
     let mut indices = vec![vec![usize::MAX; subdivisions + 1]; subdivisions + 1];
     let vertex_count = (subdivisions + 1) * (subdivisions + 2) / 2;
     let mut positions = Vec::with_capacity(3 * vertex_count);
@@ -161,10 +167,10 @@ fn acute_disk(subdivisions: usize, scale: f64, translation: [f64; 3]) -> Arc<Euc
             .unwrap(),
     )
     .unwrap();
-    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+    Geometry::admit(topology, 3, positions, Limit::DEFAULT).unwrap()
 }
 
-fn flat_annulus(sections: usize) -> Arc<EuclideanRealization> {
+fn flat_annulus(sections: usize) -> Arc<Geometry> {
     let mut positions = Vec::with_capacity(6 * sections);
     let step = 2.0 * PI / f64::from(u32::try_from(sections).unwrap());
     for (ring, radius) in [2.0, 1.0].into_iter().enumerate() {
@@ -191,10 +197,10 @@ fn flat_annulus(sections: usize) -> Arc<EuclideanRealization> {
         CandidateInput::unsigned(faces, 2 * sections, 3, Some(2 * sections)).unwrap(),
     )
     .unwrap();
-    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+    Geometry::admit(topology, 3, positions, Limit::DEFAULT).unwrap()
 }
 
-fn torus(major_sections: usize, minor_sections: usize) -> Arc<EuclideanRealization> {
+fn torus(major_sections: usize, minor_sections: usize) -> Arc<Geometry> {
     let mut positions = Vec::with_capacity(3 * major_sections * minor_sections);
     for major in 0..major_sections {
         let theta = 2.0 * PI * f64::from(u32::try_from(major).unwrap())
@@ -244,7 +250,7 @@ fn torus(major_sections: usize, minor_sections: usize) -> Arc<EuclideanRealizati
         .unwrap(),
     )
     .unwrap();
-    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT).unwrap()
+    Geometry::admit(topology, 3, positions, Limit::DEFAULT).unwrap()
 }
 
 fn cotangent(left: [f64; 3], right: [f64; 3], opposite: [f64; 3]) -> f64 {
@@ -332,7 +338,7 @@ fn assert_boundary_alignment(
 
 fn boundary_field(
     surface: &Arc<TriangleSurface>,
-    metric: &PositiveMetric,
+    metric: &Metric,
     order: NonZeroU32,
     offset: f64,
 ) -> FaceDirectionField {
@@ -352,7 +358,7 @@ fn boundary_field(
 
 fn boundary_field_result(
     surface: &Arc<TriangleSurface>,
-    metric: &PositiveMetric,
+    metric: &Metric,
     order: NonZeroU32,
     offset: f64,
     execution: (StorageLimit, WorkLimit, &CancellationToken),
@@ -362,9 +368,7 @@ fn boundary_field_result(
         order,
         metric,
         offset,
-        &NativeExecutor::sequential(),
-        storage,
-        work,
+        Policy::new(Executor::sequential(), storage, work),
         cancellation,
     )
 }
@@ -376,10 +380,12 @@ fn assert_lscm_failures(surface: &TriangleSurface) {
         surface
             .least_squares_conformal_map(
                 [0, 2],
-                RealizationLimit::DEFAULT,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
+                Limit::DEFAULT,
+                Policy::new(
+                    Executor::sequential(),
+                    StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                    WorkLimit::new(u64::MAX),
+                ),
                 &cancellation,
             )
             .unwrap_err()
@@ -390,10 +396,12 @@ fn assert_lscm_failures(surface: &TriangleSurface) {
         surface
             .least_squares_conformal_map(
                 [0, 2],
-                RealizationLimit::DEFAULT,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(0, 0).unwrap(),
-                WorkLimit::new(u64::MAX),
+                Limit::DEFAULT,
+                Policy::new(
+                    Executor::sequential(),
+                    StorageLimit::new(0, 0).unwrap(),
+                    WorkLimit::new(u64::MAX),
+                ),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -404,10 +412,12 @@ fn assert_lscm_failures(surface: &TriangleSurface) {
         surface
             .least_squares_conformal_map(
                 [0, 4],
-                RealizationLimit::DEFAULT,
-                &NativeExecutor::sequential(),
-                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-                WorkLimit::new(u64::MAX),
+                Limit::DEFAULT,
+                Policy::new(
+                    Executor::sequential(),
+                    StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                    WorkLimit::new(u64::MAX),
+                ),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -422,10 +432,12 @@ fn least_squares_conformal_map_preserves_explicit_anchors_and_certifies_the_disk
     let solution = surface
         .least_squares_conformal_map(
             [0, 2],
-            RealizationLimit::DEFAULT,
-            &NativeExecutor::sequential(),
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
+            Limit::DEFAULT,
+            Policy::new(
+                Executor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -460,21 +472,23 @@ fn least_squares_conformal_map_preserves_explicit_anchors_and_certifies_the_disk
             ]
         })
         .collect();
-    let transformed = EuclideanRealization::admit(
+    let transformed = Geometry::admit(
         Arc::clone(surface.realization().topology()),
         3,
         transformed_positions,
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     let transformed = TriangleSurface::admit(transformed)
         .unwrap()
         .least_squares_conformal_map(
             [0, 2],
-            RealizationLimit::DEFAULT,
-            &NativeExecutor::sequential(),
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
+            Limit::DEFAULT,
+            Policy::new(
+                Executor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -485,10 +499,12 @@ fn least_squares_conformal_map_preserves_explicit_anchors_and_certifies_the_disk
     let reversed = surface
         .least_squares_conformal_map(
             [2, 0],
-            RealizationLimit::DEFAULT,
-            &NativeExecutor::sequential(),
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
+            Limit::DEFAULT,
+            Policy::new(
+                Executor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -504,7 +520,7 @@ fn least_squares_conformal_map_preserves_explicit_anchors_and_certifies_the_disk
 }
 
 fn assert_triangle_differential(
-    realization: &Arc<EuclideanRealization>,
+    realization: &Arc<Geometry>,
     scalar: [f64; 3],
     vector: [f64; 3],
     expected_gradient: [f64; 3],
@@ -529,7 +545,7 @@ fn assert_triangle_differential(
 
 fn assert_differential_rejections(
     surface: &TriangleSurface,
-    realization: &Arc<EuclideanRealization>,
+    realization: &Arc<Geometry>,
     scalar: &[f64],
     vector: &[f64],
 ) {
@@ -570,12 +586,21 @@ fn assert_differential_rejections(
             .unwrap_err(),
         SurfaceError::OwnerMismatch
     );
-    assert_eq!(
-        surface
-            .divergence(&surface.vertex_vectors(vec![0.0; 9]).unwrap())
-            .unwrap_err(),
-        SurfaceError::FieldShape
-    );
+}
+
+fn assert_quarter_turn<const DEGREE: usize>(
+    expected: &EntityVectors<DEGREE>,
+    actual: &EntityVectors<DEGREE>,
+) {
+    for (expected, actual) in expected
+        .values()
+        .chunks_exact(3)
+        .zip(actual.values().chunks_exact(3))
+    {
+        assert_close(actual[0], -expected[1], 2.0e-14);
+        assert_close(actual[1], expected[0], 2.0e-14);
+        assert_close(actual[2], expected[2], 2.0e-14);
+    }
 }
 
 fn assert_gradient_divergence_matches_stiffness() {
@@ -676,7 +701,7 @@ fn gradient_and_divergence_are_affine_negative_adjoints() {
         .sum::<f64>();
     assert_close(pairing, -18.0, 2.0e-14);
 
-    let scaled_realization = EuclideanRealization::admit(
+    let scaled_realization = Geometry::admit(
         Arc::clone(realization.topology()),
         3,
         realization
@@ -684,7 +709,7 @@ fn gradient_and_divergence_are_affine_negative_adjoints() {
             .iter()
             .map(|value| 3.0 * value)
             .collect(),
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     assert_triangle_differential(
@@ -695,7 +720,7 @@ fn gradient_and_divergence_are_affine_negative_adjoints() {
         [-3.0, -6.0, 9.0],
     );
 
-    let rotated_realization = EuclideanRealization::admit(
+    let rotated_realization = Geometry::admit(
         Arc::clone(realization.topology()),
         3,
         realization
@@ -703,7 +728,7 @@ fn gradient_and_divergence_are_affine_negative_adjoints() {
             .chunks_exact(3)
             .flat_map(|point| [-point[1] + 5.0, point[0] - 7.0, point[2] + 11.0])
             .collect(),
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     assert_triangle_differential(
@@ -717,11 +742,11 @@ fn gradient_and_divergence_are_affine_negative_adjoints() {
     let reversed_topology =
         ComplexCore::admit(CandidateInput::unsigned([0_u64, 2, 1], 1, 3, Some(3)).unwrap())
             .unwrap();
-    let reversed_realization = EuclideanRealization::admit(
+    let reversed_realization = Geometry::admit(
         Arc::clone(&reversed_topology),
         3,
         realization.positions().to_vec(),
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     assert_triangle_differential(
@@ -788,35 +813,26 @@ fn gradients_and_curvature_obey_translation_and_scale_laws() {
         .chunks_exact(3)
         .flat_map(|point| [-point[1] + 4.0, point[0] - 7.0, point[2] + 2.0])
         .collect();
-    let rotated_realization = EuclideanRealization::admit(
+    let rotated_realization = Geometry::admit(
         Arc::clone(base.realization().topology()),
         3,
         rotated_positions,
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     let rotated = TriangleSurface::admit(rotated_realization).unwrap();
-    for (expected, actual) in [
-        base.face_unit_normals().unwrap(),
-        base.surface_area_gradient().unwrap(),
-        base.volume_gradient().unwrap(),
-    ]
-    .into_iter()
-    .zip([
-        rotated.face_unit_normals().unwrap(),
-        rotated.surface_area_gradient().unwrap(),
-        rotated.volume_gradient().unwrap(),
-    ]) {
-        for (expected, actual) in expected
-            .values()
-            .chunks_exact(3)
-            .zip(actual.values().chunks_exact(3))
-        {
-            assert_close(actual[0], -expected[1], 2.0e-14);
-            assert_close(actual[1], expected[0], 2.0e-14);
-            assert_close(actual[2], expected[2], 2.0e-14);
-        }
-    }
+    assert_quarter_turn(
+        &base.face_unit_normals().unwrap(),
+        &rotated.face_unit_normals().unwrap(),
+    );
+    assert_quarter_turn(
+        &base.surface_area_gradient().unwrap(),
+        &rotated.surface_area_gradient().unwrap(),
+    );
+    assert_quarter_turn(
+        &base.volume_gradient().unwrap(),
+        &rotated.volume_gradient().unwrap(),
+    );
 
     let curvature = base.gaussian_curvature_measure().unwrap();
     assert_close(curvature.coefficients().iter().sum(), 4.0 * PI, 2.0e-14);
@@ -863,9 +879,13 @@ fn connection_retains_only_transport_and_integrability_shares_owner() {
     assert!(Arc::ptr_eq(integrable.connection(), &flat));
 
     let field = integrable.direction_field(0.25).unwrap();
-    assert!(Arc::ptr_eq(field.connection(), &flat));
+    assert!(Arc::ptr_eq(field.connection().connection(), &flat));
     assert_eq!(field.power_directions().len(), 2 * surface.face_count());
-    assert_close(field.crossing_error().unwrap(), 0.0, holonomy.limit());
+    assert_close(
+        field.connection().crossing_error().unwrap(),
+        0.0,
+        holonomy.limit(),
+    );
     let vectors = field.ambient_vector_branch_copy(0).unwrap();
     for vector in vectors.values().chunks_exact(3) {
         assert_close(norm(vector), 1.0, 8.0e-15);
@@ -1180,9 +1200,11 @@ fn minimum_energy_direction_field_realizes_exact_sphere_power_charges() {
     let harmonic = metric
         .harmonic_one_form_basis(
             homology.group(1).unwrap(),
-            &NativeExecutor::sequential(),
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
+            Policy::new(
+                Executor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -1207,9 +1229,7 @@ fn minimum_energy_direction_field_realizes_exact_sphere_power_charges() {
             requested,
             &[],
             0.25,
-            &NativeExecutor::sequential(),
-            storage,
-            WorkLimit::new(u64::MAX),
+            Policy::new(Executor::sequential(), storage, WorkLimit::new(u64::MAX)),
             &CancellationToken::new(),
         )
     };
@@ -1285,9 +1305,11 @@ fn minimum_energy_direction_field_closes_lifted_torus_turns() {
     let torus_harmonic = torus_metric
         .harmonic_one_form_basis(
             torus_homology.group(1).unwrap(),
-            &NativeExecutor::sequential(),
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
+            Policy::new(
+                Executor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -1314,9 +1336,11 @@ fn minimum_energy_direction_field_closes_lifted_torus_turns() {
             &no_charges,
             &[1, 0],
             0.0,
-            &NativeExecutor::sequential(),
-            StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
-            WorkLimit::new(u64::MAX),
+            Policy::new(
+                Executor::sequential(),
+                StorageLimit::new(u64::MAX, u64::MAX).unwrap(),
+                WorkLimit::new(u64::MAX),
+            ),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -1347,14 +1371,14 @@ fn vertex_normal_and_curvature_algorithms_share_the_field_carrier() {
         surface.tip_angle_vertex_normals().unwrap(),
         surface.sphere_inscribed_vertex_normals().unwrap(),
     ] {
-        assert!(field.is_vertex_supported());
+        assert_eq!(field.support_degree(), 0);
         for vector in field.values().chunks_exact(3) {
             assert_close(norm(vector), 1.0, 2.0e-14);
         }
     }
 
     let mean = surface.mean_curvature_vectors(&metric).unwrap();
-    assert!(mean.is_vertex_supported());
+    assert_eq!(mean.support_degree(), 0);
     assert!(mean.values().iter().all(|value| value.is_finite()));
 }
 
@@ -1453,7 +1477,7 @@ fn deterministic_nonintegrability_is_stable_and_boundary_connections_are_compact
 
     let disk = TriangleSurface::admit(triangle()).unwrap();
     let bounded = disk.levi_civita_connection().unwrap();
-    assert!(bounded.interior_edge_indices_copy().is_empty());
+    assert!(bounded.interior_edge_indices().is_empty());
     assert!(bounded.transports().is_empty());
     let field = bounded
         .require_integrable()
@@ -1468,7 +1492,7 @@ fn deterministic_nonintegrability_is_stable_and_boundary_connections_are_compact
         .filter(|&edge| boundary.indptr()[edge + 1] - boundary.indptr()[edge] == 2)
         .collect::<Vec<_>>();
     let bounded = fan.levi_civita_connection().unwrap();
-    assert_eq!(&*bounded.interior_edge_indices_copy(), expected);
+    assert_eq!(bounded.interior_edge_indices(), expected);
     assert_eq!(bounded.transports().len(), 2 * expected.len());
     assert_eq!(
         fan.connection(NonZeroU32::MIN, &vec![0.0; fan.edge_count()])
@@ -1482,11 +1506,11 @@ fn surface_admission_rejects_non_three_dimensional_realizations() {
     let topology =
         ComplexCore::admit(CandidateInput::unsigned([0_u64, 1, 2], 1, 3, Some(3)).unwrap())
             .unwrap();
-    let realization = EuclideanRealization::admit(
+    let realization = Geometry::admit(
         topology,
         2,
         vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap();
     assert_eq!(

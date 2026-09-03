@@ -4,10 +4,11 @@ use std::{fmt, sync::Arc};
 
 use num_traits::ToPrimitive;
 
-use crate::form::Binary64Basis;
+use crate::form_impl::Binary64Basis;
 use crate::{
-    Binary64Element, Binary64Space, CanonicalSelection, Chain, Cochain, CoefficientSlice,
-    EuclideanRealization, RealizationError, TopologyError, Variance,
+    Binary64Element, Binary64Space, CanonicalSelection, Chain, CircumcentricPairing, Cochain,
+    CoefficientSlice, Geometry, GeometryError, Metric, NondegenerateCapability,
+    NondegeneratePairing, PairingCapability, TopologyError, Variance,
 };
 
 const MAX_OPERATOR_STEPS: usize = 64;
@@ -16,7 +17,7 @@ const MAX_OPERATOR_STEPS: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperatorError {
     Topology(TopologyError),
-    Realization(RealizationError),
+    Geometry(GeometryError),
     NonFinite,
     SpaceMismatch,
     FullSpaceRequired,
@@ -30,7 +31,7 @@ impl OperatorError {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::Topology(error) => error.reason(),
-            Self::Realization(error) => error.reason(),
+            Self::Geometry(error) => error.reason(),
             Self::NonFinite => "non_finite",
             Self::SpaceMismatch => "space_mismatch",
             Self::FullSpaceRequired => "full_space_required",
@@ -54,9 +55,9 @@ impl From<TopologyError> for OperatorError {
     }
 }
 
-impl From<RealizationError> for OperatorError {
-    fn from(error: RealizationError) -> Self {
-        Self::Realization(error)
+impl From<GeometryError> for OperatorError {
+    fn from(error: GeometryError) -> Self {
+        Self::Geometry(error)
     }
 }
 
@@ -65,10 +66,10 @@ enum AtomicRecipe {
     Differential,
     Restriction,
     ExtensionByZero,
-    Riesz(Arc<EuclideanRealization>),
-    InverseRiesz(Arc<EuclideanRealization>),
-    Codifferential(Arc<EuclideanRealization>),
-    Laplacian(Arc<EuclideanRealization>),
+    Riesz(Arc<Geometry>),
+    InverseRiesz(Arc<Geometry>),
+    Codifferential(Arc<Geometry>),
+    Laplacian(Arc<Geometry>),
     Identity,
     Zero,
 }
@@ -309,10 +310,7 @@ impl CanonicalSelection {
 }
 
 impl LinearOperator<Cochain, Chain> {
-    pub(crate) fn riesz(
-        realization: Arc<EuclideanRealization>,
-        degree: usize,
-    ) -> Result<Self, OperatorError> {
+    pub(crate) fn riesz(realization: Arc<Geometry>, degree: usize) -> Result<Self, OperatorError> {
         realization.hodge_coefficients(degree)?;
         let owner = realization.topology();
         Ok(Self::atomic(
@@ -325,7 +323,7 @@ impl LinearOperator<Cochain, Chain> {
 
 impl LinearOperator<Chain, Cochain> {
     pub(crate) fn inverse_riesz(
-        realization: Arc<EuclideanRealization>,
+        realization: Arc<Geometry>,
         degree: usize,
     ) -> Result<Self, OperatorError> {
         realization.hodge_coefficients(degree)?;
@@ -340,7 +338,7 @@ impl LinearOperator<Chain, Cochain> {
 
 impl LinearOperator<Cochain, Cochain> {
     pub(crate) fn codifferential(
-        realization: Arc<EuclideanRealization>,
+        realization: Arc<Geometry>,
         degree: usize,
     ) -> Result<Self, OperatorError> {
         let Some(target_degree) = degree.checked_sub(1) else {
@@ -357,7 +355,7 @@ impl LinearOperator<Cochain, Cochain> {
     }
 
     pub(crate) fn laplacian(
-        realization: Arc<EuclideanRealization>,
+        realization: Arc<Geometry>,
         degree: usize,
     ) -> Result<Self, OperatorError> {
         realization.hodge_coefficients(degree)?;
@@ -368,6 +366,76 @@ impl LinearOperator<Cochain, Cochain> {
             space,
             AtomicRecipe::Laplacian(realization),
         ))
+    }
+}
+
+impl PairingCapability for CircumcentricPairing {
+    fn realization(&self) -> &Arc<Geometry> {
+        &self.realization
+    }
+
+    fn riesz(&self, degree: usize) -> Result<LinearOperator<Cochain, Chain>, OperatorError> {
+        LinearOperator::riesz(Arc::clone(&self.realization), degree)
+    }
+}
+
+impl PairingCapability for NondegeneratePairing {
+    fn realization(&self) -> &Arc<Geometry> {
+        &self.realization
+    }
+
+    fn riesz(&self, degree: usize) -> Result<LinearOperator<Cochain, Chain>, OperatorError> {
+        LinearOperator::riesz(Arc::clone(&self.realization), degree)
+    }
+}
+
+impl NondegenerateCapability for NondegeneratePairing {
+    fn inverse_riesz(
+        &self,
+        degree: usize,
+    ) -> Result<LinearOperator<Chain, Cochain>, OperatorError> {
+        LinearOperator::inverse_riesz(Arc::clone(&self.realization), degree)
+    }
+
+    fn codifferential(
+        &self,
+        degree: usize,
+    ) -> Result<LinearOperator<Cochain, Cochain>, OperatorError> {
+        LinearOperator::codifferential(Arc::clone(&self.realization), degree)
+    }
+
+    fn laplacian(&self, degree: usize) -> Result<LinearOperator<Cochain, Cochain>, OperatorError> {
+        LinearOperator::laplacian(Arc::clone(&self.realization), degree)
+    }
+}
+
+impl PairingCapability for Metric {
+    fn realization(&self) -> &Arc<Geometry> {
+        &self.realization
+    }
+
+    fn riesz(&self, degree: usize) -> Result<LinearOperator<Cochain, Chain>, OperatorError> {
+        LinearOperator::riesz(Arc::clone(&self.realization), degree)
+    }
+}
+
+impl NondegenerateCapability for Metric {
+    fn inverse_riesz(
+        &self,
+        degree: usize,
+    ) -> Result<LinearOperator<Chain, Cochain>, OperatorError> {
+        LinearOperator::inverse_riesz(Arc::clone(&self.realization), degree)
+    }
+
+    fn codifferential(
+        &self,
+        degree: usize,
+    ) -> Result<LinearOperator<Cochain, Cochain>, OperatorError> {
+        LinearOperator::codifferential(Arc::clone(&self.realization), degree)
+    }
+
+    fn laplacian(&self, degree: usize) -> Result<LinearOperator<Cochain, Cochain>, OperatorError> {
+        LinearOperator::laplacian(Arc::clone(&self.realization), degree)
     }
 }
 
@@ -526,7 +594,7 @@ fn scale(input: &[f64], weights: &[f64], output: &mut Vec<f64>, inverse: bool) {
 }
 
 fn apply_codifferential(
-    realization: &EuclideanRealization,
+    realization: &Geometry,
     degree: usize,
     input: &[f64],
     output: &mut Vec<f64>,
@@ -550,7 +618,7 @@ fn apply_codifferential(
 }
 
 fn apply_laplacian(
-    realization: &EuclideanRealization,
+    realization: &Geometry,
     degree: usize,
     input: &[f64],
     output: &mut Vec<f64>,
@@ -700,7 +768,3 @@ fn rows<T: Copy>(
         row(row_index, &mut entries);
     }
 }
-
-#[cfg(test)]
-#[path = "operator_csr.rs"]
-mod csr;

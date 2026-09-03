@@ -1,22 +1,26 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
-use polygeo_core::{
-    DirectionFieldSingularities, EntityVectors, FaceDirectionField, HolonomyEvidence,
-    IntegrableConnection, IntegralDualCycleBasis, LeastSquaresConformalMapSolution,
-    SurfaceConnection, SurfaceError, TriangleSurface,
+use polygeo_core::field::{
+    Connection as SurfaceConnection, Direction as FaceDirectionField,
+    DualCycles as IntegralDualCycleBasis, Holonomy as HolonomyEvidence, IntegrableConnection,
+    Singularities as DirectionFieldSingularities,
 };
+use polygeo_core::geometry::{
+    ConformalMap as LeastSquaresConformalMapSolution, FaceField as FaceVectors,
+    Geometry as EuclideanRealization, SurfaceError, TriangleSurface, VertexField as VertexVectors,
+};
+use polygeo_core::topology::TopologyError;
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
 
+use crate::array::{filled_array_1d, filled_array_2d};
+use crate::chain::{ExactElement, NativeChainElement, bigint_tuple};
+use crate::classified_exception;
 use crate::form::{Element, PyBinary64Element};
 use crate::realization::{NativeEuclideanRealization, PyPositiveMetric, PyRealizationLimit};
-use crate::{
-    ExactElement, NativeChainElement, bigint_tuple, classified_exception, filled_array_1d,
-    filled_array_2d,
-};
 
 create_exception!(_polygeo_native, SurfaceErrorPy, PyValueError);
 
@@ -50,7 +54,7 @@ pub(crate) fn surface_error(error: SurfaceError) -> PyErr {
 #[pyclass(
     name = "TriangleSurface",
     frozen,
-    module = "polygeo",
+    module = "polygeo.geometry",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
@@ -63,12 +67,12 @@ impl PyTriangleSurface {
     #[staticmethod]
     fn admit(realization: &NativeEuclideanRealization) -> PyResult<Self> {
         Ok(Self {
-            inner: TriangleSurface::admit(Arc::clone(realization.topology()))
+            inner: TriangleSurface::admit(Arc::clone(realization.owner()))
                 .map_err(surface_error)?,
         })
     }
     #[getter]
-    fn realization(&self) -> NativeEuclideanRealization {
+    fn geometry(&self) -> NativeEuclideanRealization {
         NativeEuclideanRealization::from_owner(Arc::clone(self.inner.realization()))
     }
     #[getter]
@@ -80,33 +84,33 @@ impl PyTriangleSurface {
         self.inner.edge_count()
     }
 
-    fn vertex_vectors(&self, values: &Bound<'_, PyAny>) -> PyResult<PyEntityVectors> {
+    fn vertex_field(&self, values: &Bound<'_, PyAny>) -> PyResult<PyEntityVectors> {
         let values = values.extract::<PyReadonlyArray2<'_, f64>>()?;
-        Ok(PyEntityVectors {
-            inner: self
-                .inner
-                .vertex_vectors(values.as_array().iter().copied().collect())
-                .map_err(surface_error)?,
-        })
+        vertex_field(
+            self.inner
+                .vertex_vectors(values.as_array().iter().copied().collect()),
+        )
     }
-    fn face_vectors(&self, values: &Bound<'_, PyAny>) -> PyResult<PyEntityVectors> {
+    fn face_field(&self, values: &Bound<'_, PyAny>) -> PyResult<PyEntityVectors> {
         let values = values.extract::<PyReadonlyArray2<'_, f64>>()?;
-        Ok(PyEntityVectors {
-            inner: self
-                .inner
-                .face_vectors(values.as_array().iter().copied().collect())
-                .map_err(surface_error)?,
-        })
+        face_field(
+            self.inner
+                .face_vectors(values.as_array().iter().copied().collect()),
+        )
     }
     fn gradient(&self, source: &PyBinary64Element) -> PyResult<PyEntityVectors> {
         let Element::Cochain(source) = &source.inner else {
             return Err(surface_error(SurfaceError::FieldShape));
         };
-        field(self.inner.gradient(source))
+        face_field(self.inner.gradient(source))
     }
     fn divergence(&self, field: &PyEntityVectors) -> PyResult<PyBinary64Element> {
         Ok(PyBinary64Element {
-            inner: Element::Chain(self.inner.divergence(&field.inner).map_err(surface_error)?),
+            inner: Element::Chain(
+                self.inner
+                    .divergence(field.face().map_err(surface_error)?)
+                    .map_err(surface_error)?,
+            ),
         })
     }
     fn first_frame_axes_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -126,22 +130,22 @@ impl PyTriangleSurface {
         )
     }
     fn face_unit_normals(&self) -> PyResult<PyEntityVectors> {
-        field(self.inner.face_unit_normals())
+        face_field(self.inner.face_unit_normals())
     }
     fn uniform_vertex_normals(&self) -> PyResult<PyEntityVectors> {
-        field(self.inner.uniform_vertex_normals())
+        vertex_field(self.inner.uniform_vertex_normals())
     }
     fn tip_angle_vertex_normals(&self) -> PyResult<PyEntityVectors> {
-        field(self.inner.tip_angle_vertex_normals())
+        vertex_field(self.inner.tip_angle_vertex_normals())
     }
     fn sphere_inscribed_vertex_normals(&self) -> PyResult<PyEntityVectors> {
-        field(self.inner.sphere_inscribed_vertex_normals())
+        vertex_field(self.inner.sphere_inscribed_vertex_normals())
     }
     fn surface_area_gradient(&self) -> PyResult<PyEntityVectors> {
-        field(self.inner.surface_area_gradient())
+        vertex_field(self.inner.surface_area_gradient())
     }
     fn volume_gradient(&self) -> PyResult<PyEntityVectors> {
-        field(self.inner.volume_gradient())
+        vertex_field(self.inner.volume_gradient())
     }
     fn gaussian_curvature_measure(&self) -> PyResult<PyBinary64Element> {
         Ok(PyBinary64Element {
@@ -153,9 +157,9 @@ impl PyTriangleSurface {
         })
     }
     fn mean_curvature_vectors(&self, metric: &PyPositiveMetric) -> PyResult<PyEntityVectors> {
-        field(self.inner.mean_curvature_vectors(&metric.inner))
+        vertex_field(self.inner.mean_curvature_vectors(&metric.inner))
     }
-    fn levi_civita_connection(&self) -> PyResult<PySurfaceConnection> {
+    fn levi_civita(&self) -> PyResult<PySurfaceConnection> {
         connection(self.inner.levi_civita_connection())
     }
     fn connection(
@@ -170,12 +174,12 @@ impl PyTriangleSurface {
         connection(self.inner.connection(symmetry_order, &deviations))
     }
 
-    #[pyo3(signature = (symmetry_order, metric, harmonic_basis, dual_cycles, charges, generator_turns, anchor_angle, *, executor=None, storage=None, work=None, cancellation=None))]
+    #[pyo3(signature = (symmetry_order, metric, harmonic_basis, dual_cycles, charges, generator_turns, anchor_angle, *, policy=None, cancellation=None))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the binding preserves the explicit native call boundary"
     )]
-    fn minimum_energy_direction_field(
+    fn direction_field(
         &self,
         py: Python<'_>,
         symmetry_order: u32,
@@ -185,9 +189,7 @@ impl PyTriangleSurface {
         charges: &NativeChainElement,
         generator_turns: Vec<i64>,
         anchor_angle: f64,
-        executor: Option<&crate::solve::PyNativeExecutor>,
-        storage: Option<&crate::solve::PyStorageLimit>,
-        work: Option<&crate::solve::PyWorkLimit>,
+        policy: Option<&crate::solve::PyPolicy>,
         cancellation: Option<&crate::solve::PyCancellationToken>,
     ) -> PyResult<PyFaceDirectionField> {
         let symmetry_order = NonZeroU32::new(symmetry_order)
@@ -195,11 +197,8 @@ impl PyTriangleSurface {
         let ExactElement::IntegerCochain(charges) = &charges.inner else {
             return Err(PyValueError::new_err("charges must be an integral cochain"));
         };
-        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
-        let cancellation = cancellation
-            .map_or_else(polygeo_core::CancellationToken::new, |value| {
-                value.inner.clone()
-            });
+        let policy = crate::solve::policy(policy);
+        let cancellation = crate::solve::cancellation_token(cancellation);
         let surface = Arc::clone(&self.inner);
         let metric = metric.inner.clone();
         let harmonic_basis = harmonic_basis.inner.clone();
@@ -214,9 +213,7 @@ impl PyTriangleSurface {
                 &charges,
                 &generator_turns,
                 anchor_angle,
-                &executor,
-                storage,
-                work,
+                policy,
                 &cancellation,
             )
         })
@@ -224,29 +221,20 @@ impl PyTriangleSurface {
         .map_err(crate::solve::surface_computation_error)
     }
 
-    #[pyo3(signature = (symmetry_order, metric, boundary_angle_offset, *, executor=None, storage=None, work=None, cancellation=None))]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the binding preserves the explicit native call boundary"
-    )]
-    fn boundary_aligned_direction_field(
+    #[pyo3(signature = (symmetry_order, metric, boundary_angle_offset, *, policy=None, cancellation=None))]
+    fn boundary_direction(
         &self,
         py: Python<'_>,
         symmetry_order: u32,
         metric: &PyPositiveMetric,
         boundary_angle_offset: f64,
-        executor: Option<&crate::solve::PyNativeExecutor>,
-        storage: Option<&crate::solve::PyStorageLimit>,
-        work: Option<&crate::solve::PyWorkLimit>,
+        policy: Option<&crate::solve::PyPolicy>,
         cancellation: Option<&crate::solve::PyCancellationToken>,
     ) -> PyResult<PyFaceDirectionField> {
         let symmetry_order = NonZeroU32::new(symmetry_order)
             .ok_or_else(|| PyValueError::new_err("symmetry_order must be positive"))?;
-        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
-        let cancellation = cancellation
-            .map_or_else(polygeo_core::CancellationToken::new, |value| {
-                value.inner.clone()
-            });
+        let policy = crate::solve::policy(policy);
+        let cancellation = crate::solve::cancellation_token(cancellation);
         let surface = Arc::clone(&self.inner);
         let metric = metric.inner.clone();
         py.detach(move || {
@@ -254,9 +242,7 @@ impl PyTriangleSurface {
                 symmetry_order,
                 &metric,
                 boundary_angle_offset,
-                &executor,
-                storage,
-                work,
+                policy,
                 &cancellation,
             )
         })
@@ -264,37 +250,21 @@ impl PyTriangleSurface {
         .map_err(crate::solve::surface_computation_error)
     }
 
-    #[pyo3(signature = (anchors, *, realization_limit=None, executor=None, storage=None, work=None, cancellation=None))]
-    fn least_squares_conformal_map(
+    #[pyo3(signature = (anchors, *, limit=None, policy=None, cancellation=None))]
+    fn conformal_map(
         &self,
+        py: Python<'_>,
         anchors: [usize; 2],
-        realization_limit: Option<&PyRealizationLimit>,
-        executor: Option<&crate::solve::PyNativeExecutor>,
-        storage: Option<&crate::solve::PyStorageLimit>,
-        work: Option<&crate::solve::PyWorkLimit>,
+        limit: Option<&PyRealizationLimit>,
+        policy: Option<&crate::solve::PyPolicy>,
         cancellation: Option<&crate::solve::PyCancellationToken>,
     ) -> PyResult<PyLeastSquaresConformalMapSolution> {
-        let (executor, storage, work) = crate::solve::policies(executor, storage, work);
-        let realization_limit = realization_limit
-            .copied()
-            .unwrap_or(PyRealizationLimit::DEFAULT)
-            .core();
-        let cancellation = cancellation
-            .map_or_else(polygeo_core::CancellationToken::new, |value| {
-                value.inner.clone()
-            });
+        let policy = crate::solve::policy(policy);
+        let limit = limit.copied().unwrap_or(PyRealizationLimit::DEFAULT).core();
+        let cancellation = crate::solve::cancellation_token(cancellation);
         let surface = Arc::clone(&self.inner);
-        Python::attach(|py| {
-            py.detach(move || {
-                surface.least_squares_conformal_map(
-                    anchors,
-                    realization_limit,
-                    &executor,
-                    storage,
-                    work,
-                    &cancellation,
-                )
-            })
+        py.detach(move || {
+            surface.least_squares_conformal_map(anchors, limit, policy, &cancellation)
         })
         .map(|inner| PyLeastSquaresConformalMapSolution { inner })
         .map_err(crate::solve::surface_computation_error)
@@ -302,9 +272,9 @@ impl PyTriangleSurface {
 }
 
 #[pyclass(
-    name = "LeastSquaresConformalMapSolution",
+    name = "ConformalMap",
     frozen,
-    module = "polygeo",
+    module = "polygeo.geometry",
     skip_from_py_object
 )]
 pub(crate) struct PyLeastSquaresConformalMapSolution {
@@ -314,7 +284,7 @@ pub(crate) struct PyLeastSquaresConformalMapSolution {
 #[pymethods]
 impl PyLeastSquaresConformalMapSolution {
     #[getter]
-    fn realization(&self) -> NativeEuclideanRealization {
+    fn geometry(&self) -> NativeEuclideanRealization {
         NativeEuclideanRealization::from_owner(Arc::clone(self.inner.realization()))
     }
     #[getter]
@@ -344,57 +314,81 @@ impl PyLeastSquaresConformalMapSolution {
 }
 
 #[pyclass(
-    name = "EntityVectors",
+    name = "VectorField",
     frozen,
-    module = "polygeo",
+    module = "polygeo.geometry",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
 pub(crate) struct PyEntityVectors {
-    inner: EntityVectors,
+    inner: PyEntityVectorValue,
+}
+
+#[derive(Clone, Debug)]
+enum PyEntityVectorValue {
+    Vertex(VertexVectors),
+    Face(FaceVectors),
+}
+
+impl PyEntityVectors {
+    fn parts(&self) -> (&Arc<EuclideanRealization>, &[f64]) {
+        match &self.inner {
+            PyEntityVectorValue::Vertex(field) => (field.realization(), field.values()),
+            PyEntityVectorValue::Face(field) => (field.realization(), field.values()),
+        }
+    }
+
+    fn face(&self) -> Result<&FaceVectors, SurfaceError> {
+        match &self.inner {
+            PyEntityVectorValue::Face(field) => Ok(field),
+            PyEntityVectorValue::Vertex(_) => Err(SurfaceError::FieldShape),
+        }
+    }
 }
 
 #[pymethods]
 impl PyEntityVectors {
     #[getter]
-    fn realization(&self) -> NativeEuclideanRealization {
-        NativeEuclideanRealization::from_owner(Arc::clone(self.inner.realization()))
+    fn geometry(&self) -> NativeEuclideanRealization {
+        NativeEuclideanRealization::from_owner(Arc::clone(self.parts().0))
     }
     #[getter]
     fn entity_count(&self) -> usize {
-        self.inner.entity_count()
+        self.parts().1.len() / self.fiber_dimension()
     }
     #[getter]
     fn fiber_dimension(&self) -> usize {
-        self.inner.fiber_dimension()
+        self.parts().0.ambient_dimension()
     }
     #[getter]
-    fn is_vertex_supported(&self) -> bool {
-        self.inner.is_vertex_supported()
+    fn support_degree(&self) -> usize {
+        match &self.inner {
+            PyEntityVectorValue::Vertex(field) => field.support_degree(),
+            PyEntityVectorValue::Face(field) => field.support_degree(),
+        }
     }
-    #[getter]
-    fn is_face_supported(&self) -> bool {
-        self.inner.is_face_supported()
-    }
-    fn vectors_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        project_rows(
-            py,
-            self.inner.values(),
-            self.inner.entity_count(),
-            self.inner.fiber_dimension(),
-        )
+    fn values_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let (realization, values) = self.parts();
+        let dimension = realization.ambient_dimension();
+        project_rows(py, values, values.len() / dimension, dimension)
     }
     fn normalized(&self) -> PyResult<Self> {
-        Ok(Self {
-            inner: self.inner.normalized().map_err(surface_error)?,
-        })
+        let inner = match &self.inner {
+            PyEntityVectorValue::Vertex(field) => {
+                PyEntityVectorValue::Vertex(field.normalized().map_err(surface_error)?)
+            }
+            PyEntityVectorValue::Face(field) => {
+                PyEntityVectorValue::Face(field.normalized().map_err(surface_error)?)
+            }
+        };
+        Ok(Self { inner })
     }
 }
 
 #[pyclass(
-    name = "SurfaceConnection",
+    name = "Connection",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
@@ -423,11 +417,10 @@ impl PySurfaceConnection {
         )
     }
     fn interior_edge_indices_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let values = self.inner.interior_edge_indices_copy();
+        let values = self.inner.interior_edge_indices();
         filled_array_1d(py, values.len(), |output: &mut [i64]| {
-            for (target, &value) in output.iter_mut().zip(&values) {
-                *target =
-                    i64::try_from(value).map_err(|_| polygeo_core::TopologyError::IndexOverflow)?;
+            for (target, &value) in output.iter_mut().zip(values) {
+                *target = i64::try_from(value).map_err(|_| TopologyError::IndexOverflow)?;
             }
             Ok(())
         })
@@ -445,9 +438,9 @@ impl PySurfaceConnection {
 }
 
 #[pyclass(
-    name = "IntegralDualCycleBasis",
+    name = "DualCycles",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 pub(crate) struct PyIntegralDualCycleBasis {
@@ -464,8 +457,7 @@ impl PyIntegralDualCycleBasis {
         let values = self.inner.generator_edge_indices();
         filled_array_1d(py, values.len(), |output: &mut [i64]| {
             for (target, &value) in output.iter_mut().zip(values) {
-                *target =
-                    i64::try_from(value).map_err(|_| polygeo_core::TopologyError::IndexOverflow)?;
+                *target = i64::try_from(value).map_err(|_| TopologyError::IndexOverflow)?;
             }
             Ok(())
         })
@@ -482,9 +474,9 @@ impl PyIntegralDualCycleBasis {
 }
 
 #[pyclass(
-    name = "HolonomyEvidence",
+    name = "Holonomy",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 struct PyHolonomyEvidence {
@@ -510,7 +502,7 @@ impl PyHolonomyEvidence {
 #[pyclass(
     name = "IntegrableConnection",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
@@ -526,7 +518,7 @@ impl PyIntegrableConnection {
             inner: Arc::clone(self.inner.connection()),
         }
     }
-    fn direction_field(&self, anchor_angle: f64) -> PyResult<PyFaceDirectionField> {
+    fn direction(&self, anchor_angle: f64) -> PyResult<PyFaceDirectionField> {
         Ok(PyFaceDirectionField {
             inner: self
                 .inner
@@ -541,9 +533,9 @@ impl PyIntegrableConnection {
 }
 
 #[pyclass(
-    name = "FaceDirectionField",
+    name = "Direction",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
@@ -554,9 +546,9 @@ pub(crate) struct PyFaceDirectionField {
 #[pymethods]
 impl PyFaceDirectionField {
     #[getter]
-    fn connection(&self) -> PySurfaceConnection {
-        PySurfaceConnection {
-            inner: Arc::clone(self.inner.connection()),
+    fn connection(&self) -> PyIntegrableConnection {
+        PyIntegrableConnection {
+            inner: self.inner.connection().clone(),
         }
     }
     #[getter]
@@ -567,28 +559,24 @@ impl PyFaceDirectionField {
         project_rows(
             py,
             self.inner.power_directions(),
-            self.inner.connection().surface().face_count(),
+            self.inner.connection().connection().surface().face_count(),
             2,
         )
     }
-    fn ambient_vector_branch_numpy_copy(&self, branch: usize) -> PyResult<PyEntityVectors> {
-        field(self.inner.ambient_vector_branch_copy(branch))
+    fn ambient_branch_numpy_copy(&self, branch: usize) -> PyResult<PyEntityVectors> {
+        face_field(self.inner.ambient_vector_branch_copy(branch))
     }
     fn singularities(&self) -> PyResult<PyDirectionFieldSingularities> {
         Ok(PyDirectionFieldSingularities {
             inner: self.inner.singularities().map_err(surface_error)?,
         })
     }
-    #[getter]
-    fn crossing_error(&self) -> PyResult<f64> {
-        self.inner.crossing_error().map_err(surface_error)
-    }
 }
 
 #[pyclass(
-    name = "DirectionFieldSingularities",
+    name = "Singularities",
     frozen,
-    module = "polygeo",
+    module = "polygeo.field",
     skip_from_py_object
 )]
 struct PyDirectionFieldSingularities {
@@ -607,7 +595,7 @@ impl PyDirectionFieldSingularities {
             inner: ExactElement::IntegerCochain(self.inner.charges().clone()),
         }
     }
-    fn boundary_turns_copy(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+    fn boundary_turns_python_copy(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
         bigint_tuple(py, self.inner.boundary_turns())
     }
     #[getter]
@@ -620,9 +608,14 @@ impl PyDirectionFieldSingularities {
     }
 }
 
-fn field(value: Result<EntityVectors, SurfaceError>) -> PyResult<PyEntityVectors> {
+fn vertex_field(value: Result<VertexVectors, SurfaceError>) -> PyResult<PyEntityVectors> {
     Ok(PyEntityVectors {
-        inner: value.map_err(surface_error)?,
+        inner: PyEntityVectorValue::Vertex(value.map_err(surface_error)?),
+    })
+}
+fn face_field(value: Result<FaceVectors, SurfaceError>) -> PyResult<PyEntityVectors> {
+    Ok(PyEntityVectors {
+        inner: PyEntityVectorValue::Face(value.map_err(surface_error)?),
     })
 }
 fn connection(
@@ -644,14 +637,19 @@ fn project_rows(
     })
 }
 
-pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add("SurfaceError", module.py().get_type::<SurfaceErrorPy>())?;
+pub(crate) fn register_geometry(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let error = module.py().get_type::<SurfaceErrorPy>();
+    error.setattr("__module__", "polygeo.geometry")?;
+    module.add("SurfaceError", error)?;
     module.add_class::<PyTriangleSurface>()?;
     module.add_class::<PyLeastSquaresConformalMapSolution>()?;
     module.add_class::<PyEntityVectors>()?;
-    let field = module.getattr("EntityVectors")?;
-    module.add("VertexVectors", field.clone())?;
-    module.add("FaceVectors", field)?;
+    let field = module.getattr("VectorField")?;
+    module.add("VertexField", field.clone())?;
+    module.add("FaceField", field)
+}
+
+pub(crate) fn register_field(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySurfaceConnection>()?;
     module.add_class::<PyIntegralDualCycleBasis>()?;
     module.add_class::<PyHolonomyEvidence>()?;

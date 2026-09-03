@@ -1,17 +1,18 @@
 use numpy::PyReadonlyArray1;
-use polygeo_core::{
-    Binary64Chain, Binary64ChainSpace, Binary64Cochain, Binary64CochainSpace,
-    Binary64Element as CoreBinary64Element, Binary64ElementError, Chain, Cochain,
-    LinearOperator as CoreLinearOperator, OperatorError, Variance,
+use polygeo_core::chain::{Chain, Cochain};
+use polygeo_core::form::{
+    Chain as Binary64Chain, ChainSpace as Binary64ChainSpace, Cochain as Binary64Cochain,
+    CochainSpace as Binary64CochainSpace, ElementError as Binary64ElementError,
+    Operator as CoreLinearOperator, OperatorError, compose,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyType};
 
-use crate::{
-    ExactElement, NativeChainElement, classified_exception, filled_array_1d, filled_array_2d,
-};
+use crate::array::filled_array_1d;
+use crate::chain::{ExactElement, NativeChainElement};
+use crate::classified_exception;
 
 create_exception!(_polygeo_native, Binary64ElementErrorPy, PyValueError);
 create_exception!(_polygeo_native, OperatorErrorPy, PyValueError);
@@ -75,12 +76,7 @@ impl Space {
     }
 }
 
-#[pyclass(
-    name = "Binary64Space",
-    frozen,
-    module = "polygeo",
-    skip_from_py_object
-)]
+#[pyclass(name = "Space", frozen, module = "polygeo.form", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub(crate) struct PyBinary64Space {
     pub(crate) inner: Space,
@@ -223,12 +219,7 @@ pub(crate) enum Element {
     Cochain(Binary64Cochain),
 }
 
-#[pyclass(
-    name = "Binary64Element",
-    frozen,
-    module = "polygeo",
-    skip_from_py_object
-)]
+#[pyclass(name = "Element", frozen, module = "polygeo.form", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub(crate) struct PyBinary64Element {
     pub(crate) inner: Element,
@@ -319,9 +310,9 @@ impl Operator {
 }
 
 #[pyclass(
-    name = "LinearOperator",
+    name = "Operator",
     frozen,
-    module = "polygeo",
+    module = "polygeo.form",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
@@ -371,29 +362,29 @@ impl PyLinearOperator {
     fn compose(&self, before: &Self) -> PyResult<Self> {
         let inner = match (&self.inner, &before.inner) {
             (Operator::ChainChain(a), Operator::ChainChain(b)) => {
-                Operator::ChainChain(polygeo_core::operator::compose(a, b).map_err(operator_error)?)
+                Operator::ChainChain(compose(a, b).map_err(operator_error)?)
             }
-            (Operator::ChainChain(a), Operator::CochainChain(b)) => Operator::CochainChain(
-                polygeo_core::operator::compose(a, b).map_err(operator_error)?,
-            ),
-            (Operator::ChainCochain(a), Operator::ChainChain(b)) => Operator::ChainCochain(
-                polygeo_core::operator::compose(a, b).map_err(operator_error)?,
-            ),
-            (Operator::ChainCochain(a), Operator::CochainChain(b)) => Operator::CochainCochain(
-                polygeo_core::operator::compose(a, b).map_err(operator_error)?,
-            ),
+            (Operator::ChainChain(a), Operator::CochainChain(b)) => {
+                Operator::CochainChain(compose(a, b).map_err(operator_error)?)
+            }
+            (Operator::ChainCochain(a), Operator::ChainChain(b)) => {
+                Operator::ChainCochain(compose(a, b).map_err(operator_error)?)
+            }
+            (Operator::ChainCochain(a), Operator::CochainChain(b)) => {
+                Operator::CochainCochain(compose(a, b).map_err(operator_error)?)
+            }
             (Operator::CochainChain(a), Operator::ChainCochain(b)) => {
-                Operator::ChainChain(polygeo_core::operator::compose(a, b).map_err(operator_error)?)
+                Operator::ChainChain(compose(a, b).map_err(operator_error)?)
             }
-            (Operator::CochainChain(a), Operator::CochainCochain(b)) => Operator::CochainChain(
-                polygeo_core::operator::compose(a, b).map_err(operator_error)?,
-            ),
-            (Operator::CochainCochain(a), Operator::ChainCochain(b)) => Operator::ChainCochain(
-                polygeo_core::operator::compose(a, b).map_err(operator_error)?,
-            ),
-            (Operator::CochainCochain(a), Operator::CochainCochain(b)) => Operator::CochainCochain(
-                polygeo_core::operator::compose(a, b).map_err(operator_error)?,
-            ),
+            (Operator::CochainChain(a), Operator::CochainCochain(b)) => {
+                Operator::CochainChain(compose(a, b).map_err(operator_error)?)
+            }
+            (Operator::CochainCochain(a), Operator::ChainCochain(b)) => {
+                Operator::ChainCochain(compose(a, b).map_err(operator_error)?)
+            }
+            (Operator::CochainCochain(a), Operator::CochainCochain(b)) => {
+                Operator::CochainCochain(compose(a, b).map_err(operator_error)?)
+            }
             _ => return Err(operator_error(OperatorError::SpaceMismatch)),
         };
         Ok(Self { inner })
@@ -417,24 +408,6 @@ impl PyLinearOperator {
         Ok(PyBinary64Element { inner })
     }
 
-    fn to_scipy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let values = match &self.inner {
-            Operator::ChainChain(x) => dense_columns(x),
-            Operator::ChainCochain(x) => dense_columns(x),
-            Operator::CochainChain(x) => dense_columns(x),
-            Operator::CochainCochain(x) => dense_columns(x),
-        }
-        .map_err(operator_error)?;
-        let rows = self.inner.target().size();
-        let columns = self.inner.source().size();
-        let dense = filled_array_2d(py, rows, columns, |output| {
-            output.copy_from_slice(&values);
-            Ok(())
-        })?;
-        let sparse = PyModule::import(py, "scipy.sparse")?;
-        Ok(sparse.getattr("csr_array")?.call1((dense,))?.unbind())
-    }
-
     fn dirichlet(
         &self,
         rhs: &PyBinary64Element,
@@ -447,7 +420,7 @@ impl PyLinearOperator {
         ) = (&self.inner, &rhs.inner, &prescribed.inner)
         else {
             return Err(crate::solve::problem_error(
-                polygeo_core::ProblemError::SpaceMismatch,
+                polygeo_core::solve::ProblemError::SpaceMismatch,
             ));
         };
         Ok(crate::solve::PyProblem {
@@ -460,38 +433,20 @@ impl PyLinearOperator {
     }
 }
 
-fn dense_columns<S: Variance, T: Variance>(
-    operator: &CoreLinearOperator<S, T>,
-) -> Result<Vec<f64>, OperatorError> {
-    let rows = operator.target().size();
-    let columns = operator.source().size();
-    let mut dense = vec![0.0; rows.saturating_mul(columns)];
-    for column in 0..columns {
-        let mut unit = vec![0.0; columns];
-        unit[column] = 1.0;
-        let value = CoreBinary64Element::admit(operator.source().clone(), unit)
-            .map_err(|_| OperatorError::SpaceMismatch)?;
-        let output = operator.apply(&value)?;
-        for (row, &coefficient) in output.coefficients().iter().enumerate() {
-            dense[row * columns + column] = coefficient;
-        }
-    }
-    Ok(dense)
-}
-
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add(
-        "Binary64ElementError",
-        module.py().get_type::<Binary64ElementErrorPy>(),
-    )?;
-    module.add("OperatorError", module.py().get_type::<OperatorErrorPy>())?;
+    let element_error = module.py().get_type::<Binary64ElementErrorPy>();
+    element_error.setattr("__module__", "polygeo.form")?;
+    module.add("ElementError", element_error)?;
+    let operator_error = module.py().get_type::<OperatorErrorPy>();
+    operator_error.setattr("__module__", "polygeo.form")?;
+    module.add("OperatorError", operator_error)?;
     module.add_class::<PyBinary64Space>()?;
     module.add_class::<PyBinary64Element>()?;
     module.add_class::<PyLinearOperator>()?;
-    let space = module.getattr("Binary64Space")?;
-    module.add("Binary64ChainSpace", space.clone())?;
-    module.add("Binary64CochainSpace", space)?;
-    let element = module.getattr("Binary64Element")?;
-    module.add("Binary64Chain", element.clone())?;
-    module.add("Binary64Cochain", element)
+    let space = module.getattr("Space")?;
+    module.add("ChainSpace", space.clone())?;
+    module.add("CochainSpace", space)?;
+    let element = module.getattr("Element")?;
+    module.add("Chain", element.clone())?;
+    module.add("Cochain", element)
 }

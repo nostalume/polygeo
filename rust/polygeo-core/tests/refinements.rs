@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use polygeo_core::{CandidateInput, CodimensionOneRegularCapability, ComplexCore, TopologyError};
+use polygeo_core::{
+    topology::CandidateInput, topology::CodimensionOneRegularCapability,
+    topology::Complex as ComplexCore, topology::TopologyError,
+};
 
 fn admit(rows: &[&[i128]], vertex_count: Option<usize>) -> Arc<ComplexCore> {
     let width = rows[0].len();

@@ -1,27 +1,29 @@
 use std::{mem::size_of, sync::Arc};
 
 use polygeo_core::{
-    Binary64Cochain, Binary64Element, Binary64Space, CancellationToken, CandidateInput, Cochain,
-    ComplexCore, EuclideanRealization, HomologyLimit, IntegralHomology, NativeExecutor,
-    NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit, SolveError,
-    SolveExt, StorageLimit, WorkLimit,
+    chain::Cochain, chain::HomologyLimit, chain::IntegralHomology,
+    form::Cochain as Binary64Cochain, form::Element as Binary64Element,
+    form::Space as Binary64Space, geometry::Geometry, geometry::Limit, geometry::Metric,
+    geometry::NondegenerateCapability, geometry::PairingCapability, solve::CancellationToken,
+    solve::Executor, solve::Policy, solve::SolveError, solve::SolveExt, solve::StorageLimit,
+    solve::WorkLimit, topology::CandidateInput, topology::Complex as ComplexCore,
 };
 
 const STORAGE: StorageLimit = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
 const WORK: WorkLimit = WorkLimit::new(u64::MAX);
 
-fn tetrahedron_metric() -> polygeo_core::PositiveMetric {
+fn tetrahedron_metric() -> polygeo_core::geometry::Metric {
     let topology = ComplexCore::admit(
         CandidateInput::signed([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3], 4, 3, None).unwrap(),
     )
     .unwrap();
-    EuclideanRealization::admit(
+    Geometry::admit(
         topology,
         3,
         vec![
             1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0,
         ],
-        RealizationLimit::DEFAULT,
+        Limit::DEFAULT,
     )
     .unwrap()
     .circumcentric_pairing()
@@ -30,7 +32,7 @@ fn tetrahedron_metric() -> polygeo_core::PositiveMetric {
     .unwrap()
 }
 
-fn cycle_metric(vertices: usize) -> PositiveMetric {
+fn cycle_metric(vertices: usize) -> Metric {
     let edges = (0..vertices).flat_map(|vertex| {
         [vertex, (vertex + 1) % vertices].map(|index| i64::try_from(index).unwrap())
     });
@@ -44,7 +46,7 @@ fn cycle_metric(vertices: usize) -> PositiveMetric {
             [angle.cos(), angle.sin()]
         })
         .collect();
-    EuclideanRealization::admit(topology, 2, positions, RealizationLimit::DEFAULT)
+    Geometry::admit(topology, 2, positions, Limit::DEFAULT)
         .unwrap()
         .circumcentric_pairing()
         .unwrap()
@@ -52,14 +54,11 @@ fn cycle_metric(vertices: usize) -> PositiveMetric {
         .unwrap()
 }
 
-fn equilateral_torus() -> (PositiveMetric, IntegralHomology) {
+fn equilateral_torus() -> (Metric, IntegralHomology) {
     equilateral_torus_transformed(1.0, 0.0)
 }
 
-fn equilateral_torus_transformed(
-    scale: f64,
-    translation: f64,
-) -> (PositiveMetric, IntegralHomology) {
+fn equilateral_torus_transformed(scale: f64, translation: f64) -> (Metric, IntegralHomology) {
     let major_sections = 3;
     let minor_sections = 3;
     let mut faces = Vec::new();
@@ -93,17 +92,16 @@ fn equilateral_torus_transformed(
     }
     let homology =
         IntegralHomology::analyze(&topology.chain_complex(), [1], HomologyLimit::DEFAULT).unwrap();
-    let metric =
-        EuclideanRealization::admit(topology, vertex_count, positions, RealizationLimit::DEFAULT)
-            .unwrap()
-            .circumcentric_pairing()
-            .unwrap()
-            .require_positive()
-            .unwrap();
+    let metric = Geometry::admit(topology, vertex_count, positions, Limit::DEFAULT)
+        .unwrap()
+        .circumcentric_pairing()
+        .unwrap()
+        .require_positive()
+        .unwrap();
     (metric, homology)
 }
 
-fn source(metric: &PositiveMetric, degree: usize, values: Vec<f64>) -> Binary64Cochain {
+fn source(metric: &Metric, degree: usize, values: Vec<f64>) -> Binary64Cochain {
     let space = Binary64Space::<Cochain>::full(Arc::clone(metric.realization().topology()), degree)
         .unwrap();
     Binary64Element::admit(space, values).unwrap()
@@ -117,10 +115,10 @@ fn hodge_decomposition_certifies_reconstruction_and_subspace_laws() {
     let source = Binary64Element::admit(space, vec![1.0, -2.0, 3.0, 0.5, -1.5, 2.5]).unwrap();
     let problem = metric.hodge_decomposition(source.clone()).unwrap();
     let prepared = problem
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&problem, STORAGE).unwrap();
-    let result = prepared.solve(&problem, &mut workspace, WORK).unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
+    let result = prepared.solve(&problem, &mut workspace).unwrap();
 
     for index in 0..source.coefficients().len() {
         let reconstructed = result.exact().coefficients()[index]
@@ -177,9 +175,7 @@ fn harmonic_one_form_basis_is_closed_coclosed_and_period_normalized() {
     let basis = metric
         .harmonic_one_form_basis(
             group,
-            &NativeExecutor::sequential(),
-            STORAGE,
-            WORK,
+            Policy::new(Executor::sequential(), STORAGE, WORK),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -211,9 +207,7 @@ fn harmonic_basis_empty_case_and_failures_publish_no_partial_basis() {
     let empty = sphere
         .harmonic_one_form_basis(
             sphere_homology.group(1).unwrap(),
-            &NativeExecutor::sequential(),
-            STORAGE,
-            WORK,
+            Policy::new(Executor::sequential(), STORAGE, WORK),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -227,14 +221,12 @@ fn harmonic_basis_empty_case_and_failures_publish_no_partial_basis() {
     assert_harmonic_basis_failures(&sphere, &sphere_homology);
 }
 
-fn assert_harmonic_basis_failures(sphere: &PositiveMetric, sphere_homology: &IntegralHomology) {
+fn assert_harmonic_basis_failures(sphere: &Metric, sphere_homology: &IntegralHomology) {
     assert_eq!(
         sphere
             .harmonic_one_form_basis(
                 sphere_homology.group(0).unwrap(),
-                &NativeExecutor::sequential(),
-                STORAGE,
-                WORK,
+                Policy::new(Executor::sequential(), STORAGE, WORK),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -258,9 +250,11 @@ fn assert_harmonic_basis_failures(sphere: &PositiveMetric, sphere_homology: &Int
         metric
             .harmonic_one_form_basis(
                 homology.group(1).unwrap(),
-                &NativeExecutor::sequential(),
-                StorageLimit::new(final_basis_bytes, u64::MAX).unwrap(),
-                WORK,
+                Policy::new(
+                    Executor::sequential(),
+                    StorageLimit::new(final_basis_bytes, u64::MAX).unwrap(),
+                    WORK,
+                ),
                 &CancellationToken::new(),
             )
             .unwrap()
@@ -271,9 +265,7 @@ fn assert_harmonic_basis_failures(sphere: &PositiveMetric, sphere_homology: &Int
         sphere
             .harmonic_one_form_basis(
                 homology.group(1).unwrap(),
-                &NativeExecutor::sequential(),
-                STORAGE,
-                WORK,
+                Policy::new(Executor::sequential(), STORAGE, WORK),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -284,9 +276,11 @@ fn assert_harmonic_basis_failures(sphere: &PositiveMetric, sphere_homology: &Int
         metric
             .harmonic_one_form_basis(
                 homology.group(1).unwrap(),
-                &NativeExecutor::sequential(),
-                StorageLimit::new(0, 0).unwrap(),
-                WORK,
+                Policy::new(
+                    Executor::sequential(),
+                    StorageLimit::new(0, 0).unwrap(),
+                    WORK,
+                ),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -297,9 +291,7 @@ fn assert_harmonic_basis_failures(sphere: &PositiveMetric, sphere_homology: &Int
         metric
             .harmonic_one_form_basis(
                 homology.group(1).unwrap(),
-                &NativeExecutor::sequential(),
-                STORAGE,
-                WorkLimit::new(0),
+                Policy::new(Executor::sequential(), STORAGE, WorkLimit::new(0)),
                 &CancellationToken::new(),
             )
             .unwrap_err()
@@ -312,9 +304,7 @@ fn assert_harmonic_basis_failures(sphere: &PositiveMetric, sphere_homology: &Int
         metric
             .harmonic_one_form_basis(
                 homology.group(1).unwrap(),
-                &NativeExecutor::sequential(),
-                STORAGE,
-                WORK,
+                Policy::new(Executor::sequential(), STORAGE, WORK),
                 &cancelled,
             )
             .unwrap_err()
@@ -330,18 +320,14 @@ fn harmonic_basis_is_rigid_motion_and_uniform_scale_invariant() {
     let first = first_metric
         .harmonic_one_form_basis(
             first_homology.group(1).unwrap(),
-            &NativeExecutor::sequential(),
-            STORAGE,
-            WORK,
+            Policy::new(Executor::sequential(), STORAGE, WORK),
             &CancellationToken::new(),
         )
         .unwrap();
     let second = second_metric
         .harmonic_one_form_basis(
             second_homology.group(1).unwrap(),
-            &NativeExecutor::sequential(),
-            STORAGE,
-            WORK,
+            Policy::new(Executor::sequential(), STORAGE, WORK),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -356,19 +342,17 @@ fn harmonic_basis_is_rigid_motion_and_uniform_scale_invariant() {
 #[test]
 fn endpoint_degrees_and_nontrivial_harmonic_space_use_empty_images() {
     let metric = cycle_metric(5);
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
 
     let vertex_problem = metric
         .hodge_decomposition(source(&metric, 0, vec![1.0, 2.0, 4.0, 8.0, 16.0]))
         .unwrap();
     let vertex_prepared = vertex_problem
-        .prepare_with(&executor, STORAGE, WORK)
+        .prepare(Policy::new(executor, STORAGE, WORK))
         .unwrap();
-    let mut vertex_workspace = vertex_prepared
-        .workspace_for(&vertex_problem, STORAGE)
-        .unwrap();
+    let mut vertex_workspace = vertex_prepared.workspace_for(&vertex_problem).unwrap();
     let vertex = vertex_prepared
-        .solve(&vertex_problem, &mut vertex_workspace, WORK)
+        .solve(&vertex_problem, &mut vertex_workspace)
         .unwrap();
     assert!(
         vertex
@@ -380,10 +364,12 @@ fn endpoint_degrees_and_nontrivial_harmonic_space_use_empty_images() {
 
     let edge_source = source(&metric, 1, vec![1.0; 5]);
     let edge_problem = metric.hodge_decomposition(edge_source.clone()).unwrap();
-    let edge_prepared = edge_problem.prepare_with(&executor, STORAGE, WORK).unwrap();
-    let mut edge_workspace = edge_prepared.workspace_for(&edge_problem, STORAGE).unwrap();
+    let edge_prepared = edge_problem
+        .prepare(Policy::new(executor, STORAGE, WORK))
+        .unwrap();
+    let mut edge_workspace = edge_prepared.workspace_for(&edge_problem).unwrap();
     let edge = edge_prepared
-        .solve(&edge_problem, &mut edge_workspace, WORK)
+        .solve(&edge_problem, &mut edge_workspace)
         .unwrap();
     assert!(
         edge.coexact()
@@ -409,17 +395,15 @@ fn preparation_reuses_two_factors_across_sources_and_rejects_foreign_owner() {
         .hodge_decomposition(source(&metric, 1, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]))
         .unwrap();
     let prepared = first
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&second, STORAGE).unwrap();
-    let reused = prepared.solve(&second, &mut workspace, WORK).unwrap();
+    let mut workspace = prepared.workspace_for(&second).unwrap();
+    let reused = prepared.solve(&second, &mut workspace).unwrap();
     let repeated = second
-        .prepare_with(&NativeExecutor::sequential(), STORAGE, WORK)
+        .prepare(Policy::new(Executor::sequential(), STORAGE, WORK))
         .unwrap();
-    let mut repeated_workspace = repeated.workspace_for(&second, STORAGE).unwrap();
-    let repeated = repeated
-        .solve(&second, &mut repeated_workspace, WORK)
-        .unwrap();
+    let mut repeated_workspace = repeated.workspace_for(&second).unwrap();
+    let repeated = repeated.solve(&second, &mut repeated_workspace).unwrap();
     for (left, right) in [reused.exact(), reused.coexact(), reused.harmonic()]
         .into_iter()
         .zip([repeated.exact(), repeated.coexact(), repeated.harmonic()])
@@ -449,10 +433,7 @@ fn preparation_reuses_two_factors_across_sources_and_rejects_foreign_owner() {
         ))
         .unwrap();
     assert_eq!(
-        prepared
-            .workspace_for(&foreign, STORAGE)
-            .unwrap_err()
-            .reason(),
+        prepared.workspace_for(&foreign).unwrap_err().reason(),
         "problem_mismatch"
     );
 }
@@ -463,11 +444,11 @@ fn hodge_resources_and_cancellation_fail_without_publication() {
     let problem = metric
         .hodge_decomposition(source(&metric, 1, vec![1.0; 6]))
         .unwrap();
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
     let zero = StorageLimit::new(0, 0).unwrap();
     assert_eq!(
         problem
-            .prepare_with(&executor, zero, WORK)
+            .prepare(Policy::new(executor, zero, WORK))
             .unwrap_err()
             .reason(),
         "resource_limit"
@@ -476,23 +457,18 @@ fn hodge_resources_and_cancellation_fail_without_publication() {
     cancelled.cancel();
     assert_eq!(
         problem
-            .prepare_with_cancellation(&executor, STORAGE, WORK, &cancelled)
+            .prepare_cancellable(Policy::new(executor, STORAGE, WORK), &cancelled)
             .unwrap_err()
             .reason(),
         "cancelled"
     );
-    let prepared = problem.prepare_with(&executor, STORAGE, WORK).unwrap();
-    let mut workspace = prepared.workspace_for(&problem, STORAGE).unwrap();
+    let prepared = problem
+        .prepare(Policy::new(executor, STORAGE, WORK))
+        .unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
     assert_eq!(
         prepared
-            .solve(&problem, &mut workspace, WorkLimit::new(0))
-            .unwrap_err()
-            .reason(),
-        "resource_limit"
-    );
-    assert_eq!(
-        prepared
-            .solve_cancellable(&problem, &mut workspace, WORK, &cancelled)
+            .solve_cancellable(&problem, &mut workspace, &cancelled)
             .unwrap_err()
             .reason(),
         "cancelled"

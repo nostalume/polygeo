@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use polygeo_core::{CandidateInput, ComplexCore, TopologyError};
+use polygeo_core::{
+    topology::CandidateInput, topology::Complex as ComplexCore, topology::TopologyError,
+};
 
 fn admit(rows: &[&[i128]]) -> Arc<ComplexCore> {
     let width = rows[0].len();
@@ -238,7 +240,7 @@ fn selected_sets(owner: &ComplexCore, masks: &[Vec<bool>]) -> Vec<(BTreeSet<usiz
 
 fn assert_relation(
     owner: &ComplexCore,
-    observed: &polygeo_core::SimplexSubset,
+    observed: &polygeo_core::topology::Subset,
     selected: &[(BTreeSet<usize>, usize)],
     faces: bool,
     cofaces: bool,
@@ -265,7 +267,7 @@ fn assert_relation(
 
 fn assert_link(
     owner: &ComplexCore,
-    observed: &polygeo_core::SimplexSubset,
+    observed: &polygeo_core::topology::Subset,
     selected: &[(BTreeSet<usize>, usize)],
 ) {
     let all = (0..=owner.dimension())

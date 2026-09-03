@@ -1,23 +1,32 @@
-use std::fmt;
-use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::{cmp::Ordering as CmpOrdering, fmt, mem::size_of, sync::Arc};
 
-use num_bigint::BigInt;
-use num_traits::ToPrimitive;
+use faer::{
+    Mat, MatMut, Spec,
+    dyn_stack::{MemBuffer, MemStack, StackReq},
+    linalg::qr::col_pivoting::{factor as qr_factor, solve as qr_solve},
+    perm::PermRef,
+};
 use once_cell::sync::OnceCell;
 
-use crate::problem::adaptive_product_value;
+use crate::numeric::{adaptive_product_sign, adaptive_product_value};
+use crate::solve_impl::{
+    SystemRef, check_cancelled, checked_work_product, cubic_work, dirichlet_energy, factor_scale,
+    factor_solve_requirement, factor_stiffness, fill_centered_mass_rhs, flow_residual,
+    logical_bytes, logical_f64, matrix_bytes, require_storage, require_work, solve_factor,
+    stiffness_endpoints, weighted_centroid,
+};
 use crate::{
     Binary64Chain, Binary64ChainSpace, Binary64Cochain, Binary64CochainSpace, Binary64Element,
-    CanonicalBoundary, ComplexCore, EuclideanRealization, IntegralCochain, IntegralDualCycleBasis,
-    NondegenerateCapability, PairingCapability, PositiveMetric, TopologyError,
+    CancellationToken, Executor, Geometry, GeometryError, Limit, Metric, NondegenerateCapability,
+    PairingCapability, Policy, SolveError, StorageLimit, SurfaceComputationError, TopologyError,
+    WorkLimit,
 };
 
-fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+pub(crate) fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
-fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+pub(crate) fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [
         left[1] * right[2] - left[2] * right[1],
         left[2] * right[0] - left[0] * right[2],
@@ -25,11 +34,11 @@ fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+pub(crate) fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
 }
 
-fn norm(value: [f64; 3]) -> f64 {
+pub(crate) fn norm(value: [f64; 3]) -> f64 {
     let scale = value.into_iter().map(f64::abs).fold(0.0_f64, f64::max);
     if scale == 0.0 || !scale.is_finite() {
         return scale;
@@ -38,7 +47,7 @@ fn norm(value: [f64; 3]) -> f64 {
     scale * dot(scaled, scaled).sqrt()
 }
 
-fn normalize(value: [f64; 3]) -> Option<[f64; 3]> {
+pub(crate) fn normalize(value: [f64; 3]) -> Option<[f64; 3]> {
     let scale = value.into_iter().map(f64::abs).fold(0.0_f64, f64::max);
     if scale == 0.0 || !scale.is_finite() {
         return None;
@@ -64,40 +73,23 @@ fn triangle_angle(left: [f64; 3], right: [f64; 3]) -> Option<f64> {
 type LocalDifferentialRows = ([usize; 3], [[f64; 3]; 3], f64, f64);
 pub(crate) type LocalConformalCoefficients = ([usize; 3], [[f64; 2]; 3]);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Support {
-    Vertex,
-    Face,
-}
-
-/// One contiguous ambient-vector field over a realized entity basis.
-///
-/// `VertexVectors` and `FaceVectors` are semantic aliases over this carrier;
-/// support is admitted by surface-owned constructors rather than caller tags.
+/// One contiguous ambient-vector field over a realized simplex degree.
 #[derive(Clone, Debug)]
-pub struct EntityVectors {
-    realization: Arc<EuclideanRealization>,
-    support: Support,
+pub struct EntityVectors<const DEGREE: usize> {
+    realization: Arc<Geometry>,
     values: Arc<[f64]>,
 }
 
-pub type VertexVectors = EntityVectors;
-pub type FaceVectors = EntityVectors;
+pub type VertexVectors = EntityVectors<0>;
+pub type FaceVectors = EntityVectors<2>;
 
-impl EntityVectors {
-    fn admit(
-        realization: Arc<EuclideanRealization>,
-        support: Support,
-        values: Vec<f64>,
-    ) -> Result<Self, SurfaceError> {
-        let entities = match support {
-            Support::Vertex => realization.topology().vertex_count(),
-            Support::Face => realization
-                .topology()
-                .basis(2)
-                .map_err(SurfaceError::Topology)?
-                .row_count(),
-        };
+impl<const DEGREE: usize> EntityVectors<DEGREE> {
+    fn admit(realization: Arc<Geometry>, values: Vec<f64>) -> Result<Self, SurfaceError> {
+        let entities = realization
+            .topology()
+            .basis(DEGREE)
+            .map_err(SurfaceError::Topology)?
+            .row_count();
         let expected = entities
             .checked_mul(realization.ambient_dimension())
             .ok_or(SurfaceError::Overflow)?;
@@ -109,13 +101,12 @@ impl EntityVectors {
         }
         Ok(Self {
             realization,
-            support,
             values: values.into(),
         })
     }
 
     #[must_use]
-    pub const fn realization(&self) -> &Arc<EuclideanRealization> {
+    pub const fn realization(&self) -> &Arc<Geometry> {
         &self.realization
     }
 
@@ -135,13 +126,8 @@ impl EntityVectors {
     }
 
     #[must_use]
-    pub const fn is_vertex_supported(&self) -> bool {
-        matches!(self.support, Support::Vertex)
-    }
-
-    #[must_use]
-    pub const fn is_face_supported(&self) -> bool {
-        matches!(self.support, Support::Face)
+    pub const fn support_degree(&self) -> usize {
+        DEGREE
     }
 
     /// Return an owned field whose entity vectors have unit length.
@@ -164,7 +150,7 @@ impl EntityVectors {
                 .sqrt();
             values.extend(row.iter().map(|value| value / scale / length));
         }
-        Self::admit(Arc::clone(&self.realization), self.support, values)
+        Self::admit(Arc::clone(&self.realization), values)
     }
 }
 
@@ -262,7 +248,7 @@ impl FlowEvidence {
 /// One admitted deformation produced by a frozen-metric flow solve.
 #[derive(Clone, Debug)]
 pub struct FlowStep {
-    target: Arc<EuclideanRealization>,
+    target: Arc<Geometry>,
     evidence: FlowEvidence,
 }
 
@@ -325,13 +311,13 @@ impl LeastSquaresConformalMapEvidence {
 /// One admitted planar realization and its LSCM computation evidence.
 #[derive(Clone, Debug)]
 pub struct LeastSquaresConformalMapSolution {
-    realization: Arc<EuclideanRealization>,
+    realization: Arc<Geometry>,
     evidence: LeastSquaresConformalMapEvidence,
 }
 
 impl LeastSquaresConformalMapSolution {
     #[must_use]
-    pub const fn realization(&self) -> &Arc<EuclideanRealization> {
+    pub const fn realization(&self) -> &Arc<Geometry> {
         &self.realization
     }
     #[must_use]
@@ -340,7 +326,7 @@ impl LeastSquaresConformalMapSolution {
     }
 
     pub(crate) const fn new(
-        realization: Arc<EuclideanRealization>,
+        realization: Arc<Geometry>,
         evidence: LeastSquaresConformalMapEvidence,
     ) -> Self {
         Self {
@@ -352,7 +338,7 @@ impl LeastSquaresConformalMapSolution {
 
 impl FlowStep {
     #[must_use]
-    pub const fn target(&self) -> &Arc<EuclideanRealization> {
+    pub const fn target(&self) -> &Arc<Geometry> {
         &self.target
     }
     #[must_use]
@@ -360,20 +346,20 @@ impl FlowStep {
         self.evidence
     }
 
-    pub(crate) const fn new(target: Arc<EuclideanRealization>, evidence: FlowEvidence) -> Self {
+    pub(crate) const fn new(target: Arc<Geometry>, evidence: FlowEvidence) -> Self {
         Self { target, evidence }
     }
 }
 
 #[derive(Debug)]
-struct SurfaceRows {
-    first: Box<[f64]>,
-    second: Box<[f64]>,
+pub(crate) struct SurfaceRows {
+    pub(crate) first: Box<[f64]>,
+    pub(crate) second: Box<[f64]>,
 }
 
 /// One admitted oriented triangle-manifold realization in ambient dimension three.
 pub struct TriangleSurface {
-    realization: Arc<EuclideanRealization>,
+    realization: Arc<Geometry>,
     rows: OnceCell<SurfaceRows>,
 }
 
@@ -393,7 +379,7 @@ impl TriangleSurface {
     /// # Errors
     ///
     /// Requires ambient dimension three and admitted triangle/orientation laws.
-    pub fn admit(realization: Arc<EuclideanRealization>) -> Result<Arc<Self>, SurfaceError> {
+    pub fn admit(realization: Arc<Geometry>) -> Result<Arc<Self>, SurfaceError> {
         if realization.ambient_dimension() != 3 {
             return Err(SurfaceError::AmbientDimension);
         }
@@ -406,7 +392,7 @@ impl TriangleSurface {
     }
 
     #[must_use]
-    pub const fn realization(&self) -> &Arc<EuclideanRealization> {
+    pub const fn realization(&self) -> &Arc<Geometry> {
         &self.realization
     }
 
@@ -432,7 +418,7 @@ impl TriangleSurface {
     ///
     /// Rejects a shape mismatch or nonfinite coefficient.
     pub fn vertex_vectors(&self, values: Vec<f64>) -> Result<VertexVectors, SurfaceError> {
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Vertex, values)
+        EntityVectors::admit(Arc::clone(&self.realization), values)
     }
 
     /// Admit one owned contiguous face-vector field on this realization.
@@ -441,7 +427,7 @@ impl TriangleSurface {
     ///
     /// Rejects a shape mismatch or nonfinite coefficient.
     pub fn face_vectors(&self, values: Vec<f64>) -> Result<FaceVectors, SurfaceError> {
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Face, values)
+        EntityVectors::admit(Arc::clone(&self.realization), values)
     }
 
     /// Compute the constant piecewise-affine scalar gradient on every face.
@@ -472,7 +458,7 @@ impl TriangleSurface {
                 ])?);
             }
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Face, values)
+        EntityVectors::admit(Arc::clone(&self.realization), values)
     }
 
     /// Compute the weak divergence load of one face-supported ambient vector field.
@@ -482,13 +468,10 @@ impl TriangleSurface {
     ///
     /// # Errors
     ///
-    /// Rejects a foreign or vertex-supported field and unrepresentable arithmetic.
+    /// Rejects a foreign field or unrepresentable arithmetic.
     pub fn divergence(&self, field: &FaceVectors) -> Result<Binary64Chain, SurfaceError> {
         if !Arc::ptr_eq(field.realization(), &self.realization) {
             return Err(SurfaceError::OwnerMismatch);
-        }
-        if !field.is_face_supported() {
-            return Err(SurfaceError::FieldShape);
         }
         let vertex_count = self.realization.topology().vertex_count();
         let mut sums = vec![0.0; vertex_count];
@@ -516,46 +499,7 @@ impl TriangleSurface {
         Binary64Element::admit(space, sums).map_err(|_| SurfaceError::Unrepresentable)
     }
 
-    /// Borrow the first canonical tangent axis for every face.
-    ///
-    /// # Errors
-    ///
-    /// Returns an unrepresentable frame failure.
-    pub fn first_frame_axes(&self) -> Result<&[f64], SurfaceError> {
-        Ok(&self.surface_rows()?.first)
-    }
-
-    /// Borrow the second canonical tangent axis for every face.
-    ///
-    /// # Errors
-    ///
-    /// Returns an unrepresentable frame failure.
-    pub fn second_frame_axes(&self) -> Result<&[f64], SurfaceError> {
-        Ok(&self.surface_rows()?.second)
-    }
-
-    pub(crate) fn boundary_power_directions(
-        &self,
-        symmetry_order: NonZeroU32,
-        boundary_angle_offset: f64,
-    ) -> Result<(Vec<usize>, Vec<f64>), SurfaceError> {
-        if !boundary_angle_offset.is_finite() {
-            return Err(SurfaceError::NonFinite);
-        }
-        self.realization
-            .topology()
-            .refine_regular()?
-            .with_boundary()?;
-        let (_, component_edges) = oriented_boundary_components(self.realization.topology())?;
-        boundary_face_power_directions(
-            self,
-            symmetry_order,
-            boundary_angle_offset,
-            &component_edges,
-        )
-    }
-
-    fn surface_rows(&self) -> Result<&SurfaceRows, SurfaceError> {
+    pub(crate) fn surface_rows(&self) -> Result<&SurfaceRows, SurfaceError> {
         self.rows.get_or_try_init(|| {
             let mut first = Vec::with_capacity(3 * self.face_count());
             let mut second = Vec::with_capacity(3 * self.face_count());
@@ -586,7 +530,7 @@ impl TriangleSurface {
         for face in 0..self.face_count() {
             values.extend(self.face_normal(face)?);
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Face, values)
+        EntityVectors::admit(Arc::clone(&self.realization), values)
     }
 
     /// Compute normalized sums of incident oriented face normals.
@@ -604,7 +548,7 @@ impl TriangleSurface {
                 add_row(&mut values, vertex, normal)?;
             }
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Vertex, values)?.normalized()
+        EntityVectors::admit(Arc::clone(&self.realization), values)?.normalized()
     }
 
     /// Compute normalized tip-angle-weighted incident face normals.
@@ -633,7 +577,7 @@ impl TriangleSurface {
                 )?;
             }
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Vertex, values)?.normalized()
+        EntityVectors::admit(Arc::clone(&self.realization), values)?.normalized()
     }
 
     /// Compute normalized sphere-inscribed cyclic-edge normal directions.
@@ -679,7 +623,7 @@ impl TriangleSurface {
             let weight = (log_weight - offset).exp();
             add_row(&mut values, vertex, direction.map(|value| weight * value))?;
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Vertex, values)?.normalized()
+        EntityVectors::admit(Arc::clone(&self.realization), values)?.normalized()
     }
 
     /// Compute the gradient of total triangle area at canonical vertices.
@@ -704,7 +648,7 @@ impl TriangleSurface {
                 add_row(&mut values, vertices[corner], contribution)?;
             }
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Vertex, values)
+        EntityVectors::admit(Arc::clone(&self.realization), values)
     }
 
     /// Compute the signed enclosed-volume gradient at canonical vertices.
@@ -727,7 +671,7 @@ impl TriangleSurface {
                 add_row(&mut values, vertex, contribution)?;
             }
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Vertex, values)
+        EntityVectors::admit(Arc::clone(&self.realization), values)
     }
 
     /// Compute integrated Gaussian curvature as canonical vertex angle defects.
@@ -768,10 +712,7 @@ impl TriangleSurface {
     /// # Errors
     ///
     /// Requires the same realization, a closed surface, and representable operator action.
-    pub fn mean_curvature_vectors(
-        &self,
-        metric: &PositiveMetric,
-    ) -> Result<VertexVectors, SurfaceError> {
+    pub fn mean_curvature_vectors(&self, metric: &Metric) -> Result<VertexVectors, SurfaceError> {
         self.require_closed()?;
         if !Arc::ptr_eq(metric.realization(), &self.realization) {
             return Err(SurfaceError::OwnerMismatch);
@@ -797,68 +738,10 @@ impl TriangleSurface {
                 values[3 * vertex + axis] = coefficient;
             }
         }
-        EntityVectors::admit(Arc::clone(&self.realization), Support::Vertex, values)
+        EntityVectors::admit(Arc::clone(&self.realization), values)
     }
 
-    /// Construct canonical Levi-Civita face transport.
-    ///
-    /// # Errors
-    ///
-    /// Requires a connected regular surface and representable frames.
-    pub fn levi_civita_connection(
-        self: &Arc<Self>,
-    ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
-        self.realization.topology().refine_regular()?;
-        self.realization.topology().refine_connected()?;
-        let interior_edges: Arc<[usize]> =
-            interior_edge_indices(self.realization.topology())?.into();
-        let dual = dual_edges(self.realization.topology())?;
-        let edges = self.realization.topology().basis(1)?;
-        let first = self.first_frame_axes()?;
-        let second = self.second_frame_axes()?;
-        let mut transports = Vec::with_capacity(2 * interior_edges.len());
-        for &edge in interior_edges.iter() {
-            let endpoints = edges.row(edge).ok_or(SurfaceError::IndexOutside)?;
-            let axis = normalize(subtract(
-                self.point(endpoints[1])?,
-                self.point(endpoints[0])?,
-            ))
-            .ok_or(SurfaceError::Unrepresentable)?;
-            let (source, target, _) = dual.edge(edge)?;
-            let source_normal = cross(row3(first, source)?, row3(second, source)?);
-            let target_normal = cross(row3(first, target)?, row3(second, target)?);
-            let angle = dot(axis, cross(source_normal, target_normal))
-                .atan2(dot(source_normal, target_normal));
-            let rotated = rodrigues(row3(first, source)?, axis, angle);
-            transports.extend(normalize_complex([
-                dot(rotated, row3(first, target)?),
-                dot(rotated, row3(second, target)?),
-            ])?);
-        }
-        Ok(Arc::new(SurfaceConnection {
-            surface: Arc::clone(self),
-            symmetry_order: NonZeroU32::MIN,
-            interior_edges,
-            transports: transports.into(),
-            evidence: OnceCell::new(),
-        }))
-    }
-
-    /// Construct order-`N` Levi-Civita power transport with one deviation per interior dual edge.
-    ///
-    /// # Errors
-    ///
-    /// Rejects irregularity, disconnection, shape, nonfinite, or representation failures.
-    pub fn connection(
-        self: &Arc<Self>,
-        symmetry_order: NonZeroU32,
-        deviations: &[f64],
-    ) -> Result<Arc<SurfaceConnection>, SurfaceError> {
-        self.levi_civita_connection()?
-            .with_powered_deviations(symmetry_order, deviations)
-    }
-
-    fn require_closed(&self) -> Result<(), SurfaceError> {
+    pub(crate) fn require_closed(&self) -> Result<(), SurfaceError> {
         self.realization
             .topology()
             .refine_regular()?
@@ -900,7 +783,7 @@ impl TriangleSurface {
         ])
     }
 
-    fn point(&self, vertex: usize) -> Result<[f64; 3], SurfaceError> {
+    pub(crate) fn point(&self, vertex: usize) -> Result<[f64; 3], SurfaceError> {
         row3(self.realization.positions(), vertex)
     }
 
@@ -1005,196 +888,21 @@ impl TriangleSurface {
     }
 }
 
-fn oriented_boundary_edge(
-    edge_basis: &crate::Basis,
-    boundary: &CanonicalBoundary,
-    edge: usize,
-) -> Result<Option<(usize, usize, usize)>, SurfaceError> {
-    let start = *boundary
-        .indptr()
-        .get(edge)
-        .ok_or(SurfaceError::IndexOutside)?;
-    let stop = *boundary
-        .indptr()
-        .get(edge + 1)
-        .ok_or(SurfaceError::IndexOutside)?;
-    if stop - start != 1 {
-        return Ok(None);
-    }
-    let endpoints = edge_basis.row(edge).ok_or(SurfaceError::IndexOutside)?;
-    let [low, high] = endpoints else {
-        return Err(SurfaceError::Unrepresentable);
-    };
-    let (source, target) = match boundary.data()[start] {
-        1 => (*low, *high),
-        -1 => (*high, *low),
-        _ => return Err(SurfaceError::Unrepresentable),
-    };
-    Ok(Some((source, target, boundary.indices()[start])))
-}
-
-fn oriented_boundary_components(
-    topology: &ComplexCore,
-) -> Result<(Vec<usize>, Vec<usize>), SurfaceError> {
-    let edge_basis = topology.basis(1)?;
-    let boundary = topology.boundary(2)?;
-    let mut edge_at_source = vec![usize::MAX; topology.vertex_count()];
-    let mut incoming = vec![false; topology.vertex_count()];
-    let mut boundary_edge_count = 0_usize;
-    for edge in 0..edge_basis.row_count() {
-        let Some((source, target, _)) = oriented_boundary_edge(edge_basis, boundary, edge)? else {
-            continue;
-        };
-        if edge_at_source[source] != usize::MAX || incoming[target] {
-            return Err(SurfaceError::Unrepresentable);
-        }
-        edge_at_source[source] = edge;
-        incoming[target] = true;
-        boundary_edge_count = boundary_edge_count
-            .checked_add(1)
-            .ok_or(SurfaceError::Overflow)?;
-    }
-
-    let mut offsets = vec![0_usize];
-    let mut edges = Vec::with_capacity(boundary_edge_count);
-    let mut visited = vec![false; edge_basis.row_count()];
-    for start in 0..topology.vertex_count() {
-        let first_edge = edge_at_source[start];
-        if first_edge == usize::MAX || visited[first_edge] {
-            continue;
-        }
-        let mut vertex = start;
-        loop {
-            let edge = edge_at_source[vertex];
-            if edge == usize::MAX || visited[edge] {
-                return Err(SurfaceError::Unrepresentable);
-            }
-            visited[edge] = true;
-            edges.push(edge);
-            let (_, target, _) = oriented_boundary_edge(edge_basis, boundary, edge)?
-                .ok_or(SurfaceError::Unrepresentable)?;
-            vertex = target;
-            if vertex == start {
-                break;
-            }
-        }
-        offsets.push(edges.len());
-    }
-    if edges.len() != boundary_edge_count {
-        return Err(SurfaceError::Unrepresentable);
-    }
-    Ok((offsets, edges))
-}
-
-fn boundary_edge_geometry(
-    surface: &TriangleSurface,
-    edge: usize,
-) -> Result<(usize, [f64; 3], f64), SurfaceError> {
-    let topology = surface.realization().topology();
-    let (source, target, face) =
-        oriented_boundary_edge(topology.basis(1)?, topology.boundary(2)?, edge)?
-            .ok_or(SurfaceError::Unrepresentable)?;
-    let displacement = subtract(surface.point(target)?, surface.point(source)?);
-    let length = norm(displacement);
-    let tangent = normalize(displacement).ok_or(SurfaceError::Unrepresentable)?;
-    if !length.is_finite() {
-        return Err(SurfaceError::Unrepresentable);
-    }
-    Ok((face, tangent, length))
-}
-
-fn boundary_edge_power_direction(
-    surface: &TriangleSurface,
-    symmetry_order: NonZeroU32,
-    edge: usize,
-) -> Result<(usize, [f64; 2], f64), SurfaceError> {
-    let (face, tangent, length) = boundary_edge_geometry(surface, edge)?;
-    let direction = complex_power(
-        normalize_complex([
-            dot(tangent, row3(surface.first_frame_axes()?, face)?),
-            dot(tangent, row3(surface.second_frame_axes()?, face)?),
-        ])?,
-        i64::from(symmetry_order.get()),
-    )?;
-    Ok((face, direction, length))
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct BoundaryTargetAccumulator {
-    length_scale: f64,
-    sum: [f64; 2],
-    correction: [f64; 2],
-    weight_sum: f64,
-    term_count: u32,
-}
-
-fn boundary_face_power_directions(
-    surface: &TriangleSurface,
-    symmetry_order: NonZeroU32,
-    boundary_angle_offset: f64,
-    edges: &[usize],
-) -> Result<(Vec<usize>, Vec<f64>), SurfaceError> {
-    let mut accumulators = vec![BoundaryTargetAccumulator::default(); surface.face_count()];
-    for &edge in edges {
-        let (face, _, length) = boundary_edge_geometry(surface, edge)?;
-        accumulators[face].length_scale = accumulators[face].length_scale.max(length);
-    }
-
-    for &edge in edges {
-        let (face, direction, length) =
-            boundary_edge_power_direction(surface, symmetry_order, edge)?;
-        let accumulator = &mut accumulators[face];
-        let weight = length / accumulator.length_scale;
-        for (axis, direction) in direction.into_iter().enumerate() {
-            compensated_add(
-                &mut accumulator.sum[axis],
-                &mut accumulator.correction[axis],
-                weight * direction,
-            )?;
-        }
-        accumulator.weight_sum += weight;
-        accumulator.term_count = accumulator
-            .term_count
-            .checked_add(1)
-            .ok_or(SurfaceError::Overflow)?;
-    }
-
-    let order = f64::from(symmetry_order.get());
-    let offset_angle = boundary_angle_offset.rem_euclid(std::f64::consts::TAU / order) * order;
-    let offset = [offset_angle.cos(), offset_angle.sin()];
-    let mut faces = Vec::new();
-    let mut power_directions = Vec::new();
-    for (face, accumulator) in accumulators.into_iter().enumerate() {
-        if accumulator.term_count == 0 {
-            continue;
-        }
-        let sum = [
-            product_sum([(accumulator.sum[0], 1.0), (accumulator.correction[0], 1.0)])?,
-            product_sum([(accumulator.sum[1], 1.0), (accumulator.correction[1], 1.0)])?,
-        ];
-        let magnitude = sum[0].hypot(sum[1]);
-        let operation_count = f64::from(accumulator.term_count.saturating_add(2));
-        let limit = 64.0 * f64::EPSILON * operation_count * accumulator.weight_sum;
-        if !magnitude.is_finite() || magnitude <= limit {
-            return Err(SurfaceError::Unrepresentable);
-        }
-        faces.push(face);
-        power_directions.extend(complex_multiply(normalize_complex(sum)?, offset));
-    }
-    Ok((faces, power_directions))
-}
-
 fn difference(left: f64, right: f64) -> Result<f64, SurfaceError> {
     product_sum([(left, 1.0), (right, -1.0)])
 }
 
-fn product_sum<const N: usize>(terms: [(f64, f64); N]) -> Result<f64, SurfaceError> {
+pub(crate) fn product_sum<const N: usize>(terms: [(f64, f64); N]) -> Result<f64, SurfaceError> {
     adaptive_product_value(terms.into_iter())
         .map(|(value, _)| value)
         .ok_or(SurfaceError::Unrepresentable)
 }
 
-fn compensated_add(sum: &mut f64, correction: &mut f64, value: f64) -> Result<(), SurfaceError> {
+pub(crate) fn compensated_add(
+    sum: &mut f64,
+    correction: &mut f64,
+    value: f64,
+) -> Result<(), SurfaceError> {
     let combined = *sum + value;
     if !combined.is_finite() {
         return Err(SurfaceError::Unrepresentable);
@@ -1223,7 +931,7 @@ fn add_row(values: &mut [f64], row: usize, contribution: [f64; 3]) -> Result<(),
     Ok(())
 }
 
-fn row3(values: &[f64], row: usize) -> Result<[f64; 3], SurfaceError> {
+pub(crate) fn row3(values: &[f64], row: usize) -> Result<[f64; 3], SurfaceError> {
     let start = row.checked_mul(3).ok_or(SurfaceError::Overflow)?;
     values
         .get(start..start + 3)
@@ -1231,740 +939,634 @@ fn row3(values: &[f64], row: usize) -> Result<[f64; 3], SurfaceError> {
         .ok_or(SurfaceError::IndexOutside)
 }
 
-fn rodrigues(value: [f64; 3], axis: [f64; 3], angle: f64) -> [f64; 3] {
-    let cosine = angle.cos();
-    let sine = angle.sin();
-    let parallel = dot(axis, value) * (1.0 - cosine);
-    let crossed = cross(axis, value);
-    [
-        value[0] * cosine + crossed[0] * sine + axis[0] * parallel,
-        value[1] * cosine + crossed[1] * sine + axis[1] * parallel,
-        value[2] * cosine + crossed[2] * sine + axis[2] * parallel,
-    ]
-}
-
-pub(crate) fn complex_multiply(left: [f64; 2], right: [f64; 2]) -> [f64; 2] {
-    [
-        left[0] * right[0] - left[1] * right[1],
-        left[0] * right[1] + left[1] * right[0],
-    ]
-}
-
-pub(crate) fn normalize_complex(value: [f64; 2]) -> Result<[f64; 2], SurfaceError> {
-    let magnitude = value[0].hypot(value[1]);
-    if magnitude == 0.0 || !magnitude.is_finite() {
-        return Err(SurfaceError::Unrepresentable);
-    }
-    let value = [value[0] / magnitude, value[1] / magnitude];
-    value
-        .into_iter()
-        .all(f64::is_finite)
-        .then_some(value)
-        .ok_or(SurfaceError::Unrepresentable)
-}
-
-pub(crate) fn complex_conjugate(value: [f64; 2]) -> [f64; 2] {
-    [value[0], -value[1]]
-}
-
-pub(crate) fn complex_power(mut value: [f64; 2], exponent: i64) -> Result<[f64; 2], SurfaceError> {
-    if exponent < 0 {
-        value = complex_conjugate(value);
-    }
-    let mut result = [1.0, 0.0];
-    let mut remaining = exponent.unsigned_abs();
-    while remaining != 0 {
-        if remaining & 1 != 0 {
-            result = normalize_complex(complex_multiply(result, value))?;
+impl TriangleSurface {
+    /// Compute one bounded least-squares conformal parameterization of an oriented disk.
+    ///
+    /// The two distinct boundary anchors map to `(0, 0)` and `(1, 0)` in caller order.
+    ///
+    /// # Errors
+    /// Rejects a non-disk domain, invalid anchors, exhausted resources, cancellation,
+    /// numerical rank loss, or a target face without positive admitted orientation.
+    pub fn least_squares_conformal_map(
+        &self,
+        anchors: [usize; 2],
+        realization_limit: Limit,
+        policy: Policy,
+        cancellation: &CancellationToken,
+    ) -> Result<LeastSquaresConformalMapSolution, SurfaceComputationError> {
+        let disk = self
+            .realization()
+            .topology()
+            .refine_disk()
+            .map_err(SurfaceError::from)?;
+        let boundary = disk.boundary_vertices().map_err(SurfaceError::from)?;
+        let vertex_count = self.realization().topology().vertex_count();
+        if anchors[0] == anchors[1] {
+            return Err(SurfaceError::CoincidentAnchor.into());
         }
-        remaining >>= 1;
-        if remaining != 0 {
-            value = normalize_complex(complex_multiply(value, value))?;
+        for &anchor in &anchors {
+            if anchor >= vertex_count {
+                return Err(SurfaceError::IndexOutside.into());
+            }
+            if !boundary.contains(&anchor) {
+                return Err(SurfaceError::AnchorNotBoundary.into());
+            }
         }
+        least_squares_conformal_map(
+            self,
+            anchors,
+            realization_limit,
+            policy.executor(),
+            policy.storage(),
+            policy.work(),
+            cancellation,
+        )
+        .map_err(SurfaceComputationError::Solve)
     }
-    Ok(result)
+}
+impl crate::Metric {
+    /// Compute and atomically publish one frozen-metric mean-curvature-flow step.
+    ///
+    /// # Errors
+    /// Rejects an unsuitable surface, invalid time, exhausted resources,
+    /// cancellation, failed factorization, or failed numerical certification.
+    pub fn frozen_mean_curvature_flow(
+        &self,
+        time_step: f64,
+        realization_limit: Limit,
+        policy: Policy,
+        cancellation: &CancellationToken,
+    ) -> Result<FlowStep, SurfaceComputationError> {
+        require_frozen_flow_domain(self, time_step)?;
+        frozen_flow_step(
+            self,
+            time_step,
+            realization_limit,
+            policy.executor(),
+            policy.storage(),
+            policy.work(),
+            cancellation,
+        )
+        .map_err(SurfaceComputationError::Solve)
+    }
 }
 
-pub(crate) fn powered_transport(
-    base: [f64; 2],
-    order: NonZeroU32,
-    deviation: f64,
-) -> Result<[f64; 2], SurfaceError> {
-    normalize_complex(complex_multiply(
-        complex_power(base, i64::from(order.get()))?,
-        [deviation.cos(), deviation.sin()],
+#[derive(Clone, Copy, Debug, Default)]
+struct ScaledNorm {
+    scale: f64,
+    sum_squares: f64,
+}
+
+impl ScaledNorm {
+    fn add(&mut self, value: f64) -> Result<(), SolveError> {
+        let value = value.abs();
+        if !value.is_finite() {
+            return Err(SolveError::Numerical);
+        }
+        if value == 0.0 {
+            return Ok(());
+        }
+        if self.scale < value {
+            let ratio = self.scale / value;
+            self.sum_squares = 1.0 + self.sum_squares * ratio * ratio;
+            self.scale = value;
+        } else {
+            let ratio = value / self.scale;
+            self.sum_squares += ratio * ratio;
+        }
+        self.sum_squares
+            .is_finite()
+            .then_some(())
+            .ok_or(SolveError::Numerical)
+    }
+
+    fn value(self) -> f64 {
+        self.scale * self.sum_squares.sqrt()
+    }
+}
+
+fn least_squares_conformal_map(
+    surface: &TriangleSurface,
+    anchors: [usize; 2],
+    realization_limit: Limit,
+    executor: Executor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<LeastSquaresConformalMapSolution, SolveError> {
+    check_cancelled(cancellation)?;
+    let vertex_count = surface.realization().topology().vertex_count();
+    let face_count = surface.face_count();
+    let (rows, columns, block, scratch) = require_least_squares_conformal_resources(
+        vertex_count,
+        face_count,
+        executor,
+        storage,
+        work,
+    )?;
+    let mut system =
+        assemble_least_squares_conformal_system(surface, anchors, rows, columns, cancellation)?;
+    let (observed_rank, condition_indicator) =
+        solve_least_squares_conformal_system(&mut system, block, scratch, executor, cancellation)?;
+    let positions = least_squares_conformal_positions(vertex_count, anchors, &system)?;
+    let residual_bound = least_squares_conformal_residual(surface, &positions, &system)?;
+    let (minimum_area, exact_fallback_faces) =
+        least_squares_conformal_orientation(surface, &positions)?;
+    check_cancelled(cancellation)?;
+    let target = Geometry::admit(
+        Arc::clone(surface.realization().topology()),
+        2,
+        positions,
+        realization_limit,
+    )
+    .map_err(realization_solve_error)?;
+    check_cancelled(cancellation)?;
+    Ok(LeastSquaresConformalMapSolution::new(
+        target,
+        LeastSquaresConformalMapEvidence::new(
+            columns,
+            observed_rank,
+            condition_indicator,
+            residual_bound,
+            minimum_area,
+            exact_fallback_faces,
+        ),
     ))
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DualEdges<'a> {
-    boundary: &'a CanonicalBoundary,
-    edge_count: usize,
+struct LeastSquaresConformalSystem {
+    matrix: Mat<f64>,
+    right_hand_side: Vec<f64>,
+    free_position: Vec<usize>,
+    matrix_norm: f64,
+    right_hand_side_norm: f64,
 }
 
-impl DualEdges<'_> {
-    fn is_interior(self, edge: usize) -> Result<bool, SurfaceError> {
-        if edge >= self.edge_count {
-            return Err(SurfaceError::IndexOutside);
+fn require_least_squares_conformal_resources(
+    vertex_count: usize,
+    face_count: usize,
+    executor: Executor,
+    storage: StorageLimit,
+    work: WorkLimit,
+) -> Result<(usize, usize, usize, StackReq), SolveError> {
+    let rows = face_count.checked_mul(2).ok_or(SolveError::ResourceLimit)?;
+    let columns = vertex_count
+        .checked_sub(2)
+        .and_then(|value| value.checked_mul(2))
+        .ok_or(SolveError::ResourceLimit)?;
+    if rows < columns || columns == 0 {
+        return Err(SolveError::Factorization);
+    }
+    let block = qr_factor::recommended_block_size::<f64>(rows, columns).max(1);
+    let factor = qr_factor::qr_in_place_scratch::<usize, f64>(
+        rows,
+        columns,
+        block,
+        executor.par(),
+        Spec::default(),
+    );
+    let solve = qr_solve::solve_lstsq_in_place_scratch::<usize, f64>(
+        rows,
+        columns,
+        block,
+        1,
+        executor.par(),
+    );
+    let scratch = StackReq::any_of(&[factor, solve]);
+    let matrix_cells = rows.checked_mul(columns).ok_or(SolveError::ResourceLimit)?;
+    let f64_cells = matrix_cells
+        .checked_add(
+            block
+                .checked_mul(columns)
+                .ok_or(SolveError::ResourceLimit)?,
+        )
+        .and_then(|value| value.checked_add(rows))
+        .and_then(|value| value.checked_add(vertex_count.checked_mul(2)?))
+        .ok_or(SolveError::ResourceLimit)?;
+    let usize_cells = columns
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(vertex_count))
+        .ok_or(SolveError::ResourceLimit)?;
+    let peak = logical_f64(f64_cells)?
+        .checked_add(logical_bytes(usize_cells, size_of::<usize>())?)
+        .and_then(|value| value.checked_add(u64::try_from(scratch.size_bytes()).ok()?))
+        .ok_or(SolveError::ResourceLimit)?;
+    require_storage(storage, 0, peak)?;
+    let factor_work = checked_work_product(matrix_cells, columns)?;
+    let remaining = checked_work_product(matrix_cells, 8)?
+        .checked_add(checked_work_product(face_count, 64)?)
+        .ok_or(SolveError::ResourceLimit)?;
+    require_work(
+        work,
+        factor_work
+            .checked_add(remaining)
+            .ok_or(SolveError::ResourceLimit)?,
+    )?;
+    Ok((rows, columns, block, scratch))
+}
+
+fn assemble_least_squares_conformal_system(
+    surface: &TriangleSurface,
+    anchors: [usize; 2],
+    rows: usize,
+    columns: usize,
+    cancellation: &CancellationToken,
+) -> Result<LeastSquaresConformalSystem, SolveError> {
+    let vertex_count = surface.realization().topology().vertex_count();
+    let mut free_position = vec![usize::MAX; vertex_count];
+    for (position, vertex) in (0..vertex_count)
+        .filter(|vertex| !anchors.contains(vertex))
+        .enumerate()
+    {
+        free_position[vertex] = position;
+    }
+    let mut matrix = Mat::zeros(rows, columns);
+    let mut right_hand_side = vec![0.0; rows];
+    let mut matrix_norm = ScaledNorm::default();
+    for face in 0..surface.face_count() {
+        check_cancelled(cancellation)?;
+        let (vertices, coefficients) = surface
+            .oriented_local_conformal_coefficients(face)
+            .map_err(|_| SolveError::Numerical)?;
+        for (vertex, coefficient) in vertices.into_iter().zip(coefficients) {
+            add_conformal_corner(
+                &mut matrix,
+                &mut right_hand_side,
+                &mut matrix_norm,
+                &free_position,
+                anchors[1],
+                face,
+                vertex,
+                coefficient,
+            )?;
         }
-        let count = self.boundary.indptr()[edge + 1] - self.boundary.indptr()[edge];
-        match count {
-            1 => Ok(false),
-            2 => Ok(true),
-            _ => Err(SurfaceError::Unrepresentable),
+    }
+    let right_hand_side_norm = scaled_norm(&right_hand_side)?;
+    let matrix_norm = matrix_norm.value();
+    if matrix_norm == 0.0 || right_hand_side_norm == 0.0 {
+        return Err(SolveError::Factorization);
+    }
+    Ok(LeastSquaresConformalSystem {
+        matrix,
+        right_hand_side,
+        free_position,
+        matrix_norm,
+        right_hand_side_norm,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one face-corner row contribution"
+)]
+fn add_conformal_corner(
+    matrix: &mut Mat<f64>,
+    right_hand_side: &mut [f64],
+    matrix_norm: &mut ScaledNorm,
+    free_position: &[usize],
+    nonzero_anchor: usize,
+    face: usize,
+    vertex: usize,
+    [real, imaginary]: [f64; 2],
+) -> Result<(), SolveError> {
+    let real_row = 2 * face;
+    let imaginary_row = real_row + 1;
+    let position = free_position[vertex];
+    if position == usize::MAX {
+        if vertex == nonzero_anchor {
+            right_hand_side[real_row] -= real;
+            right_hand_side[imaginary_row] -= imaginary;
         }
+        return Ok(());
     }
-
-    pub(crate) fn edge(self, edge: usize) -> Result<(usize, usize, i8), SurfaceError> {
-        if edge >= self.edge_count {
-            return Err(SurfaceError::IndexOutside);
-        }
-        let start = self.boundary.indptr()[edge];
-        let stop = self.boundary.indptr()[edge + 1];
-        if stop - start != 2 {
-            return Err(SurfaceError::BoundaryPresent);
-        }
-        let entries = [
-            (self.boundary.indices()[start], self.boundary.data()[start]),
-            (
-                self.boundary.indices()[start + 1],
-                self.boundary.data()[start + 1],
-            ),
-        ];
-        let (source, target) = if entries[0].0 < entries[1].0 {
-            (entries[0], entries[1])
-        } else {
-            (entries[1], entries[0])
-        };
-        Ok((source.0, target.0, source.1))
-    }
-}
-
-pub(crate) fn dual_edges(topology: &ComplexCore) -> Result<DualEdges<'_>, SurfaceError> {
-    let boundary = topology.boundary(2)?;
-    let edge_count = topology.basis(1)?.row_count();
-    let dual = DualEdges {
-        boundary,
-        edge_count,
-    };
-    for edge in 0..edge_count {
-        dual.is_interior(edge)?;
-    }
-    Ok(dual)
-}
-
-fn interior_edge_indices(topology: &ComplexCore) -> Result<Vec<usize>, SurfaceError> {
-    let dual = dual_edges(topology)?;
-    (0..dual.edge_count)
-        .filter_map(|edge| match dual.is_interior(edge) {
-            Ok(true) => Some(Ok(edge)),
-            Ok(false) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect()
-}
-
-/// Compact circular holonomy error bounds for one connection.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HolonomyEvidence {
-    local_error: f64,
-    generator_error: f64,
-    limit: f64,
-}
-
-/// Exact symmetric-field singularities admitted from binary64 angle evidence.
-#[derive(Clone, Debug)]
-pub struct DirectionFieldSingularities {
-    symmetry_order: NonZeroU32,
-    charges: IntegralCochain,
-    boundary_turns: Box<[BigInt]>,
-    maximum_quantization_residual: f64,
-    residual_limit: f64,
-}
-
-impl DirectionFieldSingularities {
-    #[must_use]
-    pub const fn symmetry_order(&self) -> NonZeroU32 {
-        self.symmetry_order
-    }
-
-    #[must_use]
-    pub const fn charges(&self) -> &IntegralCochain {
-        &self.charges
-    }
-
-    #[must_use]
-    pub fn boundary_turns(&self) -> &[BigInt] {
-        &self.boundary_turns
-    }
-
-    #[must_use]
-    pub const fn maximum_quantization_residual(&self) -> f64 {
-        self.maximum_quantization_residual
-    }
-
-    #[must_use]
-    pub const fn residual_limit(&self) -> f64 {
-        self.residual_limit
-    }
-}
-
-impl HolonomyEvidence {
-    #[must_use]
-    pub const fn local_error(self) -> f64 {
-        self.local_error
-    }
-
-    #[must_use]
-    pub const fn generator_error(self) -> f64 {
-        self.generator_error
-    }
-
-    #[must_use]
-    pub const fn limit(self) -> f64 {
-        self.limit
-    }
-}
-
-#[derive(Debug)]
-struct IntegrabilityEvidence {
-    phases: Arc<[f64]>,
-    crossing_error: f64,
-}
-
-/// One normalized unit-complex transport per selected canonical interior dual edge.
-pub struct SurfaceConnection {
-    surface: Arc<TriangleSurface>,
-    symmetry_order: NonZeroU32,
-    pub(crate) interior_edges: Arc<[usize]>,
-    transports: Arc<[f64]>,
-    evidence: OnceCell<Result<IntegrabilityEvidence, SurfaceError>>,
-}
-
-impl fmt::Debug for SurfaceConnection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SurfaceConnection")
-            .field("symmetry_order", &self.symmetry_order)
-            .field("edges", &(self.transports.len() / 2))
-            .finish_non_exhaustive()
-    }
-}
-
-impl SurfaceConnection {
-    #[must_use]
-    pub const fn surface(&self) -> &Arc<TriangleSurface> {
-        &self.surface
-    }
-
-    #[must_use]
-    pub const fn symmetry_order(&self) -> NonZeroU32 {
-        self.symmetry_order
-    }
-
-    #[must_use]
-    pub fn transports(&self) -> &[f64] {
-        &self.transports
-    }
-
-    /// Copy the canonical primal-edge index of every compact transport row.
-    #[must_use]
-    pub fn interior_edge_indices_copy(&self) -> Box<[usize]> {
-        self.interior_edges.as_ref().into()
-    }
-
-    pub(crate) fn with_powered_deviations(
-        self: &Arc<Self>,
-        symmetry_order: NonZeroU32,
-        deviations: &[f64],
-    ) -> Result<Arc<Self>, SurfaceError> {
-        if deviations.len() != self.interior_edges.len() {
-            return Err(SurfaceError::FieldShape);
-        }
-        let transports: Vec<f64> = deviations
-            .iter()
-            .enumerate()
-            .map(|(row, &deviation)| {
-                powered_transport(
-                    complex_at(&self.transports, row)?,
-                    symmetry_order,
-                    deviation,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        Ok(Arc::new(Self {
-            surface: Arc::clone(&self.surface),
-            symmetry_order,
-            interior_edges: Arc::clone(&self.interior_edges),
-            transports: transports.into(),
-            evidence: OnceCell::new(),
-        }))
-    }
-
-    fn transport(&self, edge: usize) -> Result<[f64; 2], SurfaceError> {
-        let row = self
-            .interior_edges
-            .binary_search(&edge)
-            .map_err(|_| SurfaceError::IndexOutside)?;
-        complex_at(&self.transports, row)
-    }
-
-    fn admitted_evidence(&self) -> Result<&IntegrabilityEvidence, SurfaceError> {
-        self.evidence
-            .get()
-            .and_then(|evidence| evidence.as_ref().ok())
-            .ok_or(SurfaceError::NotIntegrable)
-    }
-
-    /// Compute local and primitive-generator circular holonomy errors.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a cycle basis from another topology owner.
-    pub fn holonomy(
-        &self,
-        cycles: &IntegralDualCycleBasis,
-    ) -> Result<HolonomyEvidence, SurfaceError> {
-        self.surface.require_closed()?;
-        if !cycles
-            .chain_complex()
-            .same_owner(&self.surface.realization.topology().chain_complex())
-        {
-            return Err(SurfaceError::OwnerMismatch);
-        }
-        let dual = dual_edges(self.surface.realization.topology())?;
-        let local_error = local_holonomy_error(self, dual)?;
-        let mut generator_error = 0.0_f64;
-        for index in 0..cycles.rank() {
-            let cycle = cycles.cocycle(index).ok_or(SurfaceError::IndexOutside)?;
-            let mut product = [1.0, 0.0];
-            for (&edge, coefficient) in cycle.indices().iter().zip(cycle.coefficients()) {
-                let coefficient = coefficient.to_i64().ok_or(SurfaceError::Unrepresentable)?;
-                let (_, _, source_sign) = dual.edge(edge)?;
-                let exponent = -i64::from(source_sign) * coefficient;
-                product = normalize_complex(complex_multiply(
-                    product,
-                    complex_power(self.transport(edge)?, exponent)?,
-                ))?;
-            }
-            generator_error = generator_error.max(product[1].atan2(product[0]).abs());
-        }
-        let edge_count =
-            u32::try_from(self.surface.edge_count().max(1)).map_err(|_| SurfaceError::Overflow)?;
-        Ok(HolonomyEvidence {
-            local_error,
-            generator_error,
-            limit: 128.0 * f64::EPSILON * f64::from(edge_count),
-        })
-    }
-
-    /// Refine an integrable connection by exhaustive dual-graph propagation.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a disconnected dual graph or crossing residual above the fixed limit.
-    pub fn require_integrable(self: &Arc<Self>) -> Result<IntegrableConnection, SurfaceError> {
-        let evidence = self.evidence.get_or_init(|| {
-            let (phases, crossing_error) = propagate_phases(self)?;
-            let edge_count = u32::try_from(self.interior_edges.len().max(1))
-                .map_err(|_| SurfaceError::Overflow)?;
-            let limit = 128.0 * f64::EPSILON * f64::from(edge_count);
-            if crossing_error > limit {
-                return Err(SurfaceError::NotIntegrable);
-            }
-            Ok(IntegrabilityEvidence {
-                phases: phases.into(),
-                crossing_error,
-            })
-        });
-        evidence.as_ref().map_err(|error| *error)?;
-        Ok(IntegrableConnection {
-            connection: Arc::clone(self),
-        })
-    }
-}
-
-pub(crate) fn complex_at(values: &[f64], index: usize) -> Result<[f64; 2], SurfaceError> {
-    let start = index.checked_mul(2).ok_or(SurfaceError::Overflow)?;
+    let real_column = 2 * position;
+    let imaginary_column = real_column + 1;
+    let values = [real, -imaginary, imaginary, real];
+    matrix[(real_row, real_column)] = values[0];
+    matrix[(real_row, imaginary_column)] = values[1];
+    matrix[(imaginary_row, real_column)] = values[2];
+    matrix[(imaginary_row, imaginary_column)] = values[3];
     values
-        .get(start..start + 2)
-        .and_then(|value| value.try_into().ok())
-        .ok_or(SurfaceError::IndexOutside)
+        .into_iter()
+        .try_for_each(|value| matrix_norm.add(value))
 }
 
-fn local_holonomy_error(
-    connection: &SurfaceConnection,
-    dual: DualEdges<'_>,
-) -> Result<f64, SurfaceError> {
-    let topology = connection.surface.realization.topology();
-    let incidence = topology.boundary(1)?;
-    let mut maximum = 0.0_f64;
-    for vertex in 0..topology.vertex_count() {
-        let start = incidence.indptr()[vertex];
-        let stop = incidence.indptr()[vertex + 1];
-        let mut product = [1.0, 0.0];
-        for (&edge, &incidence_sign) in incidence.indices()[start..stop]
-            .iter()
-            .zip(&incidence.data()[start..stop])
-        {
-            let (_, _, source_sign) = dual.edge(edge)?;
-            let exponent = -i64::from(source_sign) * i64::from(incidence_sign);
-            product = normalize_complex(complex_multiply(
-                product,
-                complex_power(connection.transport(edge)?, exponent)?,
-            ))?;
+fn solve_least_squares_conformal_system(
+    system: &mut LeastSquaresConformalSystem,
+    block: usize,
+    scratch: StackReq,
+    executor: Executor,
+    cancellation: &CancellationToken,
+) -> Result<(usize, f64), SolveError> {
+    let rows = system.matrix.nrows();
+    let columns = system.matrix.ncols();
+    let mut householder = Mat::zeros(block, columns);
+    let mut permutation = vec![0_usize; columns];
+    let mut inverse_permutation = vec![0_usize; columns];
+    let mut memory = MemBuffer::try_new(scratch).map_err(|_| SolveError::Allocation)?;
+    check_cancelled(cancellation)?;
+    qr_factor::qr_in_place(
+        system.matrix.as_mut(),
+        householder.as_mut(),
+        &mut permutation,
+        &mut inverse_permutation,
+        executor.par(),
+        MemStack::new(&mut memory),
+        Spec::default(),
+    );
+    check_cancelled(cancellation)?;
+    let diagonal = (0..columns).map(|index| system.matrix[(index, index)].abs());
+    let maximum = diagonal.clone().fold(0.0_f64, f64::max);
+    let threshold = f64::EPSILON.sqrt() * maximum;
+    let rank = diagonal.clone().filter(|value| *value > threshold).count();
+    let minimum = diagonal.fold(f64::INFINITY, f64::min);
+    let condition = maximum / minimum;
+    if rank != columns || !condition.is_finite() {
+        return Err(SolveError::Factorization);
+    }
+    let mut rhs = MatMut::from_column_major_slice_mut(&mut system.right_hand_side, rows, 1);
+    let stack = MemStack::new(&mut memory);
+    qr_solve::solve_lstsq_in_place(
+        system.matrix.as_ref(),
+        householder.as_ref(),
+        system.matrix.as_ref(),
+        PermRef::new_checked(&permutation, &inverse_permutation, columns),
+        rhs.as_mut(),
+        executor.par(),
+        stack,
+    );
+    check_cancelled(cancellation)?;
+    system.right_hand_side[..columns]
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some((rank, condition))
+        .ok_or(SolveError::Numerical)
+}
+
+fn least_squares_conformal_positions(
+    vertex_count: usize,
+    anchors: [usize; 2],
+    system: &LeastSquaresConformalSystem,
+) -> Result<Vec<f64>, SolveError> {
+    let mut positions = vec![0.0; 2 * vertex_count];
+    positions[2 * anchors[1]] = 1.0;
+    for (vertex, &position) in system.free_position.iter().enumerate() {
+        if position != usize::MAX {
+            positions[2 * vertex] = system.right_hand_side[2 * position];
+            positions[2 * vertex + 1] = system.right_hand_side[2 * position + 1];
         }
-        maximum = maximum.max(product[1].atan2(product[0]).abs());
     }
-    Ok(maximum)
+    positions
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(positions)
+        .ok_or(SolveError::Numerical)
 }
 
-fn propagate_phases(connection: &SurfaceConnection) -> Result<(Vec<f64>, f64), SurfaceError> {
-    let dual = dual_edges(connection.surface.realization.topology())?;
-    let face_count = connection.surface.face_count();
-    let mut adjacency = vec![Vec::new(); face_count];
-    for (row, &edge) in connection.interior_edges.iter().enumerate() {
-        let (source, target, _) = dual.edge(edge)?;
-        adjacency[source].push((target, row, true));
-        adjacency[target].push((source, row, false));
+fn least_squares_conformal_residual(
+    surface: &TriangleSurface,
+    positions: &[f64],
+    system: &LeastSquaresConformalSystem,
+) -> Result<f64, SolveError> {
+    let columns = system.matrix.ncols();
+    let solution_norm = scaled_norm(&system.right_hand_side[..columns])?;
+    let mut residual_norm = ScaledNorm::default();
+    for face in 0..surface.face_count() {
+        let (vertices, coefficients) = surface
+            .oriented_local_conformal_coefficients(face)
+            .map_err(|_| SolveError::Numerical)?;
+        for imaginary_part in [false, true] {
+            let value = conformal_row_value(vertices, coefficients, positions, imaginary_part)?;
+            residual_norm.add(value)?;
+        }
     }
-    let mut phases = vec![0.0; 2 * face_count];
-    phases[0] = 1.0;
-    let mut visited = vec![false; face_count];
-    visited[0] = true;
-    let mut pending = vec![0_usize];
-    let mut cursor = 0;
-    while cursor < pending.len() {
-        let face = pending[cursor];
-        cursor += 1;
-        for &(neighbor, row, forward) in &adjacency[face] {
-            if visited[neighbor] {
-                continue;
+    let denominator = system.matrix_norm * solution_norm + system.right_hand_side_norm;
+    let residual = residual_norm.value() / denominator;
+    residual
+        .is_finite()
+        .then_some(residual)
+        .ok_or(SolveError::Numerical)
+}
+
+fn conformal_row_value(
+    vertices: [usize; 3],
+    coefficients: [[f64; 2]; 3],
+    positions: &[f64],
+    imaginary_part: bool,
+) -> Result<f64, SolveError> {
+    adaptive_product_value(vertices.into_iter().zip(coefficients).flat_map(
+        |(vertex, [real, imaginary])| {
+            if imaginary_part {
+                [
+                    (imaginary, positions[2 * vertex]),
+                    (real, positions[2 * vertex + 1]),
+                ]
+            } else {
+                [
+                    (real, positions[2 * vertex]),
+                    (-imaginary, positions[2 * vertex + 1]),
+                ]
             }
-            let transport = complex_at(&connection.transports, row)?;
-            let phase = complex_at(&phases, face)?;
-            let next = normalize_complex(complex_multiply(
-                if forward {
-                    transport
-                } else {
-                    complex_conjugate(transport)
-                },
-                phase,
-            ))?;
-            phases[2 * neighbor..2 * neighbor + 2].copy_from_slice(&next);
-            visited[neighbor] = true;
-            pending.push(neighbor);
-        }
-    }
-    if visited.iter().any(|visited| !visited) {
-        return Err(SurfaceError::Unrepresentable);
-    }
-    let mut maximum = 0.0_f64;
-    for (row, &edge) in connection.interior_edges.iter().enumerate() {
-        let (source, target, _) = dual.edge(edge)?;
-        let expected = complex_multiply(
-            complex_at(&connection.transports, row)?,
-            complex_at(&phases, source)?,
-        );
-        let residual = complex_multiply(complex_at(&phases, target)?, complex_conjugate(expected));
-        maximum = maximum.max(residual[1].atan2(residual[0]).abs());
-    }
-    Ok((phases, maximum))
+        },
+    ))
+    .map(|(value, _)| value)
+    .ok_or(SolveError::Numerical)
 }
 
-/// Arc-only evidence view for one admitted integrable connection.
-#[derive(Clone, Debug)]
-pub struct IntegrableConnection {
-    connection: Arc<SurfaceConnection>,
+fn least_squares_conformal_orientation(
+    surface: &TriangleSurface,
+    positions: &[f64],
+) -> Result<(f64, usize), SolveError> {
+    let mut minimum = f64::INFINITY;
+    let mut exact_fallback_faces = 0_usize;
+    for face in 0..surface.face_count() {
+        let (vertices, _) = surface
+            .oriented_local_conformal_coefficients(face)
+            .map_err(|_| SolveError::Numerical)?;
+        let terms = normalized_signed_area_terms(vertices, positions)?;
+        let (sign, exact_fallback) =
+            adaptive_product_sign(terms.into_iter()).ok_or(SolveError::Numerical)?;
+        if sign != CmpOrdering::Greater {
+            return Err(SolveError::Numerical);
+        }
+        exact_fallback_faces += usize::from(exact_fallback);
+        let area = adaptive_product_value(terms.into_iter())
+            .ok_or(SolveError::Numerical)?
+            .0;
+        if area <= 0.0 || !area.is_finite() {
+            return Err(SolveError::Numerical);
+        }
+        minimum = minimum.min(area);
+    }
+    Ok((minimum, exact_fallback_faces))
 }
 
-impl IntegrableConnection {
-    #[must_use]
-    pub const fn connection(&self) -> &Arc<SurfaceConnection> {
-        &self.connection
+fn normalized_signed_area_terms(
+    vertices: [usize; 3],
+    positions: &[f64],
+) -> Result<[(f64, f64); 2], SolveError> {
+    let point = |vertex| [positions[2 * vertex], positions[2 * vertex + 1]];
+    let [p0, p1, p2] = vertices.map(point);
+    let first = [p1[0] - p0[0], p1[1] - p0[1]];
+    let second = [p2[0] - p0[0], p2[1] - p0[1]];
+    let scale = first
+        .into_iter()
+        .chain(second)
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 || !scale.is_finite() {
+        return Err(SolveError::Numerical);
     }
+    Ok([
+        (first[0] / scale, second[1] / scale),
+        (-first[1] / scale, second[0] / scale),
+    ])
+}
 
-    /// Integrate one unit-complex face direction from face zero.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a nonfinite anchor or unavailable admitted evidence.
-    pub fn direction_field(&self, anchor_angle: f64) -> Result<FaceDirectionField, SurfaceError> {
-        if !anchor_angle.is_finite() {
-            return Err(SurfaceError::NonFinite);
-        }
-        let evidence = self.connection.admitted_evidence()?;
-        let power_anchor = f64::from(self.connection.symmetry_order.get()) * anchor_angle;
-        let anchor = [power_anchor.cos(), power_anchor.sin()];
-        let mut power_directions = Vec::with_capacity(evidence.phases.len());
-        for phase in evidence.phases.chunks_exact(2) {
-            power_directions.extend(normalize_complex(complex_multiply(
-                phase
-                    .try_into()
-                    .map_err(|_| SurfaceError::Unrepresentable)?,
-                anchor,
-            ))?);
-        }
-        Ok(FaceDirectionField {
-            connection: Arc::clone(&self.connection),
-            power_directions: power_directions.into(),
-        })
-    }
+fn scaled_norm(values: &[f64]) -> Result<f64, SolveError> {
+    let mut norm = ScaledNorm::default();
+    values.iter().try_for_each(|&value| norm.add(value))?;
+    Ok(norm.value())
+}
 
-    /// Borrow the cached crossing residual that admitted this refinement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an internal admission failure if the evidence is unavailable.
-    pub fn crossing_error(&self) -> Result<f64, SurfaceError> {
-        self.connection
-            .admitted_evidence()
-            .map(|evidence| evidence.crossing_error)
+fn realization_solve_error(error: GeometryError) -> SolveError {
+    if error.resource_limit().is_some() {
+        SolveError::ResourceLimit
+    } else if error == GeometryError::Allocation {
+        SolveError::Allocation
+    } else {
+        SolveError::Numerical
     }
 }
 
-/// Unit-complex directions in the canonical face frames of one connection.
-#[derive(Clone, Debug)]
-pub struct FaceDirectionField {
-    connection: Arc<SurfaceConnection>,
-    power_directions: Arc<[f64]>,
+fn require_frozen_flow_domain(metric: &crate::Metric, time_step: f64) -> Result<(), SurfaceError> {
+    if !time_step.is_finite() || time_step <= 0.0 {
+        return Err(SurfaceError::TimeStep);
+    }
+    let realization = metric.realization();
+    if realization.ambient_dimension() != 3 {
+        return Err(SurfaceError::AmbientDimension);
+    }
+    realization.topology().refine_triangle()?;
+    realization.topology().refine_oriented()?;
+    realization
+        .topology()
+        .refine_regular()?
+        .without_boundary()
+        .map_err(|_| SurfaceError::BoundaryPresent)?;
+    realization.topology().refine_connected()?;
+    Ok(())
 }
 
-fn interior_direction_charges(
-    field: &FaceDirectionField,
-    levi_civita: &SurfaceConnection,
-    boundary_vertices: &[bool],
-    entries: &mut Vec<(usize, BigInt)>,
-) -> Result<(BigInt, f64, usize), SurfaceError> {
-    let surface = &field.connection.surface;
-    let topology = surface.realization.topology();
-    let curvature = surface.gaussian_curvature_measure()?;
-    let incidence = topology.boundary(1)?;
-    let dual = dual_edges(topology)?;
-    let order = f64::from(field.symmetry_order().get());
-    let mut total = BigInt::from(0);
-    let mut maximum_residual = 0.0_f64;
-    let (mut maximum_valence, mut terms) = (0_usize, Vec::new());
-    for vertex in 0..topology.vertex_count() {
-        if *boundary_vertices
-            .get(vertex)
-            .ok_or(SurfaceError::IndexOutside)?
-        {
-            continue;
-        }
-        let start = incidence.indptr()[vertex];
-        let stop = incidence.indptr()[vertex + 1];
-        maximum_valence = maximum_valence.max(stop - start);
-        terms.clear();
-        terms
-            .try_reserve(stop - start + 1)
-            .map_err(|_| SurfaceError::Overflow)?;
-        terms.push((order, curvature.coefficients()[vertex]));
-        for (&edge, &incidence_sign) in incidence.indices()[start..stop]
-            .iter()
-            .zip(&incidence.data()[start..stop])
-        {
-            let (source, target, source_sign) = dual.edge(edge)?;
-            let expected = complex_multiply(
-                powered_transport(levi_civita.transport(edge)?, field.symmetry_order(), 0.0)?,
-                complex_at(&field.power_directions, source)?,
-            );
-            let mismatch = complex_multiply(
-                complex_at(&field.power_directions, target)?,
-                complex_conjugate(expected),
-            );
-            let traversal = -i64::from(source_sign) * i64::from(incidence_sign);
-            let traversal = traversal.to_f64().ok_or(SurfaceError::Unrepresentable)?;
-            terms.push((-traversal, mismatch[1].atan2(mismatch[0])));
-        }
-        let (numerator, _) =
-            adaptive_product_value(terms.iter().copied()).ok_or(SurfaceError::Unrepresentable)?;
-        let raw = numerator / std::f64::consts::TAU;
-        let rounded = raw.round();
-        let charge = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
-        maximum_residual = maximum_residual.max((raw - rounded).abs());
-        if charge != 0 {
-            entries.push((vertex, BigInt::from(charge)));
-        }
-        total += charge;
-    }
-    Ok((total, maximum_residual, maximum_valence))
-}
+fn frozen_flow_step(
+    metric: &crate::Metric,
+    time_step: f64,
+    realization_limit: Limit,
+    executor: Executor,
+    storage: StorageLimit,
+    work: WorkLimit,
+    cancellation: &CancellationToken,
+) -> Result<FlowStep, SolveError> {
+    check_cancelled(cancellation)?;
+    let source = metric.realization();
+    let n = source.topology().vertex_count();
+    let dimension = source.ambient_dimension();
+    let cells = n.checked_mul(dimension).ok_or(SolveError::ResourceLimit)?;
+    let quadratic = n
+        .checked_mul(n)
+        .and_then(|value| value.checked_mul(dimension))
+        .ok_or(SolveError::ResourceLimit)?;
+    let solve_work = u64::try_from(quadratic.max(cells.saturating_mul(8)))
+        .map_err(|_| SolveError::ResourceLimit)?;
+    let total_work = cubic_work(n)?
+        .checked_add(solve_work)
+        .ok_or(SolveError::ResourceLimit)?;
+    require_work(work, total_work)?;
 
-fn relative_boundary_turns(
-    field: &FaceDirectionField,
-) -> Result<(Vec<BigInt>, BigInt, f64, usize), SurfaceError> {
-    let surface = &field.connection.surface;
-    let (offsets, edges) = oriented_boundary_components(surface.realization.topology())?;
-    let mut residuals = Vec::with_capacity(2 * edges.len());
-    for &edge in &edges {
-        let (face, tangent_power, _) =
-            boundary_edge_power_direction(surface, field.symmetry_order(), edge)?;
-        residuals.extend(normalize_complex(complex_multiply(
-            complex_at(&field.power_directions, face)?,
-            complex_conjugate(tangent_power),
-        ))?);
+    let factor_bytes = matrix_bytes(n)?;
+    require_storage(storage, 0, factor_bytes.saturating_mul(2))?;
+    let free = (0..n).collect::<Vec<_>>();
+    let factor = factor_stiffness(
+        SystemRef::Parabolic { metric, time_step },
+        &free,
+        executor,
+        cancellation,
+    )?;
+    check_cancelled(cancellation)?;
+
+    let requirement =
+        StackReq::new::<f64>(cells).and(factor_solve_requirement(&factor, executor, dimension));
+    let workspace_bytes =
+        u64::try_from(requirement.size_bytes()).map_err(|_| SolveError::ResourceLimit)?;
+    let peak = factor_bytes
+        .saturating_mul(2)
+        .checked_add(workspace_bytes)
+        .ok_or(SolveError::ResourceLimit)?;
+    require_storage(storage, 0, peak)?;
+    let mut buffer = MemBuffer::try_new(requirement).map_err(|_| SolveError::Allocation)?;
+    let stack = MemStack::new(&mut buffer);
+    if !stack.can_hold(requirement) {
+        return Err(SolveError::ResourceLimit);
     }
 
-    let order = f64::from(field.symmetry_order().get());
-    let antipodal_limit = 256.0 * f64::EPSILON * order;
-    let mut turns = Vec::with_capacity(offsets.len().saturating_sub(1));
-    let mut total = BigInt::from(0);
-    let mut maximum_residual = 0.0_f64;
-    let (mut maximum_edges, mut terms) = (0_usize, Vec::new());
-    for component in offsets.windows(2) {
-        let start = component[0];
-        let stop = component[1];
-        if start == stop {
-            return Err(SurfaceError::Unrepresentable);
+    let masses = metric
+        .hodge_coefficients_slice(0)
+        .map_err(|_| SolveError::Numerical)?;
+    let centroid = weighted_centroid(masses, source.positions(), dimension)?;
+    let scale = factor_scale(&factor);
+    let (mut rhs_storage, stack) = stack.make_with(cells, |_| 0.0_f64);
+    {
+        let mut rhs = MatMut::from_column_major_slice_mut(&mut rhs_storage, n, dimension);
+        fill_centered_mass_rhs(masses, source.positions(), &centroid, scale, rhs.as_mut())?;
+        solve_factor(&factor, rhs.as_mut(), executor, stack);
+    }
+    check_cancelled(cancellation)?;
+
+    let (_, endpoints) = stiffness_endpoints(metric)?;
+    let residual_bound = flow_residual(metric, time_step, &rhs_storage, &centroid, &endpoints)?;
+    let mut positions = vec![0.0; cells];
+    for vertex in 0..n {
+        for axis in 0..dimension {
+            positions[vertex * dimension + axis] = rhs_storage[axis * n + vertex] + centroid[axis];
         }
-        maximum_edges = maximum_edges.max(stop - start);
-        terms.clear();
-        terms
-            .try_reserve(stop - start)
-            .map_err(|_| SurfaceError::Overflow)?;
-        for row in start..stop {
-            let next = if row + 1 == stop { start } else { row + 1 };
-            let increment = normalize_complex(complex_multiply(
-                complex_at(&residuals, next)?,
-                complex_conjugate(complex_at(&residuals, row)?),
-            ))?;
-            let angle = increment[1].atan2(increment[0]);
-            if std::f64::consts::PI - angle.abs() <= antipodal_limit {
-                return Err(SurfaceError::Unrepresentable);
-            }
-            terms.push((1.0, angle));
-        }
-        let (numerator, _) =
-            adaptive_product_value(terms.iter().copied()).ok_or(SurfaceError::Unrepresentable)?;
-        let raw = numerator / std::f64::consts::TAU;
-        let rounded = raw.round();
-        let turn = rounded.to_i64().ok_or(SurfaceError::Unrepresentable)?;
-        maximum_residual = maximum_residual.max((raw - rounded).abs());
-        turns.push(BigInt::from(turn));
-        total += turn;
     }
-    Ok((turns, total, maximum_residual, maximum_edges))
-}
-
-impl FaceDirectionField {
-    #[must_use]
-    pub const fn connection(&self) -> &Arc<SurfaceConnection> {
-        &self.connection
+    drop(rhs_storage);
+    let target_centroid = weighted_centroid(masses, &positions, dimension)?;
+    let centroid_scale = positions
+        .iter()
+        .chain(&centroid)
+        .map(|value| value.abs())
+        .fold(1.0_f64, f64::max);
+    let centroid_residual_bound = target_centroid
+        .iter()
+        .zip(&centroid)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0_f64, f64::max)
+        / centroid_scale;
+    let energy_before = dirichlet_energy(metric, source.positions(), dimension, &endpoints)?;
+    let energy_after = dirichlet_energy(metric, &positions, dimension, &endpoints)?;
+    if !residual_bound.is_finite()
+        || !centroid_residual_bound.is_finite()
+        || !energy_before.is_finite()
+        || !energy_after.is_finite()
+        || residual_bound > 1.0e-10
+        || centroid_residual_bound > 1.0e-12
+        || energy_after > energy_before + 128.0 * f64::EPSILON * energy_before.max(1.0)
+    {
+        return Err(SolveError::Numerical);
     }
-
-    #[must_use]
-    pub fn symmetry_order(&self) -> NonZeroU32 {
-        self.connection.symmetry_order()
-    }
-
-    #[must_use]
-    pub fn power_directions(&self) -> &[f64] {
-        &self.power_directions
-    }
-
-    /// Calculate exact charges with O(E log E) compact lookup and quantization evidence.
-    ///
-    /// # Errors
-    ///
-    /// Rejects unavailable surface geometry, indeterminate binary64 rounding, or
-    /// a result that violates the exact relative charge law.
-    pub fn singularities(&self) -> Result<DirectionFieldSingularities, SurfaceError> {
-        let surface = &self.connection.surface;
-        let topology = surface.realization.topology();
-        let symmetry_order = self.symmetry_order();
-        let order = f64::from(symmetry_order.get());
-        let regular = topology.refine_regular()?;
-        let boundary_vertices = regular.boundary_mask(0)?;
-        let levi_civita = surface.levi_civita_connection()?;
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(topology.vertex_count())
-            .map_err(|_| SurfaceError::Overflow)?;
-        let (charge_total, charge_residual, maximum_valence) =
-            interior_direction_charges(self, &levi_civita, &boundary_vertices, &mut entries)?;
-        let (boundary_turns, boundary_total, boundary_residual, maximum_boundary_edges) =
-            relative_boundary_turns(self)?;
-        let maximum_residual = charge_residual.max(boundary_residual);
-        let operation_count = u32::try_from(
-            maximum_valence
-                .saturating_add(3)
-                .max(maximum_boundary_edges.saturating_add(3)),
-        )
-        .unwrap_or(u32::MAX);
-        let residual_limit = 4096.0 * f64::EPSILON * f64::from(operation_count) * order;
-        let euler = i128::try_from(topology.vertex_count())
-            .ok()
-            .and_then(|value| value.checked_sub(i128::try_from(surface.edge_count()).ok()?))
-            .and_then(|value| value.checked_add(i128::try_from(surface.face_count()).ok()?))
-            .ok_or(SurfaceError::Overflow)?;
-        let expected_total = BigInt::from(symmetry_order.get()) * BigInt::from(euler);
-        if residual_limit >= 0.5
-            || maximum_residual > residual_limit
-            || charge_total - boundary_total != expected_total
-        {
-            return Err(SurfaceError::Unrepresentable);
-        }
-        let space = topology.chain_complex().dual().space(0)?;
-        let charges = space
-            .element(entries)
-            .map_err(|_| SurfaceError::Unrepresentable)?;
-        Ok(DirectionFieldSingularities {
-            symmetry_order,
-            charges,
-            boundary_turns: boundary_turns.into_boxed_slice(),
-            maximum_quantization_residual: maximum_residual,
-            residual_limit,
-        })
-    }
-
-    /// Borrow the connection-owned crossing residual without duplicating it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an internal admission failure if the evidence is unavailable.
-    pub fn crossing_error(&self) -> Result<f64, SurfaceError> {
-        self.connection
-            .admitted_evidence()
-            .map(|evidence| evidence.crossing_error)
-    }
-
-    /// Allocate one explicit ambient branch from the retained power coordinates.
-    ///
-    /// # Errors
-    ///
-    /// Returns an unavailable-frame or representability failure.
-    pub fn ambient_vector_branch_copy(&self, branch: usize) -> Result<FaceVectors, SurfaceError> {
-        let symmetry_order =
-            usize::try_from(self.symmetry_order().get()).map_err(|_| SurfaceError::Overflow)?;
-        if branch >= symmetry_order {
-            return Err(SurfaceError::IndexOutside);
-        }
-        let order = f64::from(self.symmetry_order().get());
-        let branch = branch.to_f64().ok_or(SurfaceError::Unrepresentable)?;
-        let first = self.connection.surface.first_frame_axes()?;
-        let second = self.connection.surface.second_frame_axes()?;
-        let mut values = Vec::with_capacity(3 * self.connection.surface.face_count());
-        for face in 0..self.connection.surface.face_count() {
-            let power_direction = complex_at(&self.power_directions, face)?;
-            let angle = power_direction[1].atan2(power_direction[0]) / order
-                + std::f64::consts::TAU * branch / order;
-            let direction = [angle.cos(), angle.sin()];
-            let first = row3(first, face)?;
-            let second = row3(second, face)?;
-            values.extend([
-                direction[0] * first[0] + direction[1] * second[0],
-                direction[0] * first[1] + direction[1] * second[1],
-                direction[0] * first[2] + direction[1] * second[2],
-            ]);
-        }
-        EntityVectors::admit(
-            Arc::clone(self.connection.surface.realization()),
-            Support::Face,
-            values,
-        )
-    }
+    check_cancelled(cancellation)?;
+    let target = source
+        .deform(positions, realization_limit)
+        .map_err(|_| SolveError::Numerical)?;
+    check_cancelled(cancellation)?;
+    Ok(FlowStep::new(
+        target,
+        FlowEvidence::new(
+            energy_before,
+            energy_after,
+            residual_bound,
+            centroid_residual_bound,
+        ),
+    ))
 }

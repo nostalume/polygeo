@@ -1,9 +1,29 @@
-#[pyclass(name = "HalfedgeSurface", frozen, module = "polygeo", skip_from_py_object)]
-struct NativeHalfedgeSurface {
+use std::sync::Arc;
+
+use polygeo_core::topology::{
+    FaceKind, Halfedge, HalfedgeInput, HalfedgeSurface as HalfedgeSurfaceCore, TopologyError,
+};
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyDict, PyModule};
+
+use crate::array::{fill_indices, filled_array_1d};
+use crate::chain::{ExactComplex, NativeChainComplex, PyChainIsomorphism, PyChainLawLimit};
+use crate::topology::{
+    NativeComplex, PyBoundaryParts, copy_halfedge_indices, halfedge_exception,
+    halfedge_isomorphism_error, halfedge_topology_error, project_boundary,
+};
+
+#[pyclass(
+    name = "HalfedgeSurface",
+    frozen,
+    module = "polygeo.topology",
+    skip_from_py_object
+)]
+pub(crate) struct NativeHalfedgeSurface {
     owner: Arc<HalfedgeSurfaceCore>,
 }
 
-fn halfedge_degree(degree: isize) -> PyResult<usize> {
+pub(crate) fn halfedge_degree(degree: isize) -> PyResult<usize> {
     usize::try_from(degree).map_err(|_| {
         Python::attach(|py| {
             halfedge_exception(
@@ -20,7 +40,7 @@ impl NativeHalfedgeSurface {
     fn relation(
         &self,
         py: Python<'_>,
-        project: impl Fn(polygeo_core::Halfedge<'_>) -> usize,
+        project: impl Fn(Halfedge<'_>) -> usize,
     ) -> PyResult<Py<PyAny>> {
         filled_array_1d(py, self.owner.halfedge_count(), |output| {
             fill_indices::<i64>(self.owner.halfedges().map(project), output)
@@ -46,7 +66,7 @@ impl NativeHalfedgeSurface {
         py: Python<'_>,
         complex: &Bound<'_, PyAny>,
         limit: Option<PyRef<'_, PyChainLawLimit>>,
-    ) -> PyResult<(Py<Self>, Py<NativeSurfaceCorrespondence>)> {
+    ) -> PyResult<(Py<Self>, PyChainIsomorphism)> {
         let complex = complex.extract::<Py<NativeComplex>>().map_err(|_| {
             halfedge_exception(
                 py,
@@ -56,20 +76,19 @@ impl NativeHalfedgeSurface {
             )
         })?;
         let owner = Arc::clone(&complex.borrow(py).owner);
-        let limit = limit.map_or(PyChainLawLimit::DEFAULT, |value| *value).core();
+        let limit = limit
+            .map_or(PyChainLawLimit::DEFAULT, |value| *value)
+            .core();
         let (owner, correspondence) = py
             .detach(move || HalfedgeSurfaceCore::from_complex_with_limit(&owner, limit))
             .map_err(halfedge_isomorphism_error)?;
         let surface = Py::new(py, Self { owner })?;
-        let witness = Py::new(
-            py,
-            NativeSurfaceCorrespondence {
-                source: complex.into_any(),
-                target: surface.clone_ref(py).into_any(),
-                correspondence,
+        Ok((
+            surface,
+            PyChainIsomorphism {
+                relation: correspondence,
             },
-        )?;
-        Ok((surface, witness))
+        ))
     }
 
     #[staticmethod]
@@ -96,51 +115,79 @@ impl NativeHalfedgeSurface {
     }
 
     #[getter]
-    fn halfedge_count(&self) -> usize { self.owner.halfedge_count() }
+    fn halfedge_count(&self) -> usize {
+        self.owner.halfedge_count()
+    }
     #[getter]
-    fn vertex_count(&self) -> usize { self.owner.vertex_count() }
+    fn vertex_count(&self) -> usize {
+        self.owner.vertex_count()
+    }
     #[getter]
-    fn edge_count(&self) -> usize { self.owner.edge_count() }
+    fn edge_count(&self) -> usize {
+        self.owner.edge_count()
+    }
     #[getter]
-    fn face_orbit_count(&self) -> usize { self.owner.face_orbit_count() }
+    fn face_orbit_count(&self) -> usize {
+        self.owner.face_orbit_count()
+    }
     #[getter]
-    fn material_face_count(&self) -> usize { self.owner.material_face_count() }
+    fn material_face_count(&self) -> usize {
+        self.owner.material_face_count()
+    }
     #[getter]
-    fn exterior_face_count(&self) -> usize { self.owner.exterior_face_count() }
+    fn exterior_face_count(&self) -> usize {
+        self.owner.exterior_face_count()
+    }
     #[getter]
-    fn boundary_component_count(&self) -> usize { self.owner.boundary_component_count() }
+    fn boundary_component_count(&self) -> usize {
+        self.owner.boundary_component_count()
+    }
     #[getter]
-    fn connected_component_count(&self) -> usize { self.owner.connected_component_count() }
+    fn connected_component_count(&self) -> usize {
+        self.owner.connected_component_count()
+    }
     #[getter]
-    fn euler_characteristic(&self) -> i64 { self.owner.euler_characteristic() }
+    fn euler_characteristic(&self) -> i64 {
+        self.owner.euler_characteristic()
+    }
     #[getter]
-    fn genus(&self) -> Option<usize> { self.owner.genus() }
+    fn genus(&self) -> Option<usize> {
+        self.owner.genus()
+    }
 
-    fn next(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn next_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.relation(py, |halfedge| halfedge.next().index())
     }
-    fn twin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn twin_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.relation(py, |halfedge| halfedge.twin().index())
     }
-    fn vertex_of(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn vertex_of_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.relation(py, |halfedge| halfedge.vertex().index())
     }
-    fn edge_of(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn edge_of_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.relation(py, |halfedge| halfedge.edge().index())
     }
-    fn face_of(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn face_of_numpy_copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.relation(py, |halfedge| halfedge.face_orbit().index())
     }
 
-    fn boundary_cycles(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
-        let exterior_len = self.owner.face_orbits()
+    fn boundary_cycles_numpy_copy(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
+        let exterior_len = self
+            .owner
+            .face_orbits()
             .filter(|face| face.kind() == FaceKind::Exterior)
-            .map(|face| face.halfedges().len()).sum();
+            .map(|face| face.halfedges().len())
+            .sum();
         let offsets = filled_array_1d(py, self.owner.exterior_face_count() + 1, |output| {
             let mut running = 0_i64;
             output[0] = running;
             for (target, face) in output[1..].iter_mut().zip(
-                self.owner.face_orbits().filter(|face| face.kind() == FaceKind::Exterior),
+                self.owner
+                    .face_orbits()
+                    .filter(|face| face.kind() == FaceKind::Exterior),
             ) {
                 running += i64::try_from(face.halfedges().len())
                     .map_err(|_| TopologyError::IndexOverflow)?;
@@ -150,15 +197,17 @@ impl NativeHalfedgeSurface {
         })?;
         let exterior = filled_array_1d(py, exterior_len, |output| {
             fill_indices::<i64>(
-                self.owner.face_orbits()
+                self.owner
+                    .face_orbits()
                     .filter(|face| face.kind() == FaceKind::Exterior)
-                    .flat_map(|face| face.halfedges().map(polygeo_core::Halfedge::index)),
+                    .flat_map(|face| face.halfedges().map(Halfedge::index)),
                 output,
             )
         })?;
         let material = filled_array_1d(py, exterior_len, |output| {
             fill_indices::<i64>(
-                self.owner.face_orbits()
+                self.owner
+                    .face_orbits()
                     .filter(|face| face.kind() == FaceKind::Exterior)
                     .flat_map(|face| face.halfedges().map(|halfedge| halfedge.twin().index())),
                 output,
@@ -167,74 +216,46 @@ impl NativeHalfedgeSurface {
         Ok((offsets, exterior, material))
     }
 
-    fn boundary_matrix(&self, py: Python<'_>, degree: isize) -> PyResult<Py<PyAny>> {
+    fn boundary_scipy_copy(&self, py: Python<'_>, degree: isize) -> PyResult<Py<PyAny>> {
         let (data, indices, indptr, shape) = self.boundary_parts(py, degree)?;
         let keywords = PyDict::new(py);
         keywords.set_item("shape", shape)?;
         keywords.set_item("copy", false)?;
-        PyModule::import(py, "scipy.sparse")?.getattr("csr_array")?
-            .call(((data, indices, indptr),), Some(&keywords)).map(Bound::unbind)
+        PyModule::import(py, "scipy.sparse")?
+            .getattr("csr_array")?
+            .call(((data, indices, indptr),), Some(&keywords))
+            .map(Bound::unbind)
     }
 
     fn chain_complex(&self) -> NativeChainComplex {
-        NativeChainComplex { inner: ExactComplex::Integer(self.owner.chain_complex()) }
+        NativeChainComplex {
+            inner: ExactComplex::Integer(self.owner.chain_complex()),
+        }
     }
 
     #[pyo3(signature = (*, limit=None))]
     fn to_complex(
         slf: &Bound<'_, Self>,
         limit: Option<PyRef<'_, PyChainLawLimit>>,
-    ) -> PyResult<(Py<NativeComplex>, Py<NativeSurfaceCorrespondence>)> {
+    ) -> PyResult<(Py<NativeComplex>, PyChainIsomorphism)> {
         let py = slf.py();
         let owner = Arc::clone(&slf.borrow().owner);
-        let limit = limit.map_or(PyChainLawLimit::DEFAULT, |value| *value).core();
-        let (owner, correspondence) = py.detach(move || owner.to_complex_with_limit(limit))
+        let limit = limit
+            .map_or(PyChainLawLimit::DEFAULT, |value| *value)
+            .core();
+        let (owner, correspondence) = py
+            .detach(move || owner.to_complex_with_limit(limit))
             .map_err(halfedge_isomorphism_error)?;
         let complex = Py::new(py, NativeComplex { owner })?;
-        let witness = Py::new(py, NativeSurfaceCorrespondence {
-            source: slf.clone().into_any().unbind(),
-            target: complex.clone_ref(py).into_any(),
-            correspondence,
-        })?;
-        Ok((complex, witness))
+        Ok((
+            complex,
+            PyChainIsomorphism {
+                relation: correspondence,
+            },
+        ))
     }
 }
 
-#[pyclass(name = "SurfaceCorrespondence", frozen, module = "polygeo", skip_from_py_object)]
-struct NativeSurfaceCorrespondence {
-    source: Py<PyAny>,
-    target: Py<PyAny>,
-    correspondence: SurfaceCorrespondence,
-}
-
-#[pymethods]
-impl NativeSurfaceCorrespondence {
-    #[getter]
-    fn source(&self, py: Python<'_>) -> Py<PyAny> { self.source.clone_ref(py) }
-    #[getter]
-    fn target(&self, py: Python<'_>) -> Py<PyAny> { self.target.clone_ref(py) }
-    #[getter]
-    fn direction(&self) -> &'static str {
-        match self.correspondence.direction() {
-            CorrespondenceDirection::ComplexToSurface => "complex_to_surface",
-            CorrespondenceDirection::SurfaceToComplex => "surface_to_complex",
-        }
-    }
-
-    fn signed_permutation(&self, py: Python<'_>, degree: isize) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
-        let permutation = self.correspondence.permutation(halfedge_degree(degree)?)
-            .map_err(halfedge_topology_error)?;
-        let targets = filled_array_1d(py, permutation.len(), |output| {
-            fill_indices::<i64>(permutation.target_of_source().iter().copied(), output)
-        })?;
-        let signs = filled_array_1d(py, permutation.len(), |output| {
-            output.copy_from_slice(permutation.signs());
-            Ok(())
-        })?;
-        Ok((targets, signs))
-    }
-
-    fn chain_isomorphism(&self) -> PyChainIsomorphism {
-        PyChainIsomorphism { relation: self.correspondence.isomorphism().clone() }
-    }
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<NativeHalfedgeSurface>()
 }

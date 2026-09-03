@@ -121,13 +121,6 @@ impl ChainDomain {
             Self::Halfedge(_) => None,
         }
     }
-
-    const fn halfedge_owner(&self) -> Option<&Arc<HalfedgeSurfaceCore>> {
-        match self {
-            Self::Simplicial(_) => None,
-            Self::Halfedge(owner) => Some(owner),
-        }
-    }
 }
 
 /// One exact based chain-complex authority over an admitted coefficient system.
@@ -250,14 +243,6 @@ impl<A: CoefficientSystem> ChainComplex<A> {
             }
         }
         Ok(PresentationEquality::new(self, other))
-    }
-
-    pub(crate) const fn simplicial_owner(&self) -> Option<&Arc<ComplexCore>> {
-        self.domain.simplicial_owner()
-    }
-
-    pub(crate) const fn halfedge_owner(&self) -> Option<&Arc<HalfedgeSurfaceCore>> {
-        self.domain.halfedge_owner()
     }
 }
 
@@ -2002,7 +1987,7 @@ impl<A: Ring> ChainIsomorphism<A> {
         verify_signed_chain_law(self.source(), self.target(), &permutations, limit)
     }
 
-    pub(crate) fn permutation(&self, degree: usize) -> Result<&SignedPermutation, TopologyError> {
+    fn permutation(&self, degree: usize) -> Result<&SignedPermutation, TopologyError> {
         match self
             .forward
             .degrees
@@ -2012,6 +1997,16 @@ impl<A: Ring> ChainIsomorphism<A> {
             AtomicRecipe::SignedPermutation { permutation, .. } => Ok(permutation),
             _ => Err(TopologyError::CorrespondenceLaw),
         }
+    }
+
+    /// Borrow the target indices and signs of an admitted degree permutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `degree_outside` when the degree is not represented.
+    pub fn signed_permutation(&self, degree: usize) -> Result<(&[usize], &[i8]), TopologyError> {
+        self.permutation(degree)
+            .map(|permutation| (permutation.target_of_source(), permutation.signs()))
     }
 }
 

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use polygeo_core::HalfedgeInput;
+use polygeo_core::topology::HalfedgeInput;
 
 pub fn input(next: Vec<usize>, twin: Vec<usize>, exterior_seeds: Vec<usize>) -> HalfedgeInput {
     let halfedge_count = next.len();

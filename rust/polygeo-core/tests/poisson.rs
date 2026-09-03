@@ -1,13 +1,15 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use polygeo_core::{
-    Binary64Chain, Binary64Cochain, Binary64Element, Binary64Space, CancellationToken,
-    CandidateInput, Chain, Cochain, ComplexCore, EuclideanRealization, NativeExecutor,
-    NondegenerateCapability, PairingCapability, PositiveMetric, RealizationLimit, SolveExt,
-    StorageLimit, TriangleSurface, WorkLimit,
+    chain::Chain, chain::Cochain, form::Chain as Binary64Chain, form::Cochain as Binary64Cochain,
+    form::Element as Binary64Element, form::Space as Binary64Space, geometry::Geometry,
+    geometry::Limit, geometry::Metric, geometry::NondegenerateCapability,
+    geometry::PairingCapability, geometry::TriangleSurface, solve::CancellationToken,
+    solve::Executor, solve::Policy, solve::SolveExt, solve::StorageLimit, solve::WorkLimit,
+    topology::CandidateInput, topology::Complex as ComplexCore,
 };
 
-fn sphere_metric() -> PositiveMetric {
+fn sphere_metric() -> Metric {
     let topology = ComplexCore::admit(
         CandidateInput::signed([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3], 4, 3, None).unwrap(),
     )
@@ -15,7 +17,7 @@ fn sphere_metric() -> PositiveMetric {
     let positions = vec![
         1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0,
     ];
-    EuclideanRealization::admit(topology, 3, positions, RealizationLimit::DEFAULT)
+    Geometry::admit(topology, 3, positions, Limit::DEFAULT)
         .unwrap()
         .circumcentric_pairing()
         .unwrap()
@@ -23,19 +25,19 @@ fn sphere_metric() -> PositiveMetric {
         .unwrap()
 }
 
-fn density(metric: &PositiveMetric, coefficients: Vec<f64>) -> Binary64Cochain {
+fn density(metric: &Metric, coefficients: Vec<f64>) -> Binary64Cochain {
     let space =
         Binary64Space::<Cochain>::full(Arc::clone(metric.realization().topology()), 0).unwrap();
     Binary64Element::admit(space, coefficients).unwrap()
 }
 
-fn load(metric: &PositiveMetric, coefficients: Vec<f64>) -> Binary64Chain {
+fn load(metric: &Metric, coefficients: Vec<f64>) -> Binary64Chain {
     let space =
         Binary64Space::<Chain>::full(Arc::clone(metric.realization().topology()), 0).unwrap();
     Binary64Element::admit(space, coefficients).unwrap()
 }
 
-fn compatible_density(metric: &PositiveMetric, left: usize, right: usize) -> Binary64Cochain {
+fn compatible_density(metric: &Metric, left: usize, right: usize) -> Binary64Cochain {
     let weights = metric.hodge_coefficients_slice(0).unwrap();
     let mut coefficients = vec![0.0; weights.len()];
     coefficients[left] = weights[right];
@@ -43,7 +45,7 @@ fn compatible_density(metric: &PositiveMetric, left: usize, right: usize) -> Bin
     density(metric, coefficients)
 }
 
-fn cycle_metric(vertex_count: usize) -> PositiveMetric {
+fn cycle_metric(vertex_count: usize) -> Metric {
     let edges = (0..vertex_count).flat_map(|vertex| {
         [vertex, (vertex + 1) % vertex_count].map(|index| u64::try_from(index).unwrap())
     });
@@ -59,7 +61,7 @@ fn cycle_metric(vertex_count: usize) -> PositiveMetric {
             [angle.cos(), angle.sin()]
         })
         .collect();
-    EuclideanRealization::admit(topology, 2, positions, RealizationLimit::DEFAULT)
+    Geometry::admit(topology, 2, positions, Limit::DEFAULT)
         .unwrap()
         .circumcentric_pairing()
         .unwrap()
@@ -67,9 +69,9 @@ fn cycle_metric(vertex_count: usize) -> PositiveMetric {
         .unwrap()
 }
 
-fn point_metric() -> PositiveMetric {
+fn point_metric() -> Metric {
     let topology = ComplexCore::admit(CandidateInput::signed([0], 1, 1, None).unwrap()).unwrap();
-    EuclideanRealization::admit(topology, 1, vec![0.0], RealizationLimit::DEFAULT)
+    Geometry::admit(topology, 1, vec![0.0], Limit::DEFAULT)
         .unwrap()
         .circumcentric_pairing()
         .unwrap()
@@ -82,12 +84,14 @@ fn mean_zero_poisson_solves_weak_equation_and_gauge() {
     let metric = sphere_metric();
     let rho = compatible_density(&metric, 0, 1);
     let problem = metric.mean_zero_poisson_density(rho.clone()).unwrap();
-    let executor = NativeExecutor::parallel(NonZeroUsize::new(2).unwrap());
+    let executor = Executor::parallel(NonZeroUsize::new(2).unwrap());
     let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
     let work = WorkLimit::new(u64::MAX);
-    let prepared = problem.prepare_with(&executor, storage, work).unwrap();
-    let mut workspace = prepared.workspace_for(&problem, storage).unwrap();
-    let solution = prepared.solve(&problem, &mut workspace, work).unwrap();
+    let prepared = problem
+        .prepare(Policy::new(executor, storage, work))
+        .unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
+    let solution = prepared.solve(&problem, &mut workspace).unwrap();
 
     let u = solution.potential();
     let laplacian = metric.laplacian(0).unwrap().apply(u).unwrap();
@@ -114,22 +118,19 @@ fn preparation_reuses_factors_across_compatible_rhs_and_rejects_foreign_owner() 
     let second = metric
         .mean_zero_poisson_density(compatible_density(&metric, 1, 2))
         .unwrap();
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
     let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
     let work = WorkLimit::new(u64::MAX);
-    let prepared = first.prepare_with(&executor, storage, work).unwrap();
-    let mut workspace = prepared.workspace_for(&second, storage).unwrap();
-    prepared.solve(&second, &mut workspace, work).unwrap();
+    let prepared = first.prepare(Policy::new(executor, storage, work)).unwrap();
+    let mut workspace = prepared.workspace_for(&second).unwrap();
+    prepared.solve(&second, &mut workspace).unwrap();
 
     let foreign_metric = sphere_metric();
     let foreign = foreign_metric
         .mean_zero_poisson_density(compatible_density(&foreign_metric, 0, 1))
         .unwrap();
     assert_eq!(
-        prepared
-            .workspace_for(&foreign, storage)
-            .unwrap_err()
-            .reason(),
+        prepared.workspace_for(&foreign).unwrap_err().reason(),
         "problem_mismatch"
     );
 }
@@ -149,12 +150,14 @@ fn point_has_the_canonical_analytic_zero_solution() {
     let problem = metric
         .mean_zero_poisson_density(density(&metric, vec![0.0]))
         .unwrap();
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
     let storage = StorageLimit::new(0, 0).unwrap();
     let work = WorkLimit::new(0);
-    let prepared = problem.prepare_with(&executor, storage, work).unwrap();
-    let mut workspace = prepared.workspace_for(&problem, storage).unwrap();
-    let solution = prepared.solve(&problem, &mut workspace, work).unwrap();
+    let prepared = problem
+        .prepare(Policy::new(executor, storage, work))
+        .unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
+    let solution = prepared.solve(&problem, &mut workspace).unwrap();
     assert_eq!(solution.potential().coefficients(), &[0.0]);
 }
 
@@ -164,11 +167,11 @@ fn resource_and_cancellation_fail_before_publication() {
     let problem = metric
         .mean_zero_poisson_density(compatible_density(&metric, 0, 1))
         .unwrap();
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
     let zero = StorageLimit::new(0, 0).unwrap();
     assert_eq!(
         problem
-            .prepare_with(&executor, zero, WorkLimit::new(u64::MAX))
+            .prepare(Policy::new(executor, zero, WorkLimit::new(u64::MAX)))
             .unwrap_err()
             .reason(),
         "resource_limit"
@@ -178,10 +181,8 @@ fn resource_and_cancellation_fail_before_publication() {
     cancelled_prepare.cancel();
     assert_eq!(
         problem
-            .prepare_with_cancellation(
-                &executor,
-                unlimited,
-                WorkLimit::new(u64::MAX),
+            .prepare_cancellable(
+                Policy::new(executor, unlimited, WorkLimit::new(u64::MAX)),
                 &cancelled_prepare,
             )
             .unwrap_err()
@@ -189,26 +190,14 @@ fn resource_and_cancellation_fail_before_publication() {
         "cancelled"
     );
     let prepared = problem
-        .prepare_with(&executor, unlimited, WorkLimit::new(u64::MAX))
+        .prepare(Policy::new(executor, unlimited, WorkLimit::new(u64::MAX)))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&problem, unlimited).unwrap();
-    assert_eq!(
-        prepared
-            .solve(&problem, &mut workspace, WorkLimit::new(0))
-            .unwrap_err()
-            .reason(),
-        "resource_limit"
-    );
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
     let cancellation = CancellationToken::new();
     cancellation.cancel();
     assert_eq!(
         prepared
-            .solve_cancellable(
-                &problem,
-                &mut workspace,
-                WorkLimit::new(u64::MAX),
-                &cancellation,
-            )
+            .solve_cancellable(&problem, &mut workspace, &cancellation)
             .unwrap_err()
             .reason(),
         "cancelled"
@@ -220,12 +209,14 @@ fn large_cycle_uses_the_bounded_sparse_path() {
     let metric = cycle_metric(65);
     let rho = compatible_density(&metric, 7, 31);
     let problem = metric.mean_zero_poisson_density(rho).unwrap();
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
     let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
     let work = WorkLimit::new(u64::MAX);
-    let prepared = problem.prepare_with(&executor, storage, work).unwrap();
-    let mut workspace = prepared.workspace_for(&problem, storage).unwrap();
-    let solution = prepared.solve(&problem, &mut workspace, work).unwrap();
+    let prepared = problem
+        .prepare(Policy::new(executor, storage, work))
+        .unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
+    let solution = prepared.solve(&problem, &mut workspace).unwrap();
     assert!(solution.evidence().residual_bound() <= 1.0e-10);
     assert_eq!(solution.evidence().exact_fallback_rows(), 0);
 }
@@ -243,14 +234,14 @@ fn integrated_load_uses_the_same_gauged_solver_without_density_conversion() {
     let density_problem = metric
         .mean_zero_poisson_density(compatible_density(&metric, 0, 1))
         .unwrap();
-    let executor = NativeExecutor::sequential();
+    let executor = Executor::sequential();
     let storage = StorageLimit::new(u64::MAX, u64::MAX).unwrap();
     let work = WorkLimit::new(u64::MAX);
     let prepared = density_problem
-        .prepare_with(&executor, storage, work)
+        .prepare(Policy::new(executor, storage, work))
         .unwrap();
-    let mut workspace = prepared.workspace_for(&problem, storage).unwrap();
-    let solution = prepared.solve(&problem, &mut workspace, work).unwrap();
+    let mut workspace = prepared.workspace_for(&problem).unwrap();
+    let solution = prepared.solve(&problem, &mut workspace).unwrap();
 
     let weights = metric.hodge_coefficients_slice(0).unwrap();
     let mean = weights

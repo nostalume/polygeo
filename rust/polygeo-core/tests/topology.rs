@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use polygeo_core::{CandidateInput, ComplexCore, TopologyError};
+use polygeo_core::{
+    topology::CandidateInput, topology::Complex as ComplexCore, topology::TopologyError,
+};
 use proptest::prelude::*;
 
 fn candidate(rows: &[&[i128]], vertex_count: Option<usize>) -> CandidateInput {

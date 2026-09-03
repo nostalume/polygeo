@@ -1,6 +1,377 @@
-#[pyclass(name = "ChainIsomorphism", frozen, module = "polygeo")]
-struct PyChainIsomorphism {
-    relation: CoreChainIsomorphism<IntegerRing>,
+use num_bigint::BigInt;
+use numpy::{PyArray1, PyArrayMethods};
+use polygeo_core::chain::{
+    BigIntEncoding, Chain, ChainComplex, ChainError as CoreChainError,
+    ChainIsomorphism as CoreChainIsomorphism, ChainLawLimit, Cochain, CompositionError,
+    Csr as CsrRepresentation, CsrBuildLimit, CsrError as RepresentationError, CsrEstimate,
+    Element as ExactCoreElement, ExactRational, IntegerRing, LinearMap, RationalField,
+    ReducedFractionEncoding, Space, Variance, compose,
+};
+use polygeo_core::solve::{StorageLimit, WorkLimit};
+use polygeo_core::topology::{TopologyDetailValue, TopologyError};
+use pyo3::create_exception;
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyBytes, PyDict, PyInt, PyModule, PyTuple, PyType};
+
+use crate::array::{fill_indices, filled_array_1d};
+use crate::classified_exception;
+use crate::halfedge::halfedge_degree;
+use crate::topology::{halfedge_topology_error, transport_error};
+
+type PyBoundaryParts = (Py<PyAny>, Py<PyAny>, Py<PyAny>, (usize, usize));
+
+create_exception!(
+    _polygeo_native,
+    ChainError,
+    PyValueError,
+    "Classified exact chain-algebra failure."
+);
+
+#[pyclass(name = "IntegerRing", frozen, module = "polygeo.chain")]
+struct PyIntegerRing;
+
+#[pyclass(name = "RationalField", frozen, module = "polygeo.chain")]
+struct PyRationalField;
+
+#[pyclass(name = "Chain", frozen, module = "polygeo.chain")]
+struct PyChainVariance;
+
+#[pyclass(name = "Cochain", frozen, module = "polygeo.chain")]
+struct PyCochainVariance;
+
+#[pyclass(name = "BigIntEncoding", frozen, module = "polygeo.chain")]
+struct PyBigIntEncoding;
+
+#[pyclass(name = "ReducedFractionEncoding", frozen, module = "polygeo.chain")]
+struct PyReducedFractionEncoding;
+
+fn exact_error(reason: &'static str, message: &'static str) -> PyErr {
+    Python::attach(|py| chain_exception(py, reason, message, PyDict::new(py).unbind()))
+}
+
+fn chain_exception(
+    py: Python<'_>,
+    reason: &'static str,
+    message: impl Into<String>,
+    details: Py<PyDict>,
+) -> PyErr {
+    let message = message.into();
+    let error = ChainError::new_err((reason, message, details.clone_ref(py)));
+    classified_exception(py, error, reason, details)
+}
+
+fn chain_error(error: CoreChainError) -> PyErr {
+    Python::attach(|py| {
+        let details = PyDict::new(py);
+        let translation_failed = match error {
+            CoreChainError::BasisIndexOutside { index, bound } => {
+                details.set_item("index", index).is_err()
+                    || details.set_item("bound", bound).is_err()
+            }
+            CoreChainError::SpaceMismatch
+            | CoreChainError::NotSimplicial
+            | CoreChainError::CoefficientFieldRequired
+            | CoreChainError::NormalizationNotInvertible
+            | CoreChainError::Topology(_) => false,
+        };
+        if translation_failed {
+            return exact_error("translation", "failed to translate chain failure");
+        }
+        chain_exception(py, error.reason(), error.to_string(), details.unbind())
+    })
+}
+
+fn composition_error(error: CompositionError) -> PyErr {
+    exact_error(error.reason(), "exact map composition was rejected")
+}
+
+fn chain_topology_error(error: TopologyError) -> PyErr {
+    Python::attach(|py| {
+        let details = PyDict::new(py);
+        for field in error.details().fields() {
+            let result = match field.value() {
+                TopologyDetailValue::Signed(value) => details.set_item(field.name(), value),
+                TopologyDetailValue::Unsigned(value) => details.set_item(field.name(), value),
+                TopologyDetailValue::Index(value) => details.set_item(field.name(), value),
+                TopologyDetailValue::Text(value) => details.set_item(field.name(), value),
+                _ => continue,
+            };
+            if result.is_err() {
+                return exact_error("translation", "failed to translate topology failure");
+            }
+        }
+        chain_exception(py, error.reason(), error.to_string(), details.unbind())
+    })
+}
+
+fn representation_error(error: RepresentationError) -> PyErr {
+    Python::attach(|py| {
+        let details = PyDict::new(py);
+        if let Some((axis, required, limit)) = error.resource_limit() {
+            let translated = details
+                .set_item("axis", axis)
+                .and_then(|()| details.set_item("required", required))
+                .and_then(|()| details.set_item("limit", limit))
+                .and_then(|()| {
+                    details.set_item(
+                        "phase",
+                        error
+                            .resource_phase()
+                            .expect("resource details always carry a phase"),
+                    )
+                });
+            if translated.is_err() {
+                return exact_error("translation", "failed to translate representation failure");
+            }
+        }
+        chain_exception(py, error.reason(), error.to_string(), details.unbind())
+    })
+}
+
+#[pyclass(
+    name = "ChainLawLimit",
+    frozen,
+    module = "polygeo.chain",
+    skip_from_py_object
+)]
+#[derive(Clone, Copy)]
+pub(crate) struct PyChainLawLimit {
+    retained_logical_bytes: u64,
+    peak_live_logical_bytes: u64,
+    terms: u64,
+}
+
+impl PyChainLawLimit {
+    pub(crate) const DEFAULT: Self = Self {
+        retained_logical_bytes: 128 * 1024 * 1024,
+        peak_live_logical_bytes: 512 * 1024 * 1024,
+        terms: 100_000_000,
+    };
+
+    pub(crate) fn core(self) -> ChainLawLimit {
+        let storage = StorageLimit::new(self.retained_logical_bytes, self.peak_live_logical_bytes)
+            .expect("Python construction preserves storage lifecycle");
+        ChainLawLimit::new(storage, WorkLimit::new(self.terms))
+    }
+}
+
+#[pymethods]
+impl PyChainLawLimit {
+    #[new]
+    #[pyo3(signature = (*, retained_logical_bytes=134_217_728, peak_live_logical_bytes=536_870_912, terms=100_000_000))]
+    fn new(
+        retained_logical_bytes: u64,
+        peak_live_logical_bytes: u64,
+        terms: u64,
+    ) -> PyResult<Self> {
+        StorageLimit::new(retained_logical_bytes, peak_live_logical_bytes).ok_or_else(|| {
+            transport_error(
+                "limit",
+                "peak_live_logical_bytes must contain retained_logical_bytes",
+            )
+        })?;
+        Ok(Self {
+            retained_logical_bytes,
+            peak_live_logical_bytes,
+            terms,
+        })
+    }
+
+    #[getter]
+    const fn retained_logical_bytes(&self) -> u64 {
+        self.retained_logical_bytes
+    }
+    #[getter]
+    const fn peak_live_logical_bytes(&self) -> u64 {
+        self.peak_live_logical_bytes
+    }
+    #[getter]
+    const fn terms(&self) -> u64 {
+        self.terms
+    }
+}
+
+#[pyclass(
+    name = "CsrEstimate",
+    frozen,
+    module = "polygeo.chain",
+    skip_from_py_object
+)]
+#[derive(Clone, Copy)]
+struct PyCsrEstimate {
+    inner: CsrEstimate,
+}
+
+#[pymethods]
+impl PyCsrEstimate {
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        self.inner.shape()
+    }
+
+    #[getter]
+    fn nnz_bound(&self) -> usize {
+        self.inner.nnz_bound()
+    }
+
+    #[getter]
+    fn coefficient_bits_bound(&self) -> u64 {
+        self.inner.coefficient_bits_bound()
+    }
+
+    #[getter]
+    fn retained_logical_bytes_bound(&self) -> u64 {
+        self.inner.retained_logical_bytes_bound()
+    }
+
+    #[getter]
+    fn peak_live_logical_bytes_bound(&self) -> u64 {
+        self.inner.peak_live_logical_bytes_bound()
+    }
+
+    #[getter]
+    fn scratch_entries_bound(&self) -> usize {
+        self.inner.scratch_entries_bound()
+    }
+
+    #[getter]
+    fn scalar_steps_bound(&self) -> u64 {
+        self.inner.scalar_steps_bound()
+    }
+
+    #[getter]
+    fn canonicalization_required(&self) -> bool {
+        self.inner.canonicalization_required()
+    }
+
+    fn as_limit(&self) -> PyCsrBuildLimit {
+        PyCsrBuildLimit::for_estimate(self.inner)
+    }
+}
+
+#[pyclass(
+    name = "CsrBuildLimit",
+    frozen,
+    module = "polygeo.chain",
+    skip_from_py_object
+)]
+#[derive(Clone, Copy)]
+struct PyCsrBuildLimit {
+    retained_logical_bytes: u64,
+    peak_live_logical_bytes: u64,
+    coefficient_bits: u64,
+    scalar_steps: u64,
+}
+
+impl PyCsrBuildLimit {
+    const fn for_estimate(estimate: CsrEstimate) -> Self {
+        Self {
+            retained_logical_bytes: estimate.retained_logical_bytes_bound(),
+            peak_live_logical_bytes: estimate.peak_live_logical_bytes_bound(),
+            coefficient_bits: estimate.coefficient_bits_bound(),
+            scalar_steps: estimate.scalar_steps_bound(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyCsrBuildLimit {
+    #[getter]
+    const fn retained_logical_bytes(&self) -> u64 {
+        self.retained_logical_bytes
+    }
+
+    #[getter]
+    const fn peak_live_logical_bytes(&self) -> u64 {
+        self.peak_live_logical_bytes
+    }
+
+    #[getter]
+    const fn coefficient_bits(&self) -> u64 {
+        self.coefficient_bits
+    }
+
+    #[getter]
+    const fn scalar_steps(&self) -> u64 {
+        self.scalar_steps
+    }
+
+    #[pyo3(signature = (*, retained_logical_bytes=None, peak_live_logical_bytes=None, coefficient_bits=None, scalar_steps=None))]
+    fn replace(
+        &self,
+        retained_logical_bytes: Option<u64>,
+        peak_live_logical_bytes: Option<u64>,
+        coefficient_bits: Option<u64>,
+        scalar_steps: Option<u64>,
+    ) -> PyResult<Self> {
+        let changed = Self {
+            retained_logical_bytes: retained_logical_bytes.unwrap_or(self.retained_logical_bytes),
+            peak_live_logical_bytes: peak_live_logical_bytes
+                .unwrap_or(self.peak_live_logical_bytes),
+            coefficient_bits: coefficient_bits.unwrap_or(self.coefficient_bits),
+            scalar_steps: scalar_steps.unwrap_or(self.scalar_steps),
+        };
+        if StorageLimit::new(
+            changed.retained_logical_bytes,
+            changed.peak_live_logical_bytes,
+        )
+        .is_none()
+        {
+            return Err(exact_error(
+                "limit",
+                "peak_live_logical_bytes must contain retained_logical_bytes",
+            ));
+        }
+        Ok(changed)
+    }
+}
+
+fn admitted_build_limit(estimate: CsrEstimate, limit: PyCsrBuildLimit) -> CsrBuildLimit {
+    let storage = StorageLimit::new(limit.retained_logical_bytes, limit.peak_live_logical_bytes)
+        .expect("Python limit construction preserves the storage lifecycle");
+    CsrBuildLimit::for_estimate(estimate)
+        .with_storage(storage)
+        .with_coefficient_bits(limit.coefficient_bits)
+        .with_scalar_steps(WorkLimit::new(limit.scalar_steps))
+}
+
+fn filled_exact_i64(
+    py: Python<'_>,
+    length: usize,
+    fill: impl FnOnce(&mut [i64]) -> PyResult<()>,
+) -> PyResult<Py<PyAny>> {
+    let array = PyArray1::<i64>::zeros(py, length, false);
+    let mut writable = array
+        .try_readwrite()
+        .map_err(|_| exact_error("projection", "failed to acquire owned projection storage"))?;
+    let output = writable
+        .as_slice_mut()
+        .map_err(|_| exact_error("projection", "owned projection storage is not contiguous"))?;
+    fill(output)?;
+    drop(writable);
+    Ok(array.unbind().into_any())
+}
+
+fn checked_bigint_i64(value: &BigInt) -> Option<i64> {
+    i64::try_from(value).ok()
+}
+
+fn fill_exact_indices(values: &[usize], output: &mut [i64]) -> PyResult<()> {
+    for (target, value) in output.iter_mut().zip(values) {
+        *target = i64::try_from(*value).map_err(|_| {
+            exact_error(
+                "index_overflow",
+                "an exact CSR index is outside the requested int64 projection",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[pyclass(name = "ChainIsomorphism", frozen, module = "polygeo.chain")]
+pub(crate) struct PyChainIsomorphism {
+    pub(crate) relation: CoreChainIsomorphism<IntegerRing>,
 }
 
 #[pymethods]
@@ -36,17 +407,36 @@ impl PyChainIsomorphism {
             })
             .map_err(chain_topology_error)
     }
+
+    fn signed_permutation_numpy_copy(
+        &self,
+        py: Python<'_>,
+        degree: isize,
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let (targets, signs) = self
+            .relation
+            .signed_permutation(halfedge_degree(degree)?)
+            .map_err(halfedge_topology_error)?;
+        let target_copy = filled_array_1d(py, targets.len(), |output| {
+            fill_indices::<i64>(targets.iter().copied(), output)
+        })?;
+        let sign_copy = filled_array_1d(py, signs.len(), |output| {
+            output.copy_from_slice(signs);
+            Ok(())
+        })?;
+        Ok((target_copy, sign_copy))
+    }
 }
 
 #[derive(Clone)]
-enum ExactComplex {
+pub(crate) enum ExactComplex {
     Integer(ChainComplex<IntegerRing>),
     Rational(ChainComplex<RationalField>),
 }
 
-#[pyclass(name = "ChainComplex", frozen, module = "polygeo")]
-struct NativeChainComplex {
-    inner: ExactComplex,
+#[pyclass(name = "ChainComplex", frozen, module = "polygeo.chain")]
+pub(crate) struct NativeChainComplex {
+    pub(crate) inner: ExactComplex,
 }
 
 impl NativeChainComplex {
@@ -158,7 +548,7 @@ impl NativeChainComplex {
     }
 }
 
-#[pyclass(name = "CochainComplex", frozen, module = "polygeo")]
+#[pyclass(name = "CochainComplex", frozen, module = "polygeo.chain")]
 struct NativeCochainComplex {
     inner: ExactComplex,
 }
@@ -188,7 +578,7 @@ enum ExactSpace {
     RationalCochain(Space<RationalField, Cochain>),
 }
 
-#[pyclass(name = "Space", frozen, module = "polygeo")]
+#[pyclass(name = "Space", frozen, module = "polygeo.chain")]
 struct NativeChainSpace {
     inner: ExactSpace,
 }
@@ -246,7 +636,7 @@ fn bigint_to_python<'py>(py: Python<'py>, value: &BigInt) -> PyResult<Bound<'py,
     )
 }
 
-fn bigint_tuple<'py, 'a>(
+pub(crate) fn bigint_tuple<'py, 'a>(
     py: Python<'py>,
     values: impl IntoIterator<Item = &'a BigInt>,
 ) -> PyResult<Py<PyTuple>> {
@@ -406,16 +796,16 @@ fn admit_exact_element(
 }
 
 #[derive(Clone)]
-enum ExactElement {
-    IntegerChain(polygeo_core::Element<IntegerRing, Chain, BigIntEncoding>),
-    IntegerCochain(polygeo_core::Element<IntegerRing, Cochain, BigIntEncoding>),
-    RationalChain(polygeo_core::Element<RationalField, Chain, ReducedFractionEncoding>),
-    RationalCochain(polygeo_core::Element<RationalField, Cochain, ReducedFractionEncoding>),
+pub(crate) enum ExactElement {
+    IntegerChain(ExactCoreElement<IntegerRing, Chain, BigIntEncoding>),
+    IntegerCochain(ExactCoreElement<IntegerRing, Cochain, BigIntEncoding>),
+    RationalChain(ExactCoreElement<RationalField, Chain, ReducedFractionEncoding>),
+    RationalCochain(ExactCoreElement<RationalField, Cochain, ReducedFractionEncoding>),
 }
 
-#[pyclass(name = "Element", frozen, module = "polygeo")]
-struct NativeChainElement {
-    inner: ExactElement,
+#[pyclass(name = "Element", frozen, module = "polygeo.chain")]
+pub(crate) struct NativeChainElement {
+    pub(crate) inner: ExactElement,
 }
 
 #[pymethods]
@@ -547,7 +937,7 @@ enum ExactMap {
     RationalCochain(LinearMap<RationalField, Cochain, Cochain>),
 }
 
-#[pyclass(name = "LinearMap", frozen, module = "polygeo")]
+#[pyclass(name = "LinearMap", frozen, module = "polygeo.chain")]
 struct NativeLinearMap {
     inner: ExactMap,
 }
@@ -733,7 +1123,7 @@ enum ExactCsr {
     RationalCochain(CsrRepresentation<RationalField, Cochain, Cochain, ReducedFractionEncoding>),
 }
 
-#[pyclass(name = "CsrRepresentation", frozen, module = "polygeo")]
+#[pyclass(name = "Csr", frozen, module = "polygeo.chain")]
 struct NativeCsrRepresentation {
     inner: ExactCsr,
 }
@@ -766,7 +1156,7 @@ fn csr_pattern_arrays(
     Ok((offsets, columns))
 }
 
-#[pyclass(name = "IntegerCsrParts", frozen, module = "polygeo")]
+#[pyclass(name = "IntegerCsrParts", frozen, module = "polygeo.chain")]
 struct PyIntegerCsrParts {
     row_offsets: Py<PyAny>,
     column_indices: Py<PyAny>,
@@ -797,7 +1187,7 @@ impl PyIntegerCsrParts {
     }
 }
 
-#[pyclass(name = "RationalCsrParts", frozen, module = "polygeo")]
+#[pyclass(name = "RationalCsrParts", frozen, module = "polygeo.chain")]
 struct PyRationalCsrParts {
     row_offsets: Py<PyAny>,
     column_indices: Py<PyAny>,
@@ -836,12 +1226,7 @@ impl PyRationalCsrParts {
 
 fn integer_parts_record(
     py: Python<'_>,
-    representation: &CsrRepresentation<
-        IntegerRing,
-        impl polygeo_core::Variance,
-        impl polygeo_core::Variance,
-        BigIntEncoding,
-    >,
+    representation: &CsrRepresentation<IntegerRing, impl Variance, impl Variance, BigIntEncoding>,
 ) -> PyResult<PyIntegerCsrParts> {
     let (row_offsets, column_indices) = csr_pattern_arrays(
         py,
@@ -860,8 +1245,8 @@ fn rational_parts_record(
     py: Python<'_>,
     representation: &CsrRepresentation<
         RationalField,
-        impl polygeo_core::Variance,
-        impl polygeo_core::Variance,
+        impl Variance,
+        impl Variance,
         ReducedFractionEncoding,
     >,
 ) -> PyResult<PyRationalCsrParts> {
@@ -1026,8 +1411,8 @@ fn integer_scipy_parts<S, T>(
     representation: &CsrRepresentation<IntegerRing, S, T, BigIntEncoding>,
 ) -> PyResult<PyBoundaryParts>
 where
-    S: polygeo_core::Variance,
-    T: polygeo_core::Variance,
+    S: Variance,
+    T: Variance,
 {
     let coefficients = filled_exact_i64(py, representation.coefficients().len(), |output| {
         for (target, value) in output.iter_mut().zip(representation.coefficients()) {
@@ -1047,6 +1432,37 @@ where
         fill_exact_indices(representation.row_offsets(), output)
     })?;
     Ok((coefficients, indices, offsets, representation.shape()))
+}
+
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyIntegerRing>()?;
+    module.add_class::<PyRationalField>()?;
+    module.add_class::<PyChainVariance>()?;
+    module.add_class::<PyCochainVariance>()?;
+    module.add_class::<PyBigIntEncoding>()?;
+    module.add_class::<PyReducedFractionEncoding>()?;
+    module.add_class::<PyChainIsomorphism>()?;
+    module.add_class::<NativeChainComplex>()?;
+    module.add_class::<NativeCochainComplex>()?;
+    module.add_class::<NativeChainSpace>()?;
+    module.add_class::<NativeChainElement>()?;
+    module.add_class::<NativeLinearMap>()?;
+    module.add_class::<PyCsrEstimate>()?;
+    module.add_class::<PyCsrBuildLimit>()?;
+    module.add_class::<PyChainLawLimit>()?;
+    module.add_class::<NativeCsrRepresentation>()?;
+    module.add_class::<PyIntegerCsrParts>()?;
+    module.add_class::<PyRationalCsrParts>()?;
+    module.add("ZZ", Py::new(module.py(), PyIntegerRing)?)?;
+    module.add("QQ", Py::new(module.py(), PyRationalField)?)?;
+    module.add(
+        "DEFAULT_LAW_LIMIT",
+        Py::new(module.py(), PyChainLawLimit::DEFAULT)?,
+    )?;
+    crate::homology::register(module)?;
+    let error = module.py().get_type::<ChainError>();
+    error.setattr("__module__", "polygeo.chain")?;
+    module.add("ChainError", error)
 }
 
 #[cfg(test)]

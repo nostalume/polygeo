@@ -5,12 +5,15 @@ use std::sync::Arc;
 
 use num_bigint::BigInt;
 use num_traits::Zero;
-use polygeo_core::ExactRational;
-use polygeo_core::{
-    BigIntEncoding, CandidateInput, CoefficientSlice, CoefficientSystem, ComplexCore,
-    CsrBuildLimit, CsrRepresentation, EuclideanDomain, Field, FractionField, FractionFieldOf,
-    HalfedgeSurfaceCore, IntegerRing, IntegralChainComplex, IntegralCochain, PresentationError,
-    RationalField, ReducedFractionEncoding, Ring, RingMorphism, WorkLimit, compose,
+use polygeo_core::chain::{
+    BigIntEncoding, CoefficientSystem, Csr, CsrBuildLimit, EuclideanDomain, ExactRational, Field,
+    FractionField, FractionFieldOf, IntegerRing, IntegralChainComplex, IntegralCochain,
+    PresentationError, RationalField, ReducedFractionEncoding, Ring, RingMorphism, compose,
+};
+use polygeo_core::solve::WorkLimit;
+use polygeo_core::topology::{
+    CandidateInput, CoefficientSlice, Complex as ComplexCore,
+    HalfedgeSurface as HalfedgeSurfaceCore,
 };
 
 fn triangle() -> Arc<ComplexCore> {
@@ -208,26 +211,23 @@ fn rational_csr_shares_patterns_not_products() {
         .over(rationals)
         .element([(0, ExactRational::new(BigInt::from(5), BigInt::from(7)))])
         .unwrap();
-    let integer_estimate = CsrRepresentation::estimate(&integral_boundary, BigIntEncoding).unwrap();
-    let rational_estimate =
-        CsrRepresentation::estimate(&rational_boundary, ReducedFractionEncoding).unwrap();
+    let integer_estimate = Csr::estimate(&integral_boundary, BigIntEncoding).unwrap();
+    let rational_estimate = Csr::estimate(&rational_boundary, ReducedFractionEncoding).unwrap();
     assert_eq!(rational_estimate.coefficient_bits_bound(), 1);
-    let integer_csr = CsrRepresentation::build(
+    let integer_csr = Csr::build(
         &integral_boundary,
         BigIntEncoding,
         CsrBuildLimit::for_estimate(integer_estimate),
     )
     .unwrap();
-    let rational_csr = CsrRepresentation::build(
+    let rational_csr = Csr::build(
         &rational_boundary,
         ReducedFractionEncoding,
         CsrBuildLimit::for_estimate(rational_estimate),
     )
     .unwrap();
-    assert_eq!(
-        integer_csr.matrix().pattern(),
-        rational_csr.matrix().pattern()
-    );
+    assert_eq!(integer_csr.row_offsets(), rational_csr.row_offsets());
+    assert_eq!(integer_csr.column_indices(), rational_csr.column_indices());
     assert!(
         rational_csr
             .coefficients()
@@ -238,7 +238,7 @@ fn rational_csr_shares_patterns_not_products() {
         rational_csr.apply(&fractional).unwrap().coefficients(),
         rational_boundary.apply(&fractional).unwrap().coefficients()
     );
-    let second = CsrRepresentation::build(
+    let second = Csr::build(
         &rational_boundary,
         ReducedFractionEncoding,
         CsrBuildLimit::for_estimate(rational_estimate),
@@ -270,7 +270,7 @@ fn rational_base_change_preserves_halfedge_signed_and_empty_recipes() {
     assert_eq!(changed.coefficients(), applied.coefficients());
 
     let (_simplicial, correspondence) = surface.to_complex().unwrap();
-    let signed = correspondence.isomorphism().forward(2).unwrap();
+    let signed = correspondence.forward(2).unwrap();
     let signed_value = signed.source().element([(0, BigInt::from(13))]).unwrap();
     let changed = signed.apply(&signed_value).unwrap().over(rationals);
     let applied = signed
@@ -987,7 +987,7 @@ fn explicit_integer_csr_is_deterministic_budgeted_and_map_bound() {
     let owner = triangle();
     let complex = owner.chain_complex();
     let map = complex.boundary(2).unwrap();
-    let estimate = CsrRepresentation::estimate(&map, BigIntEncoding).unwrap();
+    let estimate = Csr::estimate(&map, BigIntEncoding).unwrap();
 
     assert_eq!(estimate.shape(), (3, 1));
     assert_eq!(estimate.nnz_bound(), 3);
@@ -995,14 +995,10 @@ fn explicit_integer_csr_is_deterministic_budgeted_and_map_bound() {
     assert!(estimate.scalar_steps_bound() >= estimate.nnz_bound() as u64);
     assert_eq!(estimate.coefficient_bits_bound(), 1);
     assert!(!estimate.canonicalization_required());
-    assert_eq!(
-        estimate,
-        CsrRepresentation::estimate(&map, BigIntEncoding).unwrap()
-    );
+    assert_eq!(estimate, Csr::estimate(&map, BigIntEncoding).unwrap());
 
     let representation =
-        CsrRepresentation::build(&map, BigIntEncoding, CsrBuildLimit::for_estimate(estimate))
-            .unwrap();
+        Csr::build(&map, BigIntEncoding, CsrBuildLimit::for_estimate(estimate)).unwrap();
     assert!(representation.represented_map().same_identity(&map));
     assert_eq!(representation.shape(), (3, 1));
     assert_eq!(representation.row_offsets(), &[0, 1, 2, 3]);
@@ -1021,9 +1017,7 @@ fn explicit_integer_csr_is_deterministic_budgeted_and_map_bound() {
         assert_eq!(represented.coefficients(), direct.coefficients());
     }
 
-    let second =
-        CsrRepresentation::build(&map, BigIntEncoding, CsrBuildLimit::for_estimate(estimate))
-            .unwrap();
+    let second = Csr::build(&map, BigIntEncoding, CsrBuildLimit::for_estimate(estimate)).unwrap();
     assert_ne!(
         representation.row_offsets().as_ptr(),
         second.row_offsets().as_ptr()
@@ -1045,11 +1039,10 @@ fn csr_of_dual_is_the_canonical_transpose() {
     let complex = owner.chain_complex();
     let primal = complex.boundary(2).unwrap();
     let dual = primal.dual();
-    let estimate = CsrRepresentation::estimate(&dual, BigIntEncoding).unwrap();
+    let estimate = Csr::estimate(&dual, BigIntEncoding).unwrap();
     assert!(estimate.scratch_entries_bound() > 0);
     let representation =
-        CsrRepresentation::build(&dual, BigIntEncoding, CsrBuildLimit::for_estimate(estimate))
-            .unwrap();
+        Csr::build(&dual, BigIntEncoding, CsrBuildLimit::for_estimate(estimate)).unwrap();
 
     assert_eq!(representation.shape(), (1, 3));
     assert_eq!(representation.row_offsets(), &[0, 3]);

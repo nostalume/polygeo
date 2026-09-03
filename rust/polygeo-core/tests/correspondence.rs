@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use num_bigint::BigInt;
 use polygeo_core::{
-    BigIntEncoding, CandidateInput, ChainLawLimit, ComplexCore, CorrespondenceDirection,
-    CsrBuildLimit, CsrRepresentation, HalfedgeSurfaceCore, StorageLimit, WorkLimit, compose,
+    chain::BigIntEncoding, chain::ChainIsomorphism, chain::ChainLawLimit, chain::Csr,
+    chain::CsrBuildLimit, chain::IntegerRing, chain::compose, solve::StorageLimit,
+    solve::WorkLimit, topology::CandidateInput, topology::Complex as ComplexCore,
+    topology::HalfedgeSurface as HalfedgeSurfaceCore,
 };
 
 fn oriented_complex(rows: &[[i64; 3]]) -> Arc<ComplexCore> {
@@ -45,34 +47,26 @@ fn conversion_chain_law_is_preflighted_and_retryable() {
         Some(("terms", required, 0)) if required > 0
     ));
     let (_, correspondence) = HalfedgeSurfaceCore::from_complex(&complex).unwrap();
-    correspondence.verify_chain_law().unwrap();
+    correspondence.verify(ChainLawLimit::DEFAULT).unwrap();
 }
 
 fn tetrahedron() -> Arc<ComplexCore> {
     oriented_complex(&[[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]])
 }
 
-fn assert_signed_bijections(correspondence: &polygeo_core::SurfaceCorrespondence) {
+fn assert_signed_bijections(correspondence: &ChainIsomorphism<IntegerRing>) {
     for degree in 0..=2 {
-        let permutation = correspondence.permutation(degree).unwrap();
+        let (targets, signs) = correspondence.signed_permutation(degree).unwrap();
         assert_eq!(
-            permutation
-                .target_of_source()
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .len(),
-            permutation.len()
+            targets.iter().copied().collect::<BTreeSet<_>>().len(),
+            targets.len()
         );
-        assert!(
-            permutation
-                .signs()
-                .iter()
-                .all(|sign| matches!(sign, -1 | 1))
-        );
-        for source in 0..permutation.len() {
-            let (target, sign) = permutation.map_basis(source).unwrap();
-            assert_eq!(permutation.inverse_basis(target).unwrap(), (source, sign));
+        assert!(signs.iter().all(|sign| matches!(sign, -1 | 1)));
+        for (source, &target) in targets.iter().enumerate() {
+            assert_eq!(
+                targets.iter().position(|value| *value == target),
+                Some(source)
+            );
         }
     }
 }
@@ -82,12 +76,8 @@ fn oriented_triangle_complex_constructs_distinct_surface_and_checked_corresponde
     let complex = tetrahedron();
     let (surface, correspondence) = HalfedgeSurfaceCore::from_complex(&complex).unwrap();
 
-    assert_eq!(
-        correspondence.direction(),
-        CorrespondenceDirection::ComplexToSurface
-    );
-    assert!(Arc::ptr_eq(correspondence.complex_owner(), &complex));
-    assert!(Arc::ptr_eq(correspondence.surface_owner(), &surface));
+    assert!(correspondence.source().same_owner(&complex.chain_complex()));
+    assert!(correspondence.target().same_owner(&surface.chain_complex()));
     assert_eq!(
         (
             surface.vertex_count(),
@@ -99,9 +89,9 @@ fn oriented_triangle_complex_constructs_distinct_surface_and_checked_corresponde
     assert_eq!(surface.euler_characteristic(), 2);
     assert_eq!(surface.genus(), Some(0));
     assert_signed_bijections(&correspondence);
-    correspondence.verify_chain_law().unwrap();
+    correspondence.verify(ChainLawLimit::DEFAULT).unwrap();
 
-    let relation = correspondence.isomorphism();
+    let relation = &correspondence;
     let source_value = relation
         .source()
         .space(2)
@@ -144,8 +134,8 @@ fn oriented_triangle_complex_constructs_distinct_surface_and_checked_corresponde
     let composite = compose(&target_boundary, &forward).unwrap();
     assert_eq!(composite.execution_steps(), 2);
     assert!(composite.same_identity(&composite.dual().dual()));
-    let estimate = CsrRepresentation::estimate(&composite, BigIntEncoding).unwrap();
-    let representation = CsrRepresentation::build(
+    let estimate = Csr::estimate(&composite, BigIntEncoding).unwrap();
+    let representation = Csr::build(
         &composite,
         BigIntEncoding,
         CsrBuildLimit::for_estimate(estimate),
@@ -162,19 +152,15 @@ fn triangular_surface_constructs_distinct_complex_and_reverse_correspondence() {
     let surface = HalfedgeSurfaceCore::admit(common::polygon_disk(3)).unwrap();
     let (complex, correspondence) = surface.to_complex().unwrap();
 
-    assert_eq!(
-        correspondence.direction(),
-        CorrespondenceDirection::SurfaceToComplex
-    );
-    assert!(Arc::ptr_eq(correspondence.complex_owner(), &complex));
-    assert!(Arc::ptr_eq(correspondence.surface_owner(), &surface));
+    assert!(correspondence.source().same_owner(&surface.chain_complex()));
+    assert!(correspondence.target().same_owner(&complex.chain_complex()));
     assert_eq!(complex.basis(2).unwrap().row_count(), 1);
     assert!(!Arc::ptr_eq(
         &HalfedgeSurfaceCore::from_complex(&complex).unwrap().0,
         &surface,
     ));
     assert_signed_bijections(&correspondence);
-    correspondence.verify_chain_law().unwrap();
+    correspondence.verify(ChainLawLimit::DEFAULT).unwrap();
 }
 
 #[test]

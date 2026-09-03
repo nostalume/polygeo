@@ -1,6 +1,9 @@
 mod common;
 
-use polygeo_core::{FaceKind, HalfedgeInput, HalfedgeSurfaceCore, TopologyDetails, TopologyError};
+use polygeo_core::{
+    topology::FaceKind, topology::HalfedgeInput, topology::HalfedgeSurface as HalfedgeSurfaceCore,
+    topology::TopologyDetails, topology::TopologyError,
+};
 use proptest::prelude::*;
 
 use common::{
@@ -44,7 +47,7 @@ fn disk_exposes_separate_face_domains_and_explicit_owned_materialization() {
     assert_eq!(
         surface
             .face_orbits()
-            .map(polygeo_core::FaceOrbit::kind)
+            .map(polygeo_core::topology::FaceOrbit::kind)
             .collect::<Vec<_>>(),
         [FaceKind::Material, FaceKind::Exterior]
     );
@@ -55,7 +58,7 @@ fn disk_exposes_separate_face_domains_and_explicit_owned_materialization() {
     assert_eq!(
         material
             .halfedges()
-            .map(polygeo_core::Halfedge::index)
+            .map(polygeo_core::topology::Halfedge::index)
             .collect::<Vec<_>>(),
         [0, 1, 2]
     );
@@ -125,7 +128,7 @@ fn admits_annulus_unigon_torus_and_disconnected_presentations() {
             .next()
             .unwrap()
             .halfedges()
-            .map(polygeo_core::Halfedge::index)
+            .map(polygeo_core::topology::Halfedge::index)
             .collect::<Vec<_>>(),
         [0, 5, 2, 4, 1, 3]
     );

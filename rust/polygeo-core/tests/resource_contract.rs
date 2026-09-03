@@ -1,10 +1,14 @@
 use polygeo_core::{
-    BigIntEncoding, CandidateInput, ComplexCore, CsrBuildLimit, CsrRepresentation, IntegerRing,
-    RationalField, ReducedFractionEncoding, StorageLimit, WorkLimit,
+    chain::BigIntEncoding, chain::Csr, chain::CsrBuildLimit, chain::IntegerRing,
+    chain::RationalField, chain::ReducedFractionEncoding, solve::StorageLimit, solve::WorkLimit,
+    topology::CandidateInput, topology::Complex as ComplexCore,
 };
 
-fn boundary()
--> polygeo_core::LinearMap<polygeo_core::IntegerRing, polygeo_core::Chain, polygeo_core::Chain> {
+fn boundary() -> polygeo_core::chain::LinearMap<
+    polygeo_core::chain::IntegerRing,
+    polygeo_core::chain::Chain,
+    polygeo_core::chain::Chain,
+> {
     let candidate = CandidateInput::signed([0_i64, 1, 2], 1, 3, Some(3)).unwrap();
     ComplexCore::admit(candidate)
         .unwrap()
@@ -16,8 +20,8 @@ fn boundary()
 #[test]
 fn rational_csr_accounts_for_both_stored_integer_components() {
     let map = boundary();
-    let integer = CsrRepresentation::estimate(&map, BigIntEncoding).unwrap();
-    let rational = CsrRepresentation::estimate(
+    let integer = Csr::estimate(&map, BigIntEncoding).unwrap();
+    let rational = Csr::estimate(
         &map.over(RationalField::new(IntegerRing)),
         ReducedFractionEncoding,
     )
@@ -41,13 +45,13 @@ fn storage_limit_enforces_its_lifecycle_relation() {
 #[test]
 fn csr_matching_limit_succeeds_and_each_semantic_ceiling_rejects() {
     let map = boundary();
-    let estimate = CsrRepresentation::estimate(&map, BigIntEncoding).unwrap();
+    let estimate = Csr::estimate(&map, BigIntEncoding).unwrap();
     assert!(estimate.peak_live_logical_bytes_bound() > estimate.retained_logical_bytes_bound());
     assert!(
         u64::try_from(estimate.scratch_entries_bound()).unwrap() <= estimate.scalar_steps_bound()
     );
 
-    CsrRepresentation::build(&map, BigIntEncoding, CsrBuildLimit::for_estimate(estimate)).unwrap();
+    Csr::build(&map, BigIntEncoding, CsrBuildLimit::for_estimate(estimate)).unwrap();
 
     let retained = estimate.retained_logical_bytes_bound();
     let peak = estimate.peak_live_logical_bytes_bound();
@@ -82,7 +86,7 @@ fn csr_matching_limit_succeeds_and_each_semantic_ceiling_rejects() {
         ),
     ];
     for (limit, detail) in cases {
-        let error = CsrRepresentation::build(&map, BigIntEncoding, limit).unwrap_err();
+        let error = Csr::build(&map, BigIntEncoding, limit).unwrap_err();
         assert_eq!(error.resource_limit(), Some(detail));
     }
 }
