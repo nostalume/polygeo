@@ -26,9 +26,9 @@ chain/cochain values are both `form.Element`; every represented binary64 map is
 
 | Component | Responsibility |
 |---|---|
-| `rust/polygeo-core` | Mathematical authority: topology, exact algebra, realizations, binary64 spaces and maps, problems, solvers, and surface algorithms. |
-| `rust/polygeo-py` | Direct native Python carriers, including topology/subset admission, classified failures, GIL release, and explicit copied projections. |
-| `polygeo` package | Eight contextual module objects only: `topology`, `chain`, `form`, `geometry`, `solve`, `field`, `plot`, and `mesh`. |
+| `rust/polygeo-core` | Public Rust library and mathematical authority: topology, exact algebra, realizations, binary64 spaces and maps, problems, solvers, and surface algorithms. |
+| `rust/polygeo-py` | Private, non-registry PyO3 adapter: direct native Python carriers, classified failures, GIL release, and copied projections. |
+| `polygeo` package | Python distribution surface with eight contextual modules: `topology`, `chain`, `form`, `geometry`, `solve`, `field`, `plot`, and `mesh`. |
 | native `HalfedgeSurface` / `ChainIsomorphism` | Halfedge admission, topology, direct ordered conversion witnesses, and fresh caller-owned projections. |
 | `mesh.py` | Lazy Trimesh input effect; it immediately admits copied topology and realization owners. |
 | `plot.py` | Lazy Plotly snapshot adapter; it owns presentation only. |
@@ -39,6 +39,39 @@ surface conversion returns one ordered chain isomorphism whose source and target
 complexes retain their exact owners.
 Python input is borrowed for admission and copied into native storage. Returned
 NumPy and SciPy objects are caller-owned snapshots.
+
+## Distribution and verification
+
+Source ownership and distribution ownership are distinct:
+
+| Distribution | Repository owner | Distribution contents |
+|---|---|---|
+| Python `polygeo` | `pyproject.toml` and `src/polygeo` | Python modules plus the native extension built through `rust/polygeo-py` |
+| Rust `polygeo-core` | `rust/polygeo-core` | The Rust mathematical library only |
+| `polygeo-py` | `rust/polygeo-py` | No independent distribution; it is a private Python build component |
+
+Neither public distribution has a registry release yet. Source installation is
+therefore the only documented installation path. A release keeps the versions
+in `pyproject.toml`, `rust/polygeo-core/Cargo.toml`, and
+`rust/polygeo-py/Cargo.toml` equal to the `vX.Y.Z` tag.
+
+```text
+source revision
+  -> read-only verification on Linux and Windows
+  -> local wheel and source-distribution smoke test
+  -> disposable verification artifacts
+
+approved version tag (not yet enabled)
+  -> independently tested Python artifacts and packaged Rust core
+  -> protected, short-lived registry authority
+  -> PyPI polygeo and crates.io polygeo-core
+```
+
+`.github/workflows/verify.yml` owns credential-free checks and never publishes.
+The future publication workflow must receive registry authority only after its
+artifacts pass, and the Python publishing job must not rebuild them. Supporting
+another Python version, operating system, architecture, stable ABI, or
+free-threaded runtime requires matching build and installed-artifact evidence.
 
 ## Topology and exact algebra
 

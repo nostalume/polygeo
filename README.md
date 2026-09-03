@@ -1,14 +1,19 @@
 # PolyGeo
 
-PolyGeo is a reading implementation of discrete differential geometry and discrete exterior calculus for finite simplicial complexes. It provides typed topology, exact chains, forms, Euclidean geometry, numerical solves, and surface fields through contextual `polygeo` modules.
+PolyGeo is a reading implementation of discrete differential geometry and
+discrete exterior calculus for finite simplicial complexes. It provides typed
+topology, exact chains, forms, Euclidean geometry, numerical solves, and surface
+fields through contextual `polygeo` modules.
 
 PolyGeo requires Python 3.14. Version 0.1.0 is experimental: the implemented paths are tested, but the public API and numerical policies are not yet stable.
 
 ## Install from source
 
-Install [Rust 1.97.1](https://www.rust-lang.org/tools/install) and the core
-development environment with [uv](https://docs.astral.sh/uv/). The pinned Rust
-toolchain is used to compile the private native topology core:
+PolyGeo does not yet publish packages to PyPI or crates.io. Install
+[Rust 1.97.1](https://www.rust-lang.org/tools/install) and
+[uv](https://docs.astral.sh/uv/) to build the Python package from source. The
+pinned Rust toolchain compiles the `polygeo-core` library and the private
+`polygeo-py` adapter bundled into the Python extension:
 
 ```bash
 git clone https://github.com/nostalume/polygeo.git
@@ -97,13 +102,32 @@ Poisson, conformal mapping, heat-method distance, homology, Hodge decomposition,
 connection holonomy, and boundary-aligned direction fields. See the
 [examples guide](examples/README.md).
 
+## Verify changes
+
+The repository's canonical local checks are:
+
+```bash
+uv sync --locked --all-groups --extra mesh --extra plot
+uv run ruff format --check .
+uv run ruff check .
+uv run ty check --error-on-warning .
+uv run pytest tests -q
+uv run pytest tests -m slow -q
+cargo fmt --all --manifest-path rust/Cargo.toml -- --check
+cargo clippy --manifest-path rust/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --manifest-path rust/Cargo.toml --all-targets --all-features
+```
+
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for current component ownership, data flow, invariants, optional boundaries, and limitations.
+See [docs/architecture.md](docs/architecture.md) for component and distribution
+ownership, data flow, invariants, optional boundaries, and limitations.
 
 ## Current limitations
 
-- Python 3.14 and the pinned Rust toolchain are required.
+- Python 3.14 and the pinned Rust toolchain are required for source builds.
+- Development CI currently exercises Linux and Windows; no binary distribution
+  support is claimed before registry artifacts exist.
 - Mesh input accepts one triangular Trimesh payload.
 - The native executor is currently sequential.
 - No stable-ABI or free-threaded-Python guarantee is made.
