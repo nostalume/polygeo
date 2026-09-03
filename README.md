@@ -134,7 +134,7 @@ ownership, data flow, invariants, optional boundaries, and limitations.
 - Surface connections require closed, connected, oriented triangle manifolds
   embedded in three dimensions.
 
-The [verification workflow](.github/workflows/verify.yml) is the canonical
+The [verification workflow](.github/workflows/ci.yml) is the canonical
 platform, quality, example, and installed-artifact command matrix.
 
 ## License

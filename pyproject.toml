@@ -41,6 +41,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = ["slow: release-only notebook export smoke tests"]
 addopts = "-m 'not slow'"
 filterwarnings = ["error"]

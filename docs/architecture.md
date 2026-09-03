@@ -67,7 +67,7 @@ approved version tag (not yet enabled)
   -> PyPI polygeo and crates.io polygeo-core
 ```
 
-`.github/workflows/verify.yml` owns credential-free checks and never publishes.
+`.github/workflows/ci.yml` owns credential-free checks and never publishes.
 The future publication workflow must receive registry authority only after its
 artifacts pass, and the Python publishing job must not rebuild them. Supporting
 another Python version, operating system, architecture, stable ABI, or
