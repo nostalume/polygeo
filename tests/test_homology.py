@@ -10,11 +10,9 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from polygeo import (
-    Complex,
+from polygeo.chain import (
     DEFAULT_HOMOLOGY_LIMIT,
     ChainError,
-    HalfedgeSurface,
     HomologyError,
     HomologyGroup,
     HomologyLimit,
@@ -22,6 +20,7 @@ from polygeo import (
     QQ,
     analyze_integral_homology,
 )
+from polygeo.topology import Complex, HalfedgeSurface
 
 
 def test_homology_limits_are_sealed_immutable_and_classified() -> None:

@@ -7,19 +7,28 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from ._polygeo_native import (
-    Binary64Element,
-    Complex,
-    EntityVectors,
-    EuclideanRealization,
-    HomologyGroup,
-)
+from .chain import HomologyGroup
+from .field import Direction
+from .form import Element
+from .geometry import Geometry, VectorField
+from .topology import Complex
 
 if TYPE_CHECKING:
     from plotly.graph_objects import Figure
 
 type PlotAxes = tuple[int, int] | tuple[int, int, int]
 type FloatArray = NDArray[np.float64]
+
+_COEFFICIENT_FIGURE_LAYOUT: dict[str, object] = {
+    "legend": {
+        "orientation": "h",
+        "x": 0.5,
+        "xanchor": "center",
+        "y": -0.15,
+        "yanchor": "top",
+    },
+    "margin": {"b": 100},
+}
 
 
 class PlotError(ValueError):
@@ -40,10 +49,8 @@ def _project(positions: FloatArray, axes: PlotAxes | None) -> FloatArray:
     raise PlotError("an explicit projection is required above ambient dimension three")
 
 
-def _snapshot(
-    geometry: EuclideanRealization, axes: PlotAxes | None
-) -> tuple[Complex, FloatArray]:
-    topology = geometry.complex
+def _snapshot(geometry: Geometry, axes: PlotAxes | None) -> tuple[Complex, FloatArray]:
+    topology = geometry.topology
     if topology.dimension > 2:
         raise PlotError("plotting supports intrinsic dimensions zero through two")
     return topology, _project(geometry.positions_numpy_copy(), axes)
@@ -77,7 +84,7 @@ def _geometry_traces(
     topology: Complex, points: FloatArray
 ) -> tuple[dict[str, object], ...]:
     if topology.dimension == 2 and points.shape[1] == 3:
-        faces = topology.simplices(2)
+        faces = topology.simplices_numpy_copy(2)
         mesh = (
             {
                 "type": "mesh3d",
@@ -85,14 +92,15 @@ def _geometry_traces(
                 "i": faces[:, 0],
                 "j": faces[:, 1],
                 "k": faces[:, 2],
-                "opacity": 0.72,
+                "color": "#d1d5db",
+                "opacity": 0.35,
                 "name": "geometry",
             },
         )
     else:
         mesh = ()
     if topology.dimension >= 1:
-        edges = points[topology.simplices(1)]
+        edges = points[topology.simplices_numpy_copy(1)]
         separated = np.full((len(edges), 3, points.shape[1]), np.nan)
         separated[:, :2] = edges
         edge_traces = (
@@ -100,6 +108,7 @@ def _geometry_traces(
                 separated.reshape(-1, points.shape[1]),
                 mode="lines",
                 name="edges",
+                line={"color": "#4b5563", "width": 1.5},
             ),
         )
     else:
@@ -107,7 +116,12 @@ def _geometry_traces(
     return (
         *mesh,
         *edge_traces,
-        _scatter(points, mode="markers", name="vertices"),
+        _scatter(
+            points,
+            mode="markers",
+            name="vertices",
+            marker={"color": "#6b7280", "size": 3},
+        ),
     )
 
 
@@ -116,12 +130,13 @@ def _simplex_locations(
 ) -> FloatArray:
     if degree == 0:
         return points
-    return points[topology.simplices(degree)].mean(axis=1)
+    return points[topology.simplices_numpy_copy(degree)].mean(axis=1)
 
 
 def _coefficient_trace(
     locations: FloatArray,
     coefficients: FloatArray,
+    degree: int,
     name: str,
 ) -> dict[str, object]:
     magnitude = float(np.max(np.abs(coefficients), initial=0.0)) or 1.0
@@ -137,6 +152,14 @@ def _coefficient_trace(
             "cmin": -magnitude,
             "cmax": magnitude,
             "showscale": True,
+            "size": (5, 5, 6)[degree],
+            "symbol": ("circle", "diamond", "square")[degree],
+            "colorbar": {
+                "orientation": "v",
+                "x": 1.02,
+                "xanchor": "left",
+                "title": {"text": name},
+            },
         },
         hovertemplate=(
             "simplex %{customdata[0]}<br>coefficient %{customdata[1]}<extra></extra>"
@@ -144,7 +167,19 @@ def _coefficient_trace(
     )
 
 
-def _figure(traces: tuple[dict[str, object], ...], title: str | None) -> Figure:
+def _segments(anchors: FloatArray, vectors: FloatArray, scale: float) -> FloatArray:
+    segments = np.stack((anchors, anchors + scale * vectors), axis=1)
+    separated = np.full((len(segments), 3, anchors.shape[1]), np.nan)
+    separated[:, :2] = segments
+    return separated.reshape(-1, anchors.shape[1])
+
+
+def _figure(
+    traces: tuple[dict[str, object], ...],
+    title: str | None,
+    *,
+    layout: dict[str, object] | None = None,
+) -> Figure:
     try:
         from plotly.graph_objects import Figure
     except ImportError as error:
@@ -153,12 +188,16 @@ def _figure(traces: tuple[dict[str, object], ...], title: str | None) -> Figure:
         ) from error
     return Figure(
         data=traces,
-        layout={"title": title, "template": "plotly_white"},
+        layout={
+            "title": title,
+            "template": "plotly_white",
+            **({} if layout is None else layout),
+        },
     )
 
 
-def plot_geometry(
-    geometry: EuclideanRealization,
+def geometry(
+    geometry: Geometry,
     *,
     axes: PlotAxes | None = None,
     title: str | None = None,
@@ -168,9 +207,9 @@ def plot_geometry(
     return _figure(_geometry_traces(topology, points), title)
 
 
-def plot_form(
-    geometry: EuclideanRealization,
-    form: Binary64Element,
+def form(
+    geometry: Geometry,
+    form: Element,
     *,
     axes: PlotAxes | None = None,
     title: str | None = None,
@@ -189,14 +228,15 @@ def plot_form(
         _coefficient_trace(
             _simplex_locations(topology, points, space.degree),
             form.coefficients_numpy_copy(),
+            space.degree,
             "form",
         ),
     )
-    return _figure(traces, title)
+    return _figure(traces, title, layout=_COEFFICIENT_FIGURE_LAYOUT)
 
 
-def plot_homology_cycle(
-    geometry: EuclideanRealization,
+def homology_cycle(
+    geometry: Geometry,
     group: HomologyGroup,
     cycle: int,
     *,
@@ -222,14 +262,15 @@ def plot_homology_cycle(
         _coefficient_trace(
             _simplex_locations(topology, points, group.degree),
             realized.coefficients_numpy_copy(),
+            group.degree,
             "homology cycle",
         ),
     )
-    return _figure(traces, title)
+    return _figure(traces, title, layout=_COEFFICIENT_FIGURE_LAYOUT)
 
 
-def plot_surface_vectors(
-    field: EntityVectors,
+def vectors(
+    field: VectorField[int],
     *,
     scale: float = 1.0,
     axes: PlotAxes | None = None,
@@ -237,32 +278,100 @@ def plot_surface_vectors(
 ) -> Figure:
     """Render one geometry snapshot and one vector snapshot."""
     if not np.isfinite(scale) or scale <= 0.0:
-        raise PlotError(
-            "surface vector plot requires a field and positive finite scale"
-        )
-    geometry = field.realization
+        raise PlotError("surface vectors require a positive finite scale")
+    geometry = field.geometry
     topology, points = _snapshot(geometry, axes)
-    vectors = _project(field.vectors_numpy_copy(), axes)
-    anchors = (
-        points
-        if field.is_vertex_supported
-        else points[topology.simplices(2)].mean(axis=1)
-    )
-    segments = np.stack((anchors, anchors + scale * vectors), axis=1)
-    separated = np.full((len(segments), 3, anchors.shape[1]), np.nan)
-    separated[:, :2] = segments
+    vectors = _project(field.values_numpy_copy(), axes)
+    anchors = _simplex_locations(topology, points, field.support_degree)
     vector_trace = _scatter(
-        separated.reshape(-1, anchors.shape[1]),
+        _segments(anchors, vectors, scale),
         mode="lines",
         name="vectors",
+        legendgroup="vectors",
+        line={"color": "#d97706", "width": 2},
+        showlegend=True,
     )
-    return _figure((*_geometry_traces(topology, points), vector_trace), title)
+    tips = anchors + scale * vectors
+    lengths = np.linalg.norm(vectors, axis=1)
+    nonzero = lengths > 0.0
+    if anchors.shape[1] == 2:
+        angles = 90.0 - np.degrees(np.arctan2(vectors[nonzero, 1], vectors[nonzero, 0]))
+        head_trace = _scatter(
+            tips[nonzero],
+            mode="markers",
+            name="vector heads",
+            legendgroup="vectors",
+            marker={
+                "angle": angles,
+                "angleref": "up",
+                "color": "#d97706",
+                "size": 8,
+                "symbol": "triangle-up",
+            },
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    else:
+        directions = vectors[nonzero] / lengths[nonzero, None]
+        head_trace = {
+            "type": "cone",
+            **_coordinates(tips[nonzero]),
+            "u": directions[:, 0],
+            "v": directions[:, 1],
+            "w": directions[:, 2],
+            "anchor": "tip",
+            "colorscale": [[0.0, "#d97706"], [1.0, "#d97706"]],
+            "hoverinfo": "skip",
+            "legendgroup": "vectors",
+            "name": "vector heads",
+            "showlegend": False,
+            "showscale": False,
+            "sizemode": "absolute",
+            "sizeref": 0.18 * scale,
+        }
+    return _figure(
+        (*_geometry_traces(topology, points), vector_trace, head_trace), title
+    )
+
+
+def direction(
+    field: Direction,
+    *,
+    scale: float = 1.0,
+    axes: PlotAxes | None = None,
+    title: str | None = None,
+) -> Figure:
+    """Render every equivalent branch of one symmetric face direction field."""
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise PlotError("direction-field plot requires a positive finite scale")
+    topology, points = _snapshot(field.connection.connection.surface.geometry, axes)
+    anchors = _simplex_locations(topology, points, 2)
+    order = field.symmetry_order
+    branches = tuple(
+        _scatter(
+            _segments(
+                anchors,
+                _project(
+                    field.ambient_branch_numpy_copy(branch).values_numpy_copy(),
+                    axes,
+                ),
+                scale,
+            ),
+            mode="lines",
+            name=f"branch {branch + 1}/{order}",
+            line={"color": "#2563eb", "width": 1.5},
+            hoverinfo="skip",
+        )
+        for branch in range(order)
+    )
+    return _figure((*_geometry_traces(topology, points), *branches), title)
 
 
 __all__ = [
     "PlotError",
-    "plot_form",
-    "plot_geometry",
-    "plot_homology_cycle",
-    "plot_surface_vectors",
+    "geometry",
+    "form",
+    "vectors",
+    "direction",
+    "homology_cycle",
 ]

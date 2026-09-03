@@ -7,10 +7,11 @@ app = marimo.App()
 @app.cell
 def _():
     import marimo as mo
-    from polygeo import analyze_integral_homology
+    from polygeo.chain import analyze_integral_homology
+    from polygeo.plot import homology_cycle as plot_homology_cycle
     from support.meshes import torus
 
-    return analyze_integral_homology, mo, torus
+    return analyze_integral_homology, mo, plot_homology_cycle, torus
 
 
 @app.cell
@@ -33,8 +34,7 @@ def _(mo):
     cup orders with a fundamental two-cycle.
 
     ## Visualization
-    Display rank, torsion, representative support, Stokes values, and the cup
-    intersection pair.
+    Plot one exact free-cycle representative and display its algebraic evidence.
 
     ## Evaluation
     Verify the rank-two free group, a nonzero Stokes equality, and an antisymmetric
@@ -50,7 +50,7 @@ def _(mo):
 
 @app.cell
 def _(analyze_integral_homology, torus):
-    domain, _ = torus(12, 8)
+    domain, geometry = torus(12, 8)
     chain_complex = domain.chain_complex()
     cochain_complex = chain_complex.dual()
     face = chain_complex[2].element({0: 1})
@@ -62,7 +62,7 @@ def _(analyze_integral_homology, torus):
     homology = analyze_integral_homology(chain_complex, [1, 2])
     group = homology[1]
     fundamental_cycle = homology[2].free_cycle(0)
-    dual_cycles = domain.integral_dual_cycle_basis()
+    dual_cycles = domain.dual_cycles()
     first_cocycle = dual_cycles.cocycle(0)
     second_cocycle = dual_cycles.cocycle(1)
     cup_forward = first_cocycle.cup(second_cocycle).evaluate(fundamental_cycle)
@@ -79,12 +79,19 @@ def _(analyze_integral_homology, torus):
             cup_forward == -cup_reverse and abs(cup_forward) == 1
         ),
     }
-    return homology_evidence
+    return geometry, group, homology_evidence
 
 
 @app.cell
-def _(homology_evidence, mo):
-    mo.md(f"`{homology_evidence}`")
+def _(geometry, group, homology_evidence, mo, plot_homology_cycle):
+    mo.vstack(
+        [
+            mo.md(f"`{homology_evidence}`"),
+            plot_homology_cycle(
+                geometry, group, 0, title="First free homology generator"
+            ),
+        ]
+    )
     return
 
 

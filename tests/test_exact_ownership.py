@@ -5,19 +5,19 @@ from __future__ import annotations
 import gc
 import numpy as np
 
-from polygeo import (
+from polygeo.chain import (
     BigIntEncoding,
     ChainComplex,
     ChainIsomorphism,
-    Complex,
     CsrBuildLimit,
     CsrEstimate,
-    CsrRepresentation,
+    Csr,
     Element,
     IntegerCsrParts,
     LinearMap,
     Space,
 )
+from polygeo.topology import Complex
 
 
 def test_exact_carriers_are_sealed_and_not_partially_constructible() -> None:
@@ -29,7 +29,7 @@ def test_exact_carriers_are_sealed_and_not_partially_constructible() -> None:
         LinearMap,
         CsrEstimate,
         CsrBuildLimit,
-        CsrRepresentation,
+        Csr,
         IntegerCsrParts,
     ):
         with np.testing.assert_raises(TypeError):
@@ -44,8 +44,8 @@ def test_derived_handles_survive_every_originating_owner() -> None:
     space = complex_[1]
     value = space.element({0: 4})
     map_ = complex_.boundary(1)
-    estimate = CsrRepresentation.estimate(map_, BigIntEncoding)
-    representation = CsrRepresentation.build(map_, BigIntEncoding, estimate.as_limit())
+    estimate = Csr.estimate(map_, BigIntEncoding)
+    representation = Csr.build(map_, BigIntEncoding, estimate.as_limit())
     assert not hasattr(complex_, "space")
     assert not hasattr(map_, "estimate_csr")
     assert not hasattr(map_, "build_csr")
@@ -65,10 +65,8 @@ def test_exact_handles_are_frozen_and_projections_do_not_alias() -> None:
     space = complex_[1]
     value = space.element({0: 7})
     boundary = complex_.boundary(1)
-    estimate = CsrRepresentation.estimate(boundary, BigIntEncoding)
-    representation = CsrRepresentation.build(
-        boundary, BigIntEncoding, estimate.as_limit()
-    )
+    estimate = Csr.estimate(boundary, BigIntEncoding)
+    representation = Csr.build(boundary, BigIntEncoding, estimate.as_limit())
 
     for handle in (complex_, space, value, representation):
         try:

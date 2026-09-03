@@ -1,17 +1,17 @@
-# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
+# ty-expect: invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type, invalid-argument-type
 
 from typing import Literal
 
-from polygeo import (
-    Binary64Cochain,
-    Geometry,
-    HomologyGroup,
-    PositiveMetric,
-    load_surface,
-    plot_form,
-    plot_geometry,
-    plot_homology_cycle,
-    plot_surface_vectors,
+from polygeo.chain import HomologyGroup
+from polygeo.form import Cochain
+from polygeo.geometry import Geometry, Metric
+from polygeo.mesh import load_surface
+from polygeo.plot import (
+    direction,
+    form,
+    geometry as plot_geometry,
+    homology_cycle,
+    vectors,
 )
 
 load_surface(3)
@@ -19,14 +19,15 @@ plot_geometry(object())
 
 
 def invalid_effect_values(geometry: Geometry) -> None:
-    plot_form(geometry, object())
-    plot_homology_cycle(geometry, object(), 0)
+    form(geometry, object())
+    homology_cycle(geometry, object(), 0)
 
 
-plot_surface_vectors(Geometry)
+vectors(Geometry)
+direction(Geometry)
 
 
-def incompatible_problems(metric: PositiveMetric, source: Binary64Cochain[int]) -> None:
+def incompatible_problems(metric: Metric, source: Cochain[int]) -> None:
     heat = metric.heat_evolution(source, 0.1)
     poisson = metric.mean_zero_poisson_density(source)
     prepared = heat.prepare()
@@ -34,6 +35,6 @@ def incompatible_problems(metric: PositiveMetric, source: Binary64Cochain[int]) 
 
 
 def wrong_harmonic_basis_degree(
-    metric: PositiveMetric, group: HomologyGroup[Literal[0]]
+    metric: Metric, group: HomologyGroup[Literal[0]]
 ) -> None:
-    metric.harmonic_one_form_basis(group)
+    metric.harmonic_basis(group)

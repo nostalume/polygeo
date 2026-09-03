@@ -13,26 +13,20 @@ from typing import Callable
 import numpy as np
 
 import polygeo
-from polygeo import _polygeo_native
-from polygeo import (
-    Complex,
-    FlowStep,
-    Geometry,
-    HarmonicOneFormBasis,
-    HalfedgeSurface,
-    HeatSolution,
-    LeastSquaresConformalMapSolution,
-    MeshError,
+from polygeo.chain import analyze_integral_homology
+from polygeo.field import HarmonicBasis
+from polygeo.geometry import ConformalMap, FlowStep, Geometry, TriangleSurface
+from polygeo.mesh import MeshError, load_surface
+from polygeo.plot import (
     PlotError,
-    PoissonSolution,
-    TriangleSurface,
-    load_surface,
-    plot_form,
-    plot_geometry,
-    plot_homology_cycle,
-    plot_surface_vectors,
-    analyze_integral_homology,
+    direction as plot_direction_field,
+    form as plot_form,
+    geometry as plot_geometry,
+    homology_cycle as plot_homology_cycle,
+    vectors as plot_surface_vectors,
 )
+from polygeo.solve import HeatResult, PoissonResult
+from polygeo.topology import Complex, HalfedgeSurface
 
 
 def _expect_optional_error(
@@ -52,10 +46,20 @@ if mode not in {"base", "extras"}:
 distribution = metadata("polygeo")
 assert version("polygeo") == "0.1.0"
 assert distribution["License-Expression"] == "MIT"
-assert Complex is _polygeo_native.Complex
-assert HalfedgeSurface is _polygeo_native.HalfedgeSurface
-assert HarmonicOneFormBasis is _polygeo_native.HarmonicOneFormBasis
-assert "_native" not in polygeo.__all__
+assert Complex is polygeo.topology.Complex
+assert HalfedgeSurface is polygeo.topology.HalfedgeSurface
+assert HarmonicBasis is polygeo.field.HarmonicBasis
+assert callable(plot_direction_field)
+assert polygeo.__all__ == [
+    "topology",
+    "chain",
+    "form",
+    "geometry",
+    "solve",
+    "field",
+    "plot",
+    "mesh",
+]
 
 complex_ = (
     Complex.from_maximal_simplices(
@@ -87,11 +91,11 @@ geometry = Geometry.from_positions(
     ),
 )
 space = complex_.binary64_cochain_space(0)
-metric = geometry.positive_metric()
+metric = geometry.metric()
 heat = metric.heat_evolution(space.admit_numpy(np.array([1.0, 0.0, 0.0, 0.0])), 0.1)
 heat_prepared = heat.prepare()
 heat_solution = heat_prepared.solve(heat, heat_prepared.workspace_for(heat))
-assert isinstance(heat_solution, HeatSolution)
+assert isinstance(heat_solution, HeatResult)
 assert heat_solution.residual_bound <= 1.0e-10
 flow_step = metric.frozen_mean_curvature_flow(0.1)
 assert isinstance(flow_step, FlowStep)
@@ -101,15 +105,15 @@ density = space.admit_numpy(np.array([weights[1], -weights[0], 0.0, 0.0]))
 problem = metric.mean_zero_poisson_density(density)
 prepared = problem.prepare()
 solution = prepared.solve(problem, prepared.workspace_for(problem))
-assert isinstance(solution, PoissonSolution)
+assert isinstance(solution, PoissonResult)
 assert solution.potential.space.same_space(space)
 
 surface = TriangleSurface.admit(geometry)
 field = surface.face_unit_normals()
-assert field.vectors_numpy_copy().shape == (surface.face_count, 3)
+assert field.values_numpy_copy().shape == (surface.face_count, 3)
 gradient = surface.gradient(space.admit_numpy(geometry.positions_numpy_copy()[:, 0]))
 load = surface.divergence(gradient)
-assert gradient.vectors_numpy_copy().shape == (surface.face_count, 3)
+assert gradient.values_numpy_copy().shape == (surface.face_count, 3)
 assert load.coefficients_numpy_copy().shape == (4,)
 assert load.space.variance == "chain"
 load_problem = metric.mean_zero_poisson_load(-load)
@@ -117,7 +121,7 @@ load_prepared = load_problem.prepare()
 load_solution = load_prepared.solve(
     load_problem, load_prepared.workspace_for(load_problem)
 )
-assert isinstance(load_solution, PoissonSolution)
+assert isinstance(load_solution, PoissonResult)
 oriented_triangle = (
     Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
     .triangle_manifold()
@@ -130,22 +134,19 @@ triangle_geometry = Geometry.from_positions(
     oriented_triangle,
     np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.25, 1.0, 0.5]]),
 )
-conformal_map = TriangleSurface.admit(triangle_geometry).least_squares_conformal_map(
-    (0, 1)
-)
-assert isinstance(conformal_map, LeastSquaresConformalMapSolution)
+conformal_map = TriangleSurface.admit(triangle_geometry).conformal_map((0, 1))
+assert isinstance(conformal_map, ConformalMap)
 np.testing.assert_array_equal(
-    conformal_map.realization.positions_numpy_copy()[[0, 1]],
+    conformal_map.geometry.positions_numpy_copy()[[0, 1]],
     [[0.0, 0.0], [1.0, 0.0]],
 )
 assert conformal_map.required_rank == conformal_map.observed_rank == 2
 assert conformal_map.minimum_normalized_signed_twice_area > 0.0
 converted, correspondence = HalfedgeSurface.from_complex(oriented_triangle)
-transport = correspondence.chain_isomorphism()
-source_chain = transport.source[1].element({0: 1})
+source_chain = correspondence.source[1].element({0: 1})
 assert (
-    transport.inverse(1)
-    .apply(transport.forward(1).apply(source_chain))
+    correspondence.inverse(1)
+    .apply(correspondence.forward(1).apply(source_chain))
     .to_python_copy()
     == source_chain.to_python_copy()
 )
@@ -170,6 +171,6 @@ with TemporaryDirectory() as directory:
         for plot_call in plot_calls:
             _expect_optional_error(plot_call, PlotError)
     else:
-        assert load_surface(mesh_path).complex.simplex_count(2) == 1
+        assert load_surface(mesh_path).topology.simplex_count(2) == 1
         for plot_call in plot_calls:
             assert json.loads(plot_call().to_json())["data"]

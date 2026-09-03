@@ -9,24 +9,24 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from polygeo import (
+from polygeo.chain import (
     BigIntEncoding,
     ChainError,
-    CsrRepresentation,
+    Csr,
     IntegralChainComplex,
     IntegerCsrParts,
     QQ,
     RationalCsrParts,
     ReducedFractionEncoding,
 )
-from polygeo import _polygeo_native as native
+from polygeo.topology import Complex, HalfedgeSurface
 
 
 FACES = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
 
 
 def integral_complex() -> IntegralChainComplex:
-    return native.Complex.from_maximal_simplices(FACES).chain_complex()
+    return Complex.from_maximal_simplices(FACES).chain_complex()
 
 
 def test_exact_integer_and_rational_values_preserve_variance_and_large_scalars() -> (
@@ -78,11 +78,11 @@ def test_exact_cup_product_preserves_coefficients_owner_and_domain_errors() -> N
     assert wrong_variance.value.reason == "space_mismatch"
 
     triangle = (
-        native.Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
+        Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
         .triangle_manifold()
         .oriented()
     )
-    halfedge, _ = native.HalfedgeSurface.from_complex(triangle)
+    halfedge, _ = HalfedgeSurface.from_complex(triangle)
     halfedge_cochain = halfedge.chain_complex().dual()[1].element({0: 1})
     with pytest.raises(ChainError) as wrong_domain:
         halfedge_cochain.cup(halfedge_cochain)
@@ -136,10 +136,8 @@ def test_maps_reject_wrong_variance_owner_and_coefficient_system() -> None:
 def test_csr_has_distinct_exact_projections_and_checked_int64_copy() -> None:
     integers = integral_complex()
     boundary = integers.boundary(2)
-    estimate = CsrRepresentation.estimate(boundary, BigIntEncoding)
-    representation = CsrRepresentation.build(
-        boundary, BigIntEncoding, estimate.as_limit()
-    )
+    estimate = Csr.estimate(boundary, BigIntEncoding)
+    representation = Csr.build(boundary, BigIntEncoding, estimate.as_limit())
 
     parts = representation.to_python_copy()
     assert parts.shape == (5, 2)
@@ -160,10 +158,8 @@ def test_csr_has_distinct_exact_projections_and_checked_int64_copy() -> None:
     assert scipy.shape == (5, 2)
 
     rational_map = integers.over(QQ).boundary(2)
-    rational_estimate = CsrRepresentation.estimate(
-        rational_map, ReducedFractionEncoding
-    )
-    rational_representation = CsrRepresentation.build(
+    rational_estimate = Csr.estimate(rational_map, ReducedFractionEncoding)
+    rational_representation = Csr.build(
         rational_map, ReducedFractionEncoding, rational_estimate.as_limit()
     )
     rational_parts = rational_representation.to_python_copy()
@@ -177,7 +173,7 @@ def test_csr_has_distinct_exact_projections_and_checked_int64_copy() -> None:
 
 def test_csr_admission_reports_axis_required_limit_and_phase() -> None:
     boundary = integral_complex().boundary(2)
-    estimate = CsrRepresentation.estimate(boundary, BigIntEncoding)
+    estimate = Csr.estimate(boundary, BigIntEncoding)
     assert estimate.nnz_bound > 0
     assert estimate.scratch_entries_bound == 0
     assert estimate.scalar_steps_bound >= estimate.nnz_bound
@@ -196,7 +192,7 @@ def test_csr_admission_reports_axis_required_limit_and_phase() -> None:
     assert invalid.value.reason == "limit"
 
     with pytest.raises(ChainError) as caught:
-        CsrRepresentation.build(boundary, BigIntEncoding, limit)
+        Csr.build(boundary, BigIntEncoding, limit)
 
     reason, _, details = caught.value.args
     assert reason == "resource_limit"
@@ -232,7 +228,7 @@ def test_zero_denominator_is_rejected_before_fraction_construction() -> None:
 
 
 def test_exact_types_and_explicit_scipy_copy_remain_distinct() -> None:
-    integers = native.Complex.from_maximal_simplices(FACES).chain_complex()
+    integers = Complex.from_maximal_simplices(FACES).chain_complex()
     chain = integers[1].element({0: 1 << 130})
     assert chain.to_python_copy() == ((0,), (1 << 130,))
     with pytest.raises(ChainError) as rejected:
@@ -241,10 +237,8 @@ def test_exact_types_and_explicit_scipy_copy_remain_distinct() -> None:
     assert rejected.value.details == {"index": 99, "bound": 5}
 
     boundary = integers.boundary(1)
-    estimate = CsrRepresentation.estimate(boundary, BigIntEncoding)
-    representation = CsrRepresentation.build(
-        boundary, BigIntEncoding, estimate.as_limit()
-    )
+    estimate = Csr.estimate(boundary, BigIntEncoding)
+    representation = Csr.build(boundary, BigIntEncoding, estimate.as_limit())
     scipy_copy = representation.to_scipy_int64_copy()
     scipy_copy.data[:] = 0
     integer_parts = representation.to_python_copy()
@@ -256,10 +250,8 @@ def test_exact_types_and_explicit_scipy_copy_remain_distinct() -> None:
 
     rationals = integers.over(QQ)
     rational_map = rationals.boundary(1)
-    rational_estimate = CsrRepresentation.estimate(
-        rational_map, ReducedFractionEncoding
-    )
-    rational_representation = CsrRepresentation.build(
+    rational_estimate = Csr.estimate(rational_map, ReducedFractionEncoding)
+    rational_representation = Csr.build(
         rational_map, ReducedFractionEncoding, rational_estimate.as_limit()
     )
     rational_parts = rational_representation.to_python_copy()

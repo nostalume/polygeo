@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from polygeo import Complex as NativeComplex
-from polygeo import SimplicialError as NativeSimplicialError
+from polygeo.topology import Complex as NativeComplex
+from polygeo.topology import SimplicialError as NativeSimplicialError
 
 
 @pytest.mark.parametrize(

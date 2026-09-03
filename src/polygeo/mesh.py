@@ -8,14 +8,15 @@ from typing import Any
 
 import numpy as np
 
-from ._polygeo_native import Complex, EuclideanRealization
+from .geometry import Geometry
+from .topology import Complex
 
 
 class MeshError(ValueError):
     """Invalid mesh input or unavailable optional mesh-loading behavior."""
 
 
-def load_surface(source: str | PathLike[str]) -> EuclideanRealization:
+def load_surface(source: str | PathLike[str]) -> Geometry:
     """Load one triangular mesh into owned native topology and geometry."""
     try:
         import trimesh
@@ -31,7 +32,7 @@ def load_surface(source: str | PathLike[str]) -> EuclideanRealization:
         positions = np.asarray(payload.vertices)
         faces = np.asarray(payload.faces)
         complex_ = Complex.from_maximal_simplices(faces, vertex_count=len(positions))
-        return EuclideanRealization.from_positions(complex_, positions)
+        return Geometry.from_positions(complex_, positions)
     except Exception as error:
         raise MeshError("surface mesh is not admissible") from error
 

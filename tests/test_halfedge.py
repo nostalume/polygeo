@@ -5,9 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from polygeo import (
-    DEFAULT_CHAIN_LAW_LIMIT,
-    ChainLawLimit,
+from polygeo.chain import DEFAULT_LAW_LIMIT, ChainLawLimit
+from polygeo.topology import (
     Complex,
     HalfedgeError,
     HalfedgeSurface,
@@ -39,7 +38,7 @@ def test_admission_accepts_striding_and_non_native_endian() -> None:
     surface = HalfedgeSurface.from_permutations(
         storage[::2], TWIN.astype(">i8"), exterior_faces=EXTERIOR.astype(">u8")
     )
-    np.testing.assert_array_equal(surface.next(), NEXT)
+    np.testing.assert_array_equal(surface.next_numpy_copy(), NEXT)
 
 
 @pytest.mark.parametrize(
@@ -66,16 +65,16 @@ def test_navigation_order_copy_isolation_and_immutability() -> None:
         surface.material_face_count,
         surface.exterior_face_count,
     ) == (2, 1, 1)
-    np.testing.assert_array_equal(surface.twin(), TWIN)
-    np.testing.assert_array_equal(surface.vertex_of(), [0, 1, 2, 1, 2, 0])
-    np.testing.assert_array_equal(surface.edge_of(), [0, 1, 2, 0, 1, 2])
-    np.testing.assert_array_equal(surface.face_of(), [0, 0, 0, 1, 1, 1])
-    offsets, exterior, material = surface.boundary_cycles()
+    np.testing.assert_array_equal(surface.twin_numpy_copy(), TWIN)
+    np.testing.assert_array_equal(surface.vertex_of_numpy_copy(), [0, 1, 2, 1, 2, 0])
+    np.testing.assert_array_equal(surface.edge_of_numpy_copy(), [0, 1, 2, 0, 1, 2])
+    np.testing.assert_array_equal(surface.face_of_numpy_copy(), [0, 0, 0, 1, 1, 1])
+    offsets, exterior, material = surface.boundary_cycles_numpy_copy()
     np.testing.assert_array_equal(offsets, [0, 3])
     np.testing.assert_array_equal(exterior, [3, 5, 4])
     np.testing.assert_array_equal(material, [0, 2, 1])
     exterior[:] = 0
-    np.testing.assert_array_equal(surface.boundary_cycles()[1], [3, 5, 4])
+    np.testing.assert_array_equal(surface.boundary_cycles_numpy_copy()[1], [3, 5, 4])
     with pytest.raises(AttributeError):
         setattr(surface, "vertex_count", 0)
     assert not any(
@@ -85,13 +84,13 @@ def test_navigation_order_copy_isolation_and_immutability() -> None:
 
 def test_boundary_projection_is_a_fresh_owned_int64_copy() -> None:
     surface = HalfedgeSurface.from_permutations(NEXT, TWIN, exterior_faces=EXTERIOR)
-    first = surface.boundary_matrix(2)
-    second = surface.boundary_matrix(2)
+    first = surface.boundary_scipy_copy(2)
+    second = surface.boundary_scipy_copy(2)
     assert first is not second
     assert first.data.dtype == np.dtype(np.int64)
     expected = second.toarray().copy()
     first.data[:] = 0
-    np.testing.assert_array_equal(surface.boundary_matrix(2).toarray(), expected)
+    np.testing.assert_array_equal(surface.boundary_scipy_copy(2).toarray(), expected)
 
 
 def test_halfedge_owner_has_no_implicit_array_protocol() -> None:
@@ -123,32 +122,30 @@ def test_explicit_complex_surface_conversion_retains_owners_and_owned_maps() -> 
         .oriented()
     )
     surface, forward = HalfedgeSurface.from_complex(complex_)
-    assert forward.source is complex_
-    assert forward.target is surface
-    assert forward.direction == "complex_to_surface"
+    assert forward.source.same_owner(complex_.chain_complex())
+    assert forward.target.same_owner(surface.chain_complex())
     assert (surface.vertex_count, surface.edge_count, surface.material_face_count) == (
         3,
         3,
         1,
     )
-    permutation, signs = forward.signed_permutation(1)
+    permutation, signs = forward.signed_permutation_numpy_copy(1)
     permutation[:] = 0
     signs[:] = 0
-    assert np.unique(forward.signed_permutation(1)[0]).size == 3
-    assert set(forward.signed_permutation(1)[1]) <= {-1, 1}
+    assert np.unique(forward.signed_permutation_numpy_copy(1)[0]).size == 3
+    assert set(forward.signed_permutation_numpy_copy(1)[1]) <= {-1, 1}
 
     rebuilt, reverse = surface.to_complex()
-    assert reverse.source is surface
-    assert reverse.target is rebuilt
-    assert reverse.direction == "surface_to_complex"
+    assert reverse.source.same_owner(surface.chain_complex())
+    assert reverse.target.same_owner(rebuilt.chain_complex())
     assert not rebuilt.shares_data_with(complex_)
-    np.testing.assert_array_equal(rebuilt.simplices(2), [[0, 1, 2]])
+    np.testing.assert_array_equal(rebuilt.simplices_numpy_copy(2), [[0, 1, 2]])
 
 
 def test_conversion_limit_is_flat_structured_and_retryable() -> None:
-    assert DEFAULT_CHAIN_LAW_LIMIT.retained_logical_bytes == 128 * 1024 * 1024
-    assert DEFAULT_CHAIN_LAW_LIMIT.peak_live_logical_bytes == 512 * 1024 * 1024
-    assert DEFAULT_CHAIN_LAW_LIMIT.terms == 100_000_000
+    assert DEFAULT_LAW_LIMIT.retained_logical_bytes == 128 * 1024 * 1024
+    assert DEFAULT_LAW_LIMIT.peak_live_logical_bytes == 512 * 1024 * 1024
+    assert DEFAULT_LAW_LIMIT.terms == 100_000_000
     complex_ = (
         Complex.from_maximal_simplices(np.array([[0, 1, 2]], dtype=np.int64))
         .triangle_manifold()

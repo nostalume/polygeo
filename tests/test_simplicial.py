@@ -6,11 +6,8 @@ import numpy as np
 import pytest
 from scipy.sparse import csgraph
 
-from polygeo import (
-    Binary64ElementError,
-    Complex,
-    SimplicialError,
-)
+from polygeo.form import ElementError
+from polygeo.topology import Complex, SimplicialError
 
 
 def _tetrahedron_boundary() -> np.ndarray:
@@ -61,13 +58,13 @@ def test_construction_owns_source_and_exposed_arrays() -> None:
     complex_ = Complex.from_maximal_simplices(maximal)
     maximal[0, 0] = 99
 
-    first = complex_.simplices(2)
+    first = complex_.simplices_numpy_copy(2)
     first[0, 0] = 88
 
     assert complex_.dimension == 2
     assert complex_.vertex_count == 4
     np.testing.assert_array_equal(
-        complex_.simplices(2),
+        complex_.simplices_numpy_copy(2),
         np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64),
     )
 
@@ -78,8 +75,8 @@ def test_construction_builds_canonical_arbitrary_dimensional_closure() -> None:
 
     assert complex_.dimension == 4
     assert [complex_.simplex_count(k) for k in range(5)] == [5, 10, 10, 5, 1]
-    np.testing.assert_array_equal(complex_.simplices(4), [[0, 1, 2, 3, 4]])
-    assert complex_.orientations(4).tolist() == [-1]
+    np.testing.assert_array_equal(complex_.simplices_numpy_copy(4), [[0, 1, 2, 3, 4]])
+    assert complex_.orientations_numpy_copy(4).tolist() == [-1]
 
 
 def test_construction_rejects_invalid_maximal_simplices() -> None:
@@ -102,9 +99,9 @@ def test_construction_rejects_invalid_maximal_simplices() -> None:
 def test_boundary_matrix_is_intrinsic_fresh_and_squares_to_zero() -> None:
     complex_ = Complex.from_maximal_simplices(np.array([[0, 1, 2, 3]], dtype=np.int64))
 
-    boundary_1 = complex_.boundary_matrix(1)
-    boundary_2 = complex_.boundary_matrix(2)
-    boundary_3 = complex_.boundary_matrix(3)
+    boundary_1 = complex_.boundary_scipy_copy(1)
+    boundary_2 = complex_.boundary_scipy_copy(2)
+    boundary_3 = complex_.boundary_scipy_copy(3)
 
     assert boundary_1.shape == (4, 6)
     assert boundary_2.shape == (6, 4)
@@ -113,13 +110,13 @@ def test_boundary_matrix_is_intrinsic_fresh_and_squares_to_zero() -> None:
     assert (boundary_2 @ boundary_3).nnz == 0
 
     boundary_2.data[:] = 0
-    assert complex_.boundary_matrix(2).nnz == 12
-    assert complex_.boundary_matrix(0).shape == (0, 4)
+    assert complex_.boundary_scipy_copy(2).nnz == 12
+    assert complex_.boundary_scipy_copy(0).shape == (0, 4)
 
     with pytest.raises(SimplicialError):
-        complex_.boundary_matrix(-1)
+        complex_.boundary_scipy_copy(-1)
     with pytest.raises(SimplicialError):
-        complex_.boundary_matrix(4)
+        complex_.boundary_scipy_copy(4)
 
 
 def test_boundary_matrix_preserves_input_top_orientation() -> None:
@@ -127,8 +124,8 @@ def test_boundary_matrix_preserves_input_top_orientation() -> None:
     reverse = Complex.from_maximal_simplices(np.array([[0, 2, 1]], dtype=np.int64))
 
     np.testing.assert_array_equal(
-        reverse.boundary_matrix(2).toarray(),
-        -forward.boundary_matrix(2).toarray(),
+        reverse.boundary_scipy_copy(2).toarray(),
+        -forward.boundary_scipy_copy(2).toarray(),
     )
 
 
@@ -143,14 +140,14 @@ def test_subset_closure_star_link_and_purity() -> None:
     )
 
     star = vertex_zero.star()
-    assert star.mask(0).tolist() == [True, False, False]
-    assert star.mask(1).tolist() == [True, True, False]
-    assert star.mask(2).tolist() == [True]
+    assert star.mask_numpy_copy(0).tolist() == [True, False, False]
+    assert star.mask_numpy_copy(1).tolist() == [True, True, False]
+    assert star.mask_numpy_copy(2).tolist() == [True]
 
     link = vertex_zero.link()
-    assert link.mask(0).tolist() == [False, True, True]
-    assert link.mask(1).tolist() == [False, False, True]
-    assert link.mask(2).tolist() == [False]
+    assert link.mask_numpy_copy(0).tolist() == [False, True, True]
+    assert link.mask_numpy_copy(1).tolist() == [False, False, True]
+    assert link.mask_numpy_copy(2).tolist() == [False]
     assert link.closure().is_pure(1)
 
     face = complex_.subset(
@@ -161,9 +158,9 @@ def test_subset_closure_star_link_and_purity() -> None:
         )
     )
     closure = face.closure()
-    assert closure.mask(0).all()
-    assert closure.mask(1).all()
-    assert closure.mask(2).all()
+    assert closure.mask_numpy_copy(0).all()
+    assert closure.mask_numpy_copy(1).all()
+    assert closure.mask_numpy_copy(2).all()
     assert closure.closure().same_members(closure)
     assert closure.is_pure(2)
 
@@ -192,7 +189,7 @@ def test_subset_rejects_wrong_shapes_and_foreign_comparison() -> None:
 
     for invalid_degree in (-1, left.dimension + 1):
         with pytest.raises(SimplicialError):
-            left_empty.mask(invalid_degree)
+            left_empty.mask_numpy_copy(invalid_degree)
         with pytest.raises(SimplicialError):
             left_empty.is_pure(invalid_degree)
 
@@ -285,7 +282,7 @@ def test_cochain_spaces_and_forms_own_coefficients() -> None:
     assert not form.space.same_space(right.binary64_cochain_space(1))
     assert not left_space.same_space(right_space)
 
-    with pytest.raises(Binary64ElementError):
+    with pytest.raises(ElementError):
         left_space.admit_numpy(np.zeros(left_space.size + 1))
     with pytest.raises(SimplicialError):
         left.binary64_cochain_space(3)
@@ -295,7 +292,7 @@ def test_form_requires_real_finite_coefficients() -> None:
     space = Complex.from_maximal_simplices(_disk()).binary64_cochain_space(0)
     values = np.zeros(space.size)
     values[0] = np.nan
-    with pytest.raises(Binary64ElementError):
+    with pytest.raises(ElementError):
         space.admit_numpy(values)
 
     complex_values = np.ones(space.size, dtype=np.complex128) * (1.0 + 2.0j)

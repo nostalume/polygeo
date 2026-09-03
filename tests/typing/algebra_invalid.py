@@ -1,6 +1,11 @@
 # ty-expect: invalid-argument-type, invalid-argument-type, unresolved-attribute, invalid-argument-type, invalid-argument-type, invalid-argument-type, missing-argument, invalid-argument-type
 
-from polygeo import HomologyGroup, IntegralChainComplex, QQ, analyze_integral_homology
+from polygeo.chain import (
+    HomologyGroup,
+    IntegralChainComplex,
+    QQ,
+    analyze_integral_homology,
+)
 
 
 def invalid_exact_relations(complex_: IntegralChainComplex) -> None:

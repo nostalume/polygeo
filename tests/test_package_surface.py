@@ -1,88 +1,66 @@
-"""Stable public identities, names, and retired-import boundaries."""
+"""Canonical contextual package boundary and public identities."""
 
 from __future__ import annotations
 
-import importlib.util
-
 import polygeo
-from polygeo import _polygeo_native as native
+from polygeo import chain, field, form, geometry, mesh, plot, solve, topology
 
 
-def test_public_mathematical_objects_have_one_package_identity() -> None:
-    for public_name, native_name in (
-        ("Complex", "Complex"),
-        ("SimplexSubset", "SimplexSubset"),
-        ("SimplexSelection", "SimplexSelection"),
-        ("SimplicialError", "SimplicialError"),
-        ("HalfedgeSurface", "HalfedgeSurface"),
-        ("SurfaceCorrespondence", "SurfaceCorrespondence"),
-        ("HalfedgeError", "HalfedgeError"),
-        ("ChainComplex", "ChainComplex"),
-        ("IntegralChainComplex", "ChainComplex"),
-        ("RationalChainComplex", "ChainComplex"),
-        ("CsrRepresentation", "CsrRepresentation"),
-        ("HomologyLimit", "HomologyLimit"),
-        ("IntegralHomology", "IntegralHomology"),
-        ("HomologyGroup", "HomologyGroup"),
-        ("HarmonicOneFormBasis", "HarmonicOneFormBasis"),
-        ("DirectionFieldSingularities", "DirectionFieldSingularities"),
-        ("analyze_integral_homology", "analyze_integral_homology"),
+def test_package_root_exports_only_the_canonical_modules() -> None:
+    assert polygeo.__all__ == [
+        "topology",
+        "chain",
+        "form",
+        "geometry",
+        "solve",
+        "field",
+        "plot",
+        "mesh",
+    ]
+
+
+def test_public_objects_have_one_contextual_identity() -> None:
+    for owner, public_name in (
+        (topology, "Complex"),
+        (topology, "Subset"),
+        (topology, "Selection"),
+        (topology, "HalfedgeSurface"),
+        (chain, "ChainComplex"),
+        (chain, "Csr"),
+        (form, "Space"),
+        (form, "Element"),
+        (form, "Operator"),
+        (geometry, "Geometry"),
+        (geometry, "TriangleSurface"),
+        (solve, "Policy"),
+        (solve, "Prepared"),
+        (field, "HarmonicBasis"),
+        (field, "Direction"),
     ):
-        assert getattr(polygeo, public_name) is getattr(native, native_name)
-
-    for public_object in (
-        polygeo.Complex,
-        polygeo.HalfedgeSurface,
-        polygeo.ChainError,
-        polygeo.ChainComplex,
-        polygeo.CsrRepresentation,
-        polygeo.HomologyError,
-        polygeo.IntegralHomology,
-        polygeo.analyze_integral_homology,
-    ):
-        assert public_object.__module__ == "polygeo"
+        value = getattr(owner, public_name)
+        assert value.__module__ == owner.__name__
 
 
-def test_allocating_boundaries_name_admission_and_owned_copies() -> None:
-    assert hasattr(polygeo.Complex, "from_maximal_simplices")
-    assert not hasattr(polygeo.Complex, "admit_numpy")
-
-    assert hasattr(polygeo.IntegralChain, "to_python_copy")
-    assert not hasattr(polygeo.IntegralChain, "to_python_parts")
-    assert hasattr(polygeo.CsrRepresentation, "to_python_copy")
-    assert hasattr(polygeo.CsrRepresentation, "to_scipy_int64_copy")
-    assert not hasattr(polygeo.CsrRepresentation, "to_python_parts")
-    assert not hasattr(polygeo.CsrRepresentation, "to_scipy_int64")
-
-    for private_name in (
-        "NativeHalfedgeSurface",
-        "NativeSurfaceCorrespondence",
-        "NativeChainComplex",
-        "NativeChainSpace",
-        "NativeChainElement",
-        "NativeLinearMap",
-        "NativeCsrRepresentation",
-        "NativeHomologyError",
-        "NativeIntegralHomology",
-        "NativeHomologyGroup",
-    ):
-        assert not hasattr(native, private_name)
+def test_allocating_operations_name_their_owned_copies() -> None:
+    assert hasattr(topology.Complex, "simplices_numpy_copy")
+    assert hasattr(topology.Subset, "mask_numpy_copy")
+    assert hasattr(topology.Selection, "indices_numpy_copy")
+    assert hasattr(chain.Csr, "to_python_copy")
+    assert hasattr(chain.Csr, "to_scipy_int64_copy")
+    assert hasattr(form.Element, "coefficients_numpy_copy")
+    assert hasattr(geometry.Geometry, "positions_numpy_copy")
+    assert hasattr(geometry.VectorField, "values_numpy_copy")
+    assert hasattr(field.Direction, "ambient_branch_numpy_copy")
+    assert hasattr(field.Singularities, "boundary_turns_python_copy")
 
 
-def test_retired_qualified_modules_are_not_importable() -> None:
-    for qualified_name in (
-        "polygeo._native",
-        "polygeo._topology_runtime",
-        "polygeo.algorithms",
-        "polygeo.chain",
-        "polygeo.geometry",
-        "polygeo.halfedge",
-        "polygeo.homology",
-        "polygeo.numerics",
-        "polygeo.operators",
-        "polygeo.simplicial",
-        "polygeo.solvers",
-        "polygeo.surface",
-        "polygeo.systems",
-    ):
-        assert importlib.util.find_spec(qualified_name) is None
+def test_effect_leaves_are_modules_not_root_aliases() -> None:
+    assert mesh.__all__ == ["MeshError", "load_surface"]
+    assert plot.__all__ == [
+        "PlotError",
+        "geometry",
+        "form",
+        "vectors",
+        "direction",
+        "homology_cycle",
+    ]

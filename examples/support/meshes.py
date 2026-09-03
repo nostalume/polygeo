@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial import Delaunay
 
-from polygeo import Complex, Geometry
+from polygeo.geometry import Geometry
+from polygeo.topology import Complex
 
 
 def icosphere(subdivisions: int, radius: float = 1.0):

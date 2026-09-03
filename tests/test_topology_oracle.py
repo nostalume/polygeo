@@ -7,7 +7,7 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-from polygeo import Complex, SimplicialError, topological_boundary
+from polygeo.topology import Complex, SimplicialError, topological_boundary
 
 from topology_cases import simplex_case, triangle_grid
 from topology_oracle import OracleComplex, OracleError, admit_oracle
@@ -18,12 +18,12 @@ def _assert_topology_equal(public: Complex, oracle: OracleComplex) -> None:
     assert public.dimension == oracle.dimension
     for degree in range(oracle.dimension + 1):
         np.testing.assert_array_equal(
-            public.simplices(degree), oracle.simplices[degree]
+            public.simplices_numpy_copy(degree), oracle.simplices[degree]
         )
         np.testing.assert_array_equal(
-            public.orientations(degree), oracle.orientations[degree]
+            public.orientations_numpy_copy(degree), oracle.orientations[degree]
         )
-        observed = public.boundary_matrix(degree)
+        observed = public.boundary_scipy_copy(degree)
         expected = oracle.boundaries[degree]
         np.testing.assert_array_equal(observed.data, expected.data)
         np.testing.assert_array_equal(observed.indices, expected.indices)
@@ -56,7 +56,7 @@ def test_independent_oracle_does_not_call_public_admission(
 
 def test_independent_oracle_detects_a_wrong_boundary_sign() -> None:
     maximal = np.array([[0, 1, 2]], dtype=np.int64)
-    observed = Complex.from_maximal_simplices(maximal).boundary_matrix(2).toarray()
+    observed = Complex.from_maximal_simplices(maximal).boundary_scipy_copy(2).toarray()
     expected = admit_oracle(maximal).boundaries[2].toarray()
     observed[0, 0] *= -1
 
@@ -112,7 +112,9 @@ def test_independent_oracle_matches_refinements_and_boundary_masks() -> None:
     expected = oracle.regular_boundary()
     observed = topological_boundary(public)
     for degree in range(public.dimension + 1):
-        np.testing.assert_array_equal(observed.mask(degree), expected[degree])
+        np.testing.assert_array_equal(
+            observed.mask_numpy_copy(degree), expected[degree]
+        )
 
 
 def test_independent_oracle_matches_subset_relations_and_purity() -> None:
@@ -135,7 +137,7 @@ def test_independent_oracle_matches_subset_relations_and_purity() -> None:
     ):
         for degree in range(public.dimension + 1):
             np.testing.assert_array_equal(
-                public_result.mask(degree), oracle_result.masks[degree]
+                public_result.mask_numpy_copy(degree), oracle_result.masks[degree]
             )
     for degree in range(public.dimension + 1):
         assert public_subset.is_pure(degree) == oracle_subset.is_pure(degree)

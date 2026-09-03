@@ -13,6 +13,7 @@ useful, and an independently calculated check.
 | `homology.py` | Exact torus homology, Stokes pairing, and cup intersection |
 | `hodge_decomposition.py` | Reconstruction from exact, coexact, and harmonic parts |
 | `connection_and_holonomy.py` | Local versus global holonomy obstruction |
+| `boundary_aligned_direction_field.py` | Order-four boundary alignment, branch choice, and exact singularity evidence |
 
 Launch a study from the repository root:
 

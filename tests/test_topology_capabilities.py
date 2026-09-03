@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from polygeo import Complex, SimplicialError, topological_boundary
-from polygeo import _polygeo_native as _core
+from polygeo import topology as _core
+from polygeo.topology import Complex, SimplicialError, topological_boundary
 
 
 DISK = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
@@ -45,7 +45,7 @@ def test_require_is_query_only_and_domain_operations_do_not_refine() -> None:
     complex_.triangle_manifold()
     complex_.require_triangle()
     np.testing.assert_array_equal(
-        topological_boundary(complex_).mask(1),
+        topological_boundary(complex_).mask_numpy_copy(1),
         [True, False, True, True, True],
     )
 

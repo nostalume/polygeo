@@ -7,7 +7,7 @@ from typing import cast
 import numpy as np
 import pytest
 
-from polygeo import Complex, SimplicialError
+from polygeo.topology import Complex, SimplicialError
 
 
 def test_failure_reason_is_stable_and_read_only() -> None:

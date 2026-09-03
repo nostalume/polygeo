@@ -11,18 +11,18 @@ import polygeo
 
 def test_exact_homology_graph_retains_owners_and_isolates_projections() -> None:
     vertices = np.arange(4, dtype=np.int64)
-    domain = polygeo.Complex.from_maximal_simplices(
+    domain = polygeo.topology.Complex.from_maximal_simplices(
         np.column_stack((vertices, np.roll(vertices, -1)))
     )
     exact = domain.chain_complex()
     boundary = exact.boundary(1)
     source = boundary.source
     target = boundary.target
-    estimate = polygeo.CsrRepresentation.estimate(boundary, polygeo.BigIntEncoding)
-    representation = polygeo.CsrRepresentation.build(
-        boundary, polygeo.BigIntEncoding, estimate.as_limit()
+    estimate = polygeo.chain.Csr.estimate(boundary, polygeo.chain.BigIntEncoding)
+    representation = polygeo.chain.Csr.build(
+        boundary, polygeo.chain.BigIntEncoding, estimate.as_limit()
     )
-    analysis = polygeo.analyze_integral_homology(exact, [1])
+    analysis = polygeo.chain.analyze_integral_homology(exact, [1])
     first_group = analysis[1]
     second_group = analysis[1]
     cycle = first_group.free_cycle(0)

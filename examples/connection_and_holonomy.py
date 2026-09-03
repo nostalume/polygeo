@@ -7,10 +7,11 @@ app = marimo.App()
 @app.cell
 def _():
     import marimo as mo
-    from polygeo import TriangleSurface
+    from polygeo.geometry import TriangleSurface
+    from polygeo.plot import form as plot_form
     from support.meshes import torus
 
-    return TriangleSurface, mo, torus
+    return TriangleSurface, mo, plot_form, torus
 
 
 @app.cell
@@ -28,7 +29,7 @@ def _(mo):
     Evaluate Levi-Civita holonomy on a torus.
 
     ## Visualization
-    Report local and generator errors.
+    Plot one exact dual generator and report local and generator errors.
 
     ## Evaluation
     Contrast local contractible holonomy with global generator obstruction.
@@ -43,8 +44,9 @@ def _(mo):
 def _(TriangleSurface, torus):
     domain, geometry = torus(12, 8)
     surface = TriangleSurface.admit(geometry)
-    cycles = domain.integral_dual_cycle_basis()
-    evidence = surface.levi_civita_connection().holonomy(cycles)
+    cycles = domain.dual_cycles()
+    evidence = surface.levi_civita().holonomy(cycles)
+    generator = domain.binary64_cochain_space(1).realize_integral(cycles.cocycle(0))
     holonomy_evidence = {
         "cycle_rank": cycles.rank,
         "local_error": evidence.local_error,
@@ -53,12 +55,17 @@ def _(TriangleSurface, torus):
         "local_is_flat": evidence.local_error <= evidence.limit,
         "global_is_obstructed": evidence.generator_error > evidence.limit,
     }
-    return holonomy_evidence
+    return generator, geometry, holonomy_evidence
 
 
 @app.cell
-def _(holonomy_evidence, mo):
-    mo.md(f"`{holonomy_evidence}`")
+def _(generator, geometry, holonomy_evidence, mo, plot_form):
+    mo.vstack(
+        [
+            mo.md(f"`{holonomy_evidence}`"),
+            plot_form(geometry, generator, title="First exact dual generator"),
+        ]
+    )
     return
 
 

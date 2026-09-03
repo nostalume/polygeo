@@ -8,9 +8,10 @@ app = marimo.App()
 def _():
     import marimo as mo
     import numpy as np
+    from polygeo.plot import form as plot_form
     from support.meshes import annulus
 
-    return annulus, mo, np
+    return annulus, mo, np, plot_form
 
 
 @app.cell
@@ -28,7 +29,7 @@ def _(mo):
     Construct the metric-owned decomposition problem and solve it.
 
     ## Visualization
-    Compare copied coefficient magnitudes.
+    Compare the source with its exact, coexact, and harmonic components.
 
     ## Evaluation
     Reconstruct the source independently and report component sizes and orthogonality.
@@ -44,13 +45,16 @@ def _(annulus, np):
     domain, geometry = annulus(4, 16)
     space = domain.binary64_cochain_space(1)
     source = space.admit_numpy(np.sin(np.arange(space.size, dtype=np.float64)))
-    problem = geometry.positive_metric().hodge_decomposition(source)
+    problem = geometry.metric().hodge_decomposition(source)
     prepared = problem.prepare()
     workspace = prepared.workspace_for(problem)
     result = prepared.solve(problem, workspace)
+    exact_form = result.exact
+    coexact_form = result.coexact
+    harmonic_form = result.harmonic
     components = tuple(
         value.coefficients_numpy_copy()
-        for value in (result.exact, result.coexact, result.harmonic)
+        for value in (exact_form, coexact_form, harmonic_form)
     )
     reconstructed = sum(components, start=np.zeros(space.size))
     hodge_evidence = {
@@ -60,12 +64,37 @@ def _(annulus, np):
         "component_maxima": tuple(float(np.max(np.abs(value))) for value in components),
         "orthogonality": result.orthogonality_bound,
     }
-    return hodge_evidence
+    return coexact_form, exact_form, geometry, harmonic_form, hodge_evidence, source
 
 
 @app.cell
-def _(hodge_evidence, mo):
-    mo.md(f"`{hodge_evidence}`")
+def _(
+    coexact_form,
+    exact_form,
+    geometry,
+    harmonic_form,
+    hodge_evidence,
+    mo,
+    plot_form,
+    source,
+):
+    mo.vstack(
+        [
+            mo.md(f"`{hodge_evidence}`"),
+            mo.hstack(
+                [
+                    plot_form(geometry, source, title="Source one-form"),
+                    plot_form(geometry, exact_form, title="Exact component"),
+                ]
+            ),
+            mo.hstack(
+                [
+                    plot_form(geometry, coexact_form, title="Coexact component"),
+                    plot_form(geometry, harmonic_form, title="Harmonic component"),
+                ]
+            ),
+        ]
+    )
     return
 
 

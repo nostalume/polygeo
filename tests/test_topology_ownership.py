@@ -9,10 +9,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from polygeo import Complex as NativeComplex
-from polygeo import SimplexSelection as NativeSelection
-from polygeo import SimplexSubset as NativeSubset
-from polygeo import SimplicialError as NativeSimplicialError
+from polygeo.topology import Complex as NativeComplex
+from polygeo.topology import Selection as NativeSelection
+from polygeo.topology import Subset as NativeSubset
+from polygeo.topology import SimplicialError as NativeSimplicialError
 
 
 def _disk() -> NativeComplex:
@@ -59,7 +59,7 @@ def test_all_capabilities_resolve_on_one_owner() -> None:
     owner.require_connected()
     owner.require_with_boundary()
     np.testing.assert_array_equal(
-        owner.boundary_mask(1), [True, False, True, True, True]
+        owner.boundary_mask_numpy_copy(1), [True, False, True, True, True]
     )
 
 
@@ -115,7 +115,7 @@ def test_structured_rejections_preserve_exact_counterexamples() -> None:
     ) == ("vertex_extent", {"declared": 2, "required": 3})
 
     disk = _disk()
-    assert _failure(lambda: disk.boundary_matrix(3)) == (
+    assert _failure(lambda: disk.boundary_scipy_copy(3)) == (
         "degree_outside",
         {"degree": 3},
     )
@@ -186,7 +186,7 @@ def test_subset_copies_admission_and_projection_and_survives_owner() -> None:
     )
     subset = owner.subset(masks)
     masks[0][:] = False
-    exposed = subset.mask(0)
+    exposed = subset.mask_numpy_copy(0)
     exposed[:] = False
     link = subset.link()
     del owner, subset
@@ -194,8 +194,10 @@ def test_subset_copies_admission_and_projection_and_survives_owner() -> None:
 
     assert isinstance(link, NativeSubset)
     assert link.same_members(link)
-    np.testing.assert_array_equal(link.mask(0), [False, True, True, True])
-    np.testing.assert_array_equal(link.mask(1), [False, False, False, True, True])
+    np.testing.assert_array_equal(link.mask_numpy_copy(0), [False, True, True, True])
+    np.testing.assert_array_equal(
+        link.mask_numpy_copy(1), [False, False, False, True, True]
+    )
 
 
 def test_subset_admission_reads_strided_buffers_without_scalar_python_access() -> None:
@@ -208,7 +210,7 @@ def test_subset_admission_reads_strided_buffers_without_scalar_python_access() -
 
     subset = owner.subset(masks)
 
-    np.testing.assert_array_equal(subset.mask(0), [True, True, True, True])
+    np.testing.assert_array_equal(subset.mask_numpy_copy(0), [True, True, True, True])
 
 
 def test_subset_relations_and_foreign_owner_are_exact() -> None:
@@ -224,7 +226,7 @@ def test_subset_relations_and_foreign_owner_are_exact() -> None:
     star = subset.star()
     assert closure.same_members(closure.closure())
     assert subset.is_pure(0)
-    np.testing.assert_array_equal(star.mask(2), [True, True])
+    np.testing.assert_array_equal(star.mask_numpy_copy(2), [True, True])
     foreign = _disk().subset(
         (
             np.zeros(4, dtype=np.bool_),
@@ -242,12 +244,14 @@ def test_canonical_boundary_subset_has_explicit_owned_copy() -> None:
     owner.codimension_one_regular()
     boundary = owner.boundary_subset()
     owned = boundary.owned_copy()
-    exposed = owned.mask(1)
+    exposed = owned.mask_numpy_copy(1)
     exposed[:] = False
 
     assert boundary.same_members(owned)
-    np.testing.assert_array_equal(owned.mask(1), [True, False, True, True, True])
-    np.testing.assert_array_equal(boundary.mask(1), owned.mask(1))
+    np.testing.assert_array_equal(
+        owned.mask_numpy_copy(1), [True, False, True, True, True]
+    )
+    np.testing.assert_array_equal(boundary.mask_numpy_copy(1), owned.mask_numpy_copy(1))
 
 
 def test_selection_is_canonical_copied_and_owner_bound() -> None:
@@ -255,13 +259,13 @@ def test_selection_is_canonical_copied_and_owner_bound() -> None:
     indices = np.array([0, 2, 4], dtype=np.int64)
     selected = owner.selection(1, indices)
     indices[:] = 1
-    exposed = selected.indices()
+    exposed = selected.indices_numpy_copy()
     exposed[:] = 1
     complement = selected.complement()
 
     assert isinstance(selected, NativeSelection)
-    np.testing.assert_array_equal(selected.indices(), [0, 2, 4])
-    np.testing.assert_array_equal(complement.indices(), [1, 3])
+    np.testing.assert_array_equal(selected.indices_numpy_copy(), [0, 2, 4])
+    np.testing.assert_array_equal(complement.indices_numpy_copy(), [1, 3])
     assert selected.same_selection(owner.selection(1, np.array([0, 2, 4])))
     with pytest.raises(NativeSimplicialError) as caught:
         selected.same_selection(_disk().selection(1, np.array([0, 2, 4])))
@@ -276,7 +280,7 @@ def test_selection_admission_reads_strided_buffer_without_scalar_python_access()
 
     selected = owner.selection(1, indices)
 
-    np.testing.assert_array_equal(selected.indices(), [0, 2, 4])
+    np.testing.assert_array_equal(selected.indices_numpy_copy(), [0, 2, 4])
 
 
 @pytest.mark.parametrize(
@@ -297,13 +301,13 @@ def test_selection_admission_accepts_every_fixed_width_integer_dtype(
 ) -> None:
     selected = _disk().selection(1, np.array([0, 2, 4], dtype=dtype))
 
-    np.testing.assert_array_equal(selected.indices(), [0, 2, 4])
+    np.testing.assert_array_equal(selected.indices_numpy_copy(), [0, 2, 4])
 
 
 def test_selection_admission_preserves_shape_domain_and_endian_errors() -> None:
     owner = _disk()
     non_native = owner.selection(1, np.array([0, 2, 4], dtype=">i8"))
-    np.testing.assert_array_equal(non_native.indices(), [0, 2, 4])
+    np.testing.assert_array_equal(non_native.indices_numpy_copy(), [0, 2, 4])
 
     for invalid, reason in (
         (np.array([[0, 2]], dtype=np.int64), "selection_shape"),

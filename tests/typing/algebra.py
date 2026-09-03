@@ -1,10 +1,9 @@
 from fractions import Fraction
 from typing import Literal, assert_type
 
-from polygeo import (
+from polygeo.chain import (
     BigIntEncoding,
-    Complex,
-    CsrRepresentation,
+    Csr,
     HomologyGroup,
     IntegralChain,
     IntegralChainComplex,
@@ -16,6 +15,7 @@ from polygeo import (
     RationalChain,
     analyze_integral_homology,
 )
+from polygeo.topology import Complex
 
 
 def exact_relations(complex_: IntegralChainComplex) -> None:
@@ -36,10 +36,8 @@ def exact_relations(complex_: IntegralChainComplex) -> None:
         boundary.dual().apply(complex_.dual()[0].element({0: 1})),
         IntegralCochain[int],
     )
-    estimate = CsrRepresentation.estimate(boundary, BigIntEncoding)
-    representation = CsrRepresentation.build(
-        boundary, BigIntEncoding, estimate.as_limit()
-    )
+    estimate = Csr.estimate(boundary, BigIntEncoding)
+    representation = Csr.build(boundary, BigIntEncoding, estimate.as_limit())
     assert_type(representation.apply(chain), IntegralChain[int])
 
     rational = complex_.over(QQ)[1].element({0: Fraction(1, 3)})
