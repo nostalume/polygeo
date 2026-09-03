@@ -209,6 +209,7 @@ def _(mo):
 
     reapplied_load := K u_load
     report:
+        infinity_norm(b - M f)
         infinity_norm(reapplied_load - b)
         infinity_norm(u_density - u_load)
         absolute_value(1^T M u_load)
@@ -267,9 +268,11 @@ def _(density_problem, load_problem, prepared, workspace):
 
 
 @app.cell
-def _(density_solution, load, masses, metric, mo, np, potential_form):
+def _(density, density_solution, load, masses, metric, mo, np, potential_form):
     potential = potential_form.coefficients_numpy_copy()
+    density_copy = density.coefficients_numpy_copy()
     load_values = load.coefficients_numpy_copy()
+    mass_action_error = float(np.max(np.abs(load_values - masses * density_copy)))
     reapplied_load = (
         metric.riesz(0)
         .apply(metric.laplacian(0).apply(potential_form))
@@ -277,12 +280,21 @@ def _(density_solution, load, masses, metric, mo, np, potential_form):
     )
     load_compatibility = float(abs(np.sum(load_values)))
     load_residual = float(np.max(np.abs(reapplied_load - load_values)))
-    density_load_agreement = float(
+    density_load_solution_agreement = float(
         np.max(np.abs(density_solution.potential.coefficients_numpy_copy() - potential))
     )
     weighted_gauge = float(abs(masses @ potential))
     potential_range = float(np.ptp(potential))
     evidence_limit = 1.0e-12
+    if not (
+        mass_action_error <= evidence_limit
+        and load_compatibility <= evidence_limit
+        and load_residual <= evidence_limit
+        and density_load_solution_agreement <= evidence_limit
+        and weighted_gauge <= evidence_limit
+        and potential_range > 0.0
+    ):
+        raise RuntimeError("Poisson-study evidence exceeds its declared limits")
 
     mo.md(rf"""
     ## Evidence
@@ -293,16 +305,18 @@ def _(density_solution, load, masses, metric, mo, np, potential_form):
 
     | Certificate | Observed | Required claim | Result |
     |---|---:|---:|---|
+    | Mass action $\lVert b-Mf\rVert_\infty$ | `{mass_action_error:.3e}` | $\leq {evidence_limit:.1e}$ | `{mass_action_error <= evidence_limit}` |
     | Load compatibility $\lvert\mathbf{{1}}^Tb\rvert$ | `{load_compatibility:.3e}` | $\leq {evidence_limit:.1e}$ | `{load_compatibility <= evidence_limit}` |
     | Backward residual $\lVert Ku_{{\mathrm{{load}}}}-b\rVert_\infty$ | `{load_residual:.3e}` | $\leq {evidence_limit:.1e}$ | `{load_residual <= evidence_limit}` |
-    | Density/load solution agreement | `{density_load_agreement:.3e}` | $\leq {evidence_limit:.1e}$ | `{density_load_agreement <= evidence_limit}` |
+    | Density/load solution agreement | `{density_load_solution_agreement:.3e}` | $\leq {evidence_limit:.1e}$ | `{density_load_solution_agreement <= evidence_limit}` |
     | Weighted gauge $\lvert\mathbf{{1}}^TMu_{{\mathrm{{load}}}}\rvert$ | `{weighted_gauge:.3e}` | $\leq {evidence_limit:.1e}$ | `{weighted_gauge <= evidence_limit}` |
     | Potential range | `{potential_range:.6f}` | $>0$ | `{potential_range > 0.0}` |
 
-    The first row checks solvability, the second checks the integrated-load
-    equation, the third checks semantic coincidence of the two right-hand-side
-    descriptions, and the fourth checks the chosen representative. These are
-    backward algebraic certificates, not forward physical-accuracy estimates.
+    The first row computes the density-to-load transformation by both routes. The
+    next two check solvability and the integrated-load equation; the fourth checks
+    coincidence of the resulting potentials; and the fifth checks the chosen
+    representative. These are algebraic certificates, not forward
+    physical-accuracy estimates.
     """)
     return
 
@@ -343,8 +357,8 @@ def _(mo):
     the weighted gauge removes the remaining additive ambiguity. The small
     residuals establish that this finite system was solved consistently. They do
     not establish convergence under refinement or accuracy for a chosen continuum
-    source. The next study composes mass, stiffness, gradient, normalization, and
-    Poisson operations into the heat method for distance.
+    source. The heat-distance study composes mass, stiffness, gradient,
+    normalization, and Poisson operations into a distance approximation.
     """)
     return
 
