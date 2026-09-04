@@ -5,15 +5,30 @@ discrete exterior calculus for finite simplicial complexes. It provides typed
 topology, exact chains, forms, Euclidean geometry, numerical solves, and surface
 fields through contextual `polygeo` modules.
 
-PolyGeo requires Python 3.14. Version 0.1.0 is experimental: the implemented paths are tested, but the public API and numerical policies are not yet stable.
+PolyGeo requires Python 3.14 or later. Version 0.1.0 is experimental: the
+implemented paths are tested, but the public API and numerical policies are not
+yet stable.
 
-## Install from source
+## Install
 
-PolyGeo does not yet publish packages to PyPI or crates.io. Install
-[Rust 1.97.1](https://www.rust-lang.org/tools/install) and
-[uv](https://docs.astral.sh/uv/) to build the Python package from source. The
-pinned Rust toolchain compiles the `polygeo-core` library and the private
-`polygeo-py` adapter bundled into the Python extension:
+Install the Python package from PyPI with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv add polygeo
+# include both optional feature sets
+uv add "polygeo[mesh,plot]"
+```
+
+Rust consumers can add the mathematical core directly:
+
+```bash
+cargo add polygeo-core
+```
+
+To work from a source checkout, install
+[Rust 1.97.1](https://www.rust-lang.org/tools/install) and uv. The pinned Rust
+toolchain compiles `polygeo-core` and the private `polygeo-py` adapter bundled
+into the Python extension:
 
 ```bash
 git clone https://github.com/nostalume/polygeo.git
@@ -21,7 +36,7 @@ cd polygeo
 uv sync
 ```
 
-Optional dependencies are separate:
+Optional dependencies remain separate in a source checkout:
 
 ```bash
 uv sync --extra mesh

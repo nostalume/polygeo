@@ -50,28 +50,30 @@ Source ownership and distribution ownership are distinct:
 | Rust `polygeo-core` | `rust/polygeo-core` | The Rust mathematical library only |
 | `polygeo-py` | `rust/polygeo-py` | No independent distribution; it is a private Python build component |
 
-Neither public distribution has a registry release yet. Source installation is
-therefore the only documented installation path. A release keeps the versions
+Both public distributions have registry releases: `polygeo` on PyPI and
+`polygeo-core` on crates.io. A subsequent automatic release keeps the versions
 in `pyproject.toml`, `rust/polygeo-core/Cargo.toml`, and
-`rust/polygeo-py/Cargo.toml` equal to the `vX.Y.Z` tag.
+`rust/polygeo-py/Cargo.toml` equal to the approved `vX.Y.Z` tag.
 
 ```text
 source revision
-  -> read-only verification on Linux and Windows
-  -> local wheel and source-distribution smoke test
-  -> disposable verification artifacts
+  -> read-only CI on Linux and Windows
+  -> installed wheel and source-distribution smoke tests
 
-approved version tag (not yet enabled)
-  -> independently tested Python artifacts and packaged Rust core
-  -> protected, short-lived registry authority
-  -> PyPI polygeo and crates.io polygeo-core
+approved version tag
+  -> stable-ABI Linux and Windows wheels plus one source distribution
+  -> verified Python bundle and packaged Rust core
+  -> protected GitHub environments with short-lived OIDC authority
+  -> crates.io polygeo-core, then PyPI polygeo without rebuilding
 ```
 
 `.github/workflows/ci.yml` owns credential-free checks and never publishes.
-The future publication workflow must receive registry authority only after its
-artifacts pass, and the Python publishing job must not rebuild them. Supporting
-another Python version, operating system, architecture, stable ABI, or
-free-threaded runtime requires matching build and installed-artifact evidence.
+`.github/workflows/publish.yml` is also verification-only when manually
+dispatched; an approved matching version tag activates its protected publishing
+jobs only after the artifacts pass. Its `cp314-abi3` wheels admit GIL-enabled
+CPython 3.14 and later on Linux x86-64 and Windows x86-64. Supporting another
+operating system, architecture, or free-threaded runtime requires matching build
+and installed-artifact evidence.
 
 ## Topology and exact algebra
 
