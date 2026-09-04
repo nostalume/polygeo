@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 num-bigint.workspace = true
 numpy.workspace = true
 polygeo-core = { version = "0.1.0", path = "../polygeo-core" }
-pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3 = { workspace = true, features = ["abi3-py314", "extension-module"] }
 
 [lints]
 workspace = true
