@@ -29,7 +29,7 @@ def _(mo):
     We need only oriented tangent planes, barycentric coordinates on a triangle,
     and linear least squares. The source is an oriented triangle disk in
     $\mathbb R^3$; the unknown target position of vertex $i$ is
-    $q_i=(u_i,v_i)\in\mathbb R^2$.
+    $q_i=(u_i,v_i)\in\mathbb R^2$. No earlier study is required.
 
     ## 1. Smooth conformality is a commutation equation
 

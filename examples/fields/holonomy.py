@@ -27,8 +27,8 @@ def _(mo):
     from noncontractible periods?
 
     We assume an oriented, closed, connected triangle surface in three-dimensional
-    Euclidean space. The previous topology study supplies exact integral cocycles;
-    here they become signed crossing data for closed walks in the dual graph.
+    Euclidean space. The homology study supplies exact integral cocycles; here
+    they become signed crossing data for closed walks in the dual graph.
     Angles always represent elements of the circle, so equality means equality
     modulo \(2\pi\), not equality of arbitrary real representatives.
     """)

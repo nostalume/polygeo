@@ -141,11 +141,12 @@ ownership, data flow, invariants, optional boundaries, and limitations.
 ## Current limitations
 
 - Python 3.14 and the pinned Rust toolchain are required for source builds.
-- Development CI currently exercises Linux and Windows; no binary distribution
-  support is claimed before registry artifacts exist.
+- Published stable-ABI wheels currently cover GIL-enabled CPython 3.14 and later
+  on Linux x86-64 and Windows x86-64. Other operating systems, architectures, and
+  free-threaded runtimes require source builds and have no binary compatibility
+  claim.
 - Mesh input accepts one triangular Trimesh payload.
 - The native executor is currently sequential.
-- No stable-ABI or free-threaded-Python guarantee is made.
 - Surface connections require closed, connected, oriented triangle manifolds
   embedded in three dimensions.
 

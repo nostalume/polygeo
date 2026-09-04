@@ -22,9 +22,9 @@ def _(mo):
 
     ## Question and prerequisites
 
-    How does a metric split one discrete one-form into exact, coexact, and
-    harmonic parts, and how does topology predict the number of harmonic
-    directions before any metric solve?
+    How does a metric split one discrete one-form into exact, coexact, and harmonic
+    parts, and how does topology predict their dimension before any metric solve?
+
     We use the chain/cochain distinction from the homology lesson, a positive
     diagonal discrete Hodge star, exterior differentiation, and finite-dimensional
     least squares. The target decomposition is

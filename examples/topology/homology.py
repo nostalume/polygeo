@@ -28,7 +28,8 @@ def _(mo):
     We use finite oriented simplices and integer coefficients. No metric,
     floating-point tolerance, or embedding is needed for the topology. The
     Euclidean torus appears only after every algebraic claim has been checked,
-    when two selected cycle representatives are drawn.
+    when two selected cycle representatives are drawn. No earlier study is
+    required.
     """)
     return
 
@@ -138,10 +139,10 @@ def _(mo):
 
     The coboundary is forced by asking the dual operation to consume the boundary
     of the same chain. For \(\alpha\in C^k\) and \(c\in C_{k+1}\), define
-    \(\delta\alpha=\alpha\circ\partial_{k+1}\). Evaluating both composites gives
+    \(d^k\alpha=\alpha\circ\partial_{k+1}\). Evaluating both composites gives
 
     \[
-    \langle\delta\alpha,c\rangle
+    \langle d^k\alpha,c\rangle
       =(\alpha\circ\partial_{k+1})(c)
       =\alpha(\partial_{k+1}c)
       =\langle\alpha,\partial_{k+1}c\rangle.
@@ -150,12 +151,12 @@ def _(mo):
     This is the exact chain/cochain Stokes identity. Moreover,
 
     \[
-    \delta^{k+1}\delta^k\alpha
+    d^{k+1}d^k\alpha
       =\alpha\circ\partial_{k+1}\circ\partial_{k+2}
       =0,
     \]
 
-    so cocycles \(\ker\delta\) also form a complex. The experiment chooses one
+    so cocycles \(\ker d\) also form a complex. The experiment chooses one
     edge cochain and one face whose two Stokes evaluations are equal and nonzero;
     zero would check the syntax but would not expose the sign.
     """)
